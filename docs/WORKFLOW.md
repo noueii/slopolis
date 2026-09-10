@@ -14,7 +14,7 @@ apps/server/         # FastAPI backend (added later)
 apps/worker/         # ARQ worker (added later)
 packages/            # shared code (added later)
 docs/specification/  # versioned specs
-designs/             # mock design artifacts
+.artifact/           # mock design artifacts (generated, gitignored)
 ```
 
 ## Spec versions
@@ -26,7 +26,7 @@ designs/             # mock design artifacts
 1. **Spec** — write or update `docs/specification/vN/features/NN-slug.md`.
 2. **Contract** — add the feature's API types to `apps/web/src/api/contract.ts`.
 3. **Mock** — add MSW handlers in `apps/web/src/mocks/<feature>.ts` with realistic data plus loading, empty, and error states.
-4. **Design** — build the UI under `apps/web/src/features/<feature>/`; iterate interactively; keep `brief.md`, `prompt.md`, `critique.md`, and `screenshot.png` in `designs/<slug>/`.
+4. **Design** — build the UI under `apps/web/src/features/<feature>/`; iterate interactively; keep `brief.md`, `prompt.md`, `critique.md`, and `screenshot.png` in `.artifact/<slug>/` (gitignored, not committed).
 5. **Approve** — review the running mock in a browser, on desktop and mobile.
 6. **Wire** — implement the backend to the contract, unregister the feature's mock handlers, and delete the mock.
 7. **Verify** — add a contract test and a smoke test.

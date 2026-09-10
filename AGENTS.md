@@ -4,7 +4,7 @@ Read `docs/WORKFLOW.md` before contributing.
 
 - **Specs:** `docs/specification/vN/` (v1 is the MVP), one file per feature.
 - **Frontend:** `apps/web/` — React + Vite + Tailwind + shadcn. Mock data via MSW in `src/mocks/`.
-- **Design artifacts:** `designs/`.
+- **Design artifacts:** `.artifact/` (generated mockups; gitignored, never committed).
 - **Non-negotiables:** request-level mocking only; the UI depends on `src/api/contract.ts`; delete mocks when a feature is wired; one worktree per feature; Conventional Commits; never commit secrets.
 
 ## Quick commands

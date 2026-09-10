@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+#
+# post-checkout — bootstrap a freshly created git worktree.
+#
+# `git worktree add` fires this hook inside the new worktree. Local
+# (gitignored) environment files are not checked out by git, so this copies
+# them from the primary checkout to make the worktree immediately runnable.
+# Ordinary branch checkouts are ignored.
+#
+# Enable once per clone:
+#   git config core.hooksPath .githooks
+#
+# Files copied from the primary checkout (any depth, examples/templates
+# excluded): .env, .env.*, .envrc
+
+set -euo pipefail
+
+# A fresh checkout (new worktree or clone) has a null previous HEAD; an
+# ordinary branch switch does not.
+null_oid="0000000000000000000000000000000000000000"
+case "${1:-}" in
+  "$null_oid" | "$null_oid$null_oid") ;;
+  *) exit 0 ;;
+esac
+
+root="$(git rev-parse --show-toplevel)"
+common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+[ -n "$common" ] || common="$(cd "$(git rev-parse --git-common-dir)" && pwd -P)"
+primary="$(cd "$(dirname "$common")" && pwd -P)"
+root="$(cd "$root" && pwd -P)"
+
+# The primary checkout has nothing to copy from itself.
+[ "$root" != "$primary" ] || exit 0
+
+# Directories that never hold worktree configuration.
+prune=(.git node_modules .venv venv .tox dist build out .next .nuxt .output
+  target vendor .cache __pycache__ .gradle .terraform .idea .vscode coverage)
+find_expr=()
+for dir in "${prune[@]}"; do
+  find_expr+=( -name "$dir" -o )
+done
+find_expr=( \( -type d \( "${find_expr[@]}" -false \) -prune \) )
+
+copied=0
+while IFS= read -r -d '' file; do
+  base="${file##*/}"
+  case "$base" in
+    *.example | *.sample | *.template | *.dist | *.default) continue ;;
+    *.example.* | *.sample.* | *.template.*) continue ;;
+  esac
+  dest="$root/${file#"$primary"/}"
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    continue
+  fi
+  mkdir -p -- "$(dirname "$dest")"
+  cp -p -- "$file" "$dest"
+  copied=$((copied + 1))
+done < <(find "$primary" "${find_expr[@]}" -o -type f \
+  \( -name '.env' -o -name '.env.*' -o -name '.envrc' \) -print0 2>/dev/null)
+
+if [ "$copied" -gt 0 ]; then
+  printf 'worktree-bootstrap: copied %d local config file(s) from %s\n' \
+    "$copied" "$primary"
+fi

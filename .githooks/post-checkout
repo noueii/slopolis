@@ -2,16 +2,16 @@
 #
 # post-checkout — bootstrap a freshly created git worktree.
 #
-# `git worktree add` fires this hook inside the new worktree. Local
-# (gitignored) environment files are not checked out by git, so this copies
-# them from the primary checkout to make the worktree immediately runnable.
-# Ordinary branch checkouts are ignored.
+# `git worktree add` fires this hook inside the new worktree. Git does not
+# check out gitignored local state, so this:
+#   1. copies local environment files (.env, .env.*, .envrc) from the primary
+#      checkout, and
+#   2. installs workspace dependencies,
+# so the worktree is immediately runnable. Ordinary branch checkouts are
+# ignored.
 #
 # Enable once per clone:
 #   git config core.hooksPath .githooks
-#
-# Files copied from the primary checkout (any depth, examples/templates
-# excluded): .env, .env.*, .envrc
 
 set -euo pipefail
 
@@ -29,9 +29,12 @@ common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || t
 primary="$(cd "$(dirname "$common")" && pwd -P)"
 root="$(cd "$root" && pwd -P)"
 
-# The primary checkout has nothing to copy from itself.
+# The primary checkout has nothing to bootstrap from itself.
 [ "$root" != "$primary" ] || exit 0
 
+status=0
+
+# --- 1. local environment files ---------------------------------------------
 # Directories that never hold worktree configuration.
 prune=(.git node_modules .venv venv .tox dist build out .next .nuxt .output
   target vendor .cache __pycache__ .gradle .terraform .idea .vscode coverage)
@@ -62,3 +65,25 @@ if [ "$copied" -gt 0 ]; then
   printf 'worktree-bootstrap: copied %d local config file(s) from %s\n' \
     "$copied" "$primary"
 fi
+
+# --- 2. dependencies ---------------------------------------------------------
+# Dependencies are gitignored, so every new worktree installs its own.
+# Add one block per workspace as the monorepo grows (e.g. apps/server with
+# `uv sync`, packages/* with bun).
+
+if [ -f "$root/apps/web/package.json" ]; then
+  if command -v bun >/dev/null 2>&1; then
+    printf 'worktree-bootstrap: installing apps/web dependencies (bun install)...\n'
+    if ( cd "$root/apps/web" && bun install ); then
+      printf 'worktree-bootstrap: apps/web ready\n'
+    else
+      printf 'worktree-bootstrap: warning: bun install failed in apps/web\n' >&2
+      status=1
+    fi
+  else
+    printf 'worktree-bootstrap: bun not found; run "bun install" in apps/web\n' >&2
+    status=1
+  fi
+fi
+
+exit "$status"

@@ -1,2 +1,5 @@
 # Agent session state (OhMyOpenCode)
 .omo/
+
+# Generated artifacts (untracked)
+.artifact/

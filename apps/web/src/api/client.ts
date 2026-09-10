@@ -66,9 +66,9 @@ export function getMockScenario(): MockScenario {
  * (`vite.config.ts`) — see `make dev-mock` / `make dev-api`.
  */
 export function isMockModeEnabled(): boolean {
-  const flag = import.meta.env.VITE_MOCK
-  if (flag === "0") return false
-  if (flag === "1") return true
+  const mode = import.meta.env.VITE_MOCK
+  if (mode === "off") return false
+  if (mode === "server" || mode === "worker") return true
   return import.meta.env.DEV
 }
 

@@ -10,6 +10,7 @@ Read `docs/WORKFLOW.md` before contributing.
 ## Quick commands
 - `make dev-mock` — web app + standalone mock API (default for UI work)
 - `make dev-api` — web app + real API (once `apps/server` exists)
+- `make dev-worker` — web app only, in-browser mock worker (no server needed)
 - `make mock` / `make api` — run one server on its own
 - `cd apps/web && bun install` — install web deps
 

@@ -43,8 +43,8 @@ wt-config: ## Bootstrap the current worktree from the primary checkout
 MOCK_PORT ?= 5174
 MOCK_API  ?= http://localhost:$(MOCK_PORT)
 REAL_API  ?= http://localhost:8000
+MOCK_MODE ?= server
 API_TARGET ?= $(MOCK_API)
-MOCK ?= 1
 
 .PHONY: mock
 mock: ## Run the standalone mock API server
@@ -59,16 +59,24 @@ api: ## Run the real API server (apps/server — not implemented yet)
 	fi
 
 .PHONY: dev
-dev: ## Run the web dev server (proxies /api to API_TARGET)
-	cd apps/web && VITE_API_PROXY_TARGET="$(API_TARGET)" VITE_MOCK="$(MOCK)" bun run dev
+dev: ## Run the web dev server; MOCK_MODE=server|worker|off
+	cd apps/web && VITE_API_PROXY_TARGET="$(API_TARGET)" VITE_MOCK="$(MOCK_MODE)" bun run dev
 
 .PHONY: dev-mock
-dev-mock: ## Run the mock API + web dev server together
-	$(MAKE) API_TARGET=$(MOCK_API) MOCK=1 -j2 mock dev
+dev-mock: ## Run the standalone mock API + web dev server together
+	$(MAKE) API_TARGET=$(MOCK_API) MOCK_MODE=server -j2 mock dev
+
+.PHONY: dev-worker
+dev-worker: ## Run the web dev server with the in-browser mock worker (no server needed)
+	$(MAKE) MOCK_MODE=worker dev
 
 .PHONY: dev-api
 dev-api: ## Run the real API + web dev server together
-	$(MAKE) API_TARGET=$(REAL_API) MOCK=0 -j2 api dev
+	$(MAKE) API_TARGET=$(REAL_API) MOCK_MODE=off -j2 api dev
+
+.PHONY: preview-worker
+preview-worker: ## Build + preview the web app with the in-browser mock worker (no server)
+	cd apps/web && VITE_MOCK=worker bun run build && bun run preview
 
 ##@ Help
 

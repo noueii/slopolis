@@ -59,9 +59,10 @@ docs/specification/  # versioned specs
 - Web deps: `cd apps/web && bun install`
 - `make dev-mock` — web app + standalone mock API (default for UI work)
 - `make dev-api` — web app + real API (once `apps/server` exists)
-- `make dev` — web app only; `/api` is proxied to `API_TARGET`
+- `make dev-worker` — web app only, in-browser mock worker (no server needed)
+- `make dev` — web app only; `MOCK_MODE=server|worker|off`, `/api` proxied for server/off
 - `make mock` / `make api` — run just the mock / real API server
 - Web tooling: the web app uses **Bun** as its package manager and dev/build runner (`bun install`, `bun run dev`, `bun run build`).
 - Web tests: use **Vitest**, run through Bun (e.g. `bunx vitest`). Do not use `bun test`.
-- Mock vs real: the dev server proxies `/api` to `API_TARGET` — the mock API on `:5174` by default, the real API on `:8000`.
+- Mock vs real: `MOCK_MODE=server` proxies `/api` to the mock API (`:5174`), `off` proxies to the real API (`:8000`), and `worker` serves mocks in-browser with no server.
 - Backend and worker commands are added in later phases.

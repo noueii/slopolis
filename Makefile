@@ -4,17 +4,17 @@ SHELL := bash
 
 ##@ Bootstrap
 
-.PHONY: worktree-config
-worktree-config: ## Bootstrap the current worktree from the primary checkout
+.PHONY: wt-config
+wt-config: ## Bootstrap the current worktree from the primary checkout
 	@set -euo pipefail; \
-	git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "worktree-config: not inside a git work tree" >&2; exit 1; }; \
+	git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "wt-config: not inside a git work tree" >&2; exit 1; }; \
 	root="$$(git rev-parse --show-toplevel)"; \
 	common="$$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"; \
 	[ -n "$$common" ] || common="$$(cd "$$(git rev-parse --git-common-dir)" && pwd -P)"; \
 	primary="$$(cd "$$(dirname "$$common")" && pwd -P)"; \
 	root="$$(cd "$$root" && pwd -P)"; \
-	if [ "$$root" = "$$primary" ]; then echo "worktree-config: already in the primary checkout"; exit 0; fi; \
-	echo "worktree-config: bootstrapping $$root from $$primary"; \
+	if [ "$$root" = "$$primary" ]; then echo "wt-config: already in the primary checkout"; exit 0; fi; \
+	echo "wt-config: bootstrapping $$root from $$primary"; \
 	copied=0; \
 	while IFS= read -r -d '' file; do \
 		base="$${file##*/}"; \
@@ -27,16 +27,16 @@ worktree-config: ## Bootstrap the current worktree from the primary checkout
 	done < <(find "$$primary" \
 		\( -type d \( -name .git -o -name node_modules -o -name .venv -o -name venv -o -name dist -o -name build -o -name .next -o -name target -o -name vendor -o -name __pycache__ -o -name .cache \) -prune \) \
 		-o -type f \( -name '.env' -o -name '.env.*' -o -name '.envrc' \) -print0 2>/dev/null); \
-	if [ "$$copied" -gt 0 ]; then echo "worktree-config: copied $$copied config file(s)"; fi; \
+	if [ "$$copied" -gt 0 ]; then echo "wt-config: copied $$copied config file(s)"; fi; \
 	if [ -f "$$root/apps/web/package.json" ]; then \
 		if command -v bun >/dev/null 2>&1; then \
-			echo "worktree-config: bun install in apps/web"; \
+			echo "wt-config: bun install in apps/web"; \
 			( cd "$$root/apps/web" && bun install ); \
 		else \
-			echo "worktree-config: bun not found; run 'bun install' in apps/web" >&2; exit 1; \
+			echo "wt-config: bun not found; run 'bun install' in apps/web" >&2; exit 1; \
 		fi; \
 	fi; \
-	echo "worktree-config: done"
+	echo "wt-config: done"
 
 ##@ Help
 

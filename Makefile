@@ -38,6 +38,12 @@ wt-config: ## Bootstrap the current worktree from the primary checkout
 	fi; \
 	echo "wt-config: done"
 
+##@ Development
+
+.PHONY: dev
+dev: ## Run the web dev server
+	cd apps/web && bun run dev
+
 ##@ Help
 
 .PHONY: help

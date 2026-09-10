@@ -1,0 +1,318 @@
+/**
+ * slopolis API contract (v1).
+ *
+ * This file is the single source of truth the UI is allowed to depend on.
+ * The same shapes will be produced by the FastAPI OpenAPI schema in later
+ * phases; the MSW layer in `src/mocks/` only *serves* these shapes and is
+ * never imported by UI code.
+ */
+
+/** Lifecycle of a whole review session (spec 10.5 / 10.8). */
+export type SessionStatus = "queued" | "running" | "done" | "failed" | "cancelled"
+
+/** Lifecycle of one PR target inside a session. */
+export type TargetStatus =
+  | "queued"
+  | "running"
+  | "done"
+  | "failed"
+  | "cancelled"
+  | "skipped"
+
+/** Finding severities produced by the review harness (spec 10.6). */
+export type Severity = "info" | "warning" | "error" | "critical"
+
+export interface RepositoryRef {
+  id: string
+  /** `owner/name`, e.g. `acme/api-gateway`. */
+  fullName: string
+  private: boolean
+  defaultBranch?: string
+}
+
+export interface UserRef {
+  id: string
+  /** GitHub login without the leading `@`. */
+  handle: string
+  name: string
+  avatarUrl?: string
+}
+
+/** One pull request within a session. */
+export interface SessionTarget {
+  id: string
+  repository: RepositoryRef
+  /** PR number. */
+  number: number
+  title: string
+  url: string
+  status: TargetStatus
+  findingsCount: number
+  tokens: number
+  costUsd: number
+  durationMs?: number
+}
+
+/** A single submission: one or more PRs plus an optional prompt. */
+export interface ReviewSession {
+  id: string
+  /** Auto-named from targets, e.g. `acme/api-gateway#142 +2 more`. */
+  name: string
+  status: SessionStatus
+  /** Model id assigned to the built-in review role. */
+  model: string
+  /** Display label for the provider behind the model. */
+  provider: string
+  triggeredBy: UserRef
+  createdAt: string
+  startedAt?: string
+  finishedAt?: string
+  durationMs?: number
+  targets: SessionTarget[]
+  /** Convenience aggregates over `targets`. */
+  targetCount: number
+  tokens: number
+  costUsd: number
+  findingsCount: number
+  prompt?: string
+}
+
+export type SessionSort =
+  | "created_desc"
+  | "created_asc"
+  | "cost_desc"
+  | "tokens_desc"
+
+export type DateRangePreset = "all" | "24h" | "7d" | "30d" | "90d"
+
+export interface SessionListParams {
+  /** Free-text search across session name, repos, PRs and users. */
+  q?: string
+  /** Repository full name, or omitted for all. */
+  repo?: string
+  /** User handle, or omitted for all. */
+  user?: string
+  status?: SessionStatus
+  range?: DateRangePreset
+  page?: number
+  pageSize?: number
+  sort?: SessionSort
+}
+
+export interface Paginated<T> {
+  items: T[]
+  page: number
+  pageSize: number
+  total: number
+  totalPages: number
+}
+
+export interface FilterOption {
+  value: string
+  label: string
+  /** Optional right-aligned hint, e.g. a count or PR count. */
+  hint?: string
+}
+
+export interface SessionFilterOptions {
+  repositories: FilterOption[]
+  users: FilterOption[]
+  statuses: FilterOption[]
+  models: FilterOption[]
+}
+
+export interface SessionStats {
+  totalSessions: number
+  running: number
+  failed: number
+  tokens: number
+  costUsd: number
+}
+
+/** A repository connected through the GitHub App installation (spec 10.1). */
+export interface RepositorySummary {
+  id: string
+  /** `owner/name`, e.g. `acme/api-gateway`. */
+  fullName: string
+  private: boolean
+  defaultBranch: string
+  /** Open pull requests discovered for this repository. */
+  openPrCount: number
+  lastActivityAt: string
+  /** Whether the GitHub App can still read the repository. */
+  connected: boolean
+}
+
+export interface RepositoryListResponse {
+  items: RepositorySummary[]
+}
+
+/** Rolled-up CI status for an open pull request. */
+export interface PullRequestChecks {
+  state: "passing" | "failing" | "pending" | "none"
+  /** Total check runs reported for the PR head. */
+  total: number
+  /** How many of them succeeded. */
+  passing: number
+}
+
+/**
+ * An open pull request discovered for a connected repository. This is the
+ * primary selection surface for New Review (spec 10.1 / 10.4); pasting a URL
+ * remains a secondary affordance that resolves to the same shape.
+ */
+export interface OpenPullRequest {
+  id: string
+  repository: RepositoryRef
+  number: number
+  title: string
+  url: string
+  author: UserRef
+  updatedAt: string
+  draft: boolean
+  comments: number
+  changedFiles: number
+  additions: number
+  deletions: number
+  checks: PullRequestChecks
+}
+
+/** Open pull requests for one connected repository. */
+export interface RepositoryPullRequestsResponse {
+  repository: RepositorySummary
+  /** Open PRs, most recently updated first. */
+  pullRequests: OpenPullRequest[]
+}
+
+/** A session target that is still executing (spec 10.5 / 10.8). */
+export interface LiveSession {
+  id: string
+  name: string
+  status: Extract<SessionStatus, "queued" | "running">
+  repository: RepositoryRef
+  number: number
+  /** `owner/name#123` convenience label. */
+  prLabel: string
+  /** Title of the pull request under review. */
+  title: string
+  /** Canonical GitHub URL for the pull request. */
+  url: string
+  model: string
+  provider: string
+  /** Whole-session completion, 0–100. */
+  progress: number
+  /** Human-readable current step, e.g. `Scanning diff (3/5 files)`. */
+  step: string
+  startedAt: string
+  /** Elapsed wall-clock time at response time; the UI may keep ticking. */
+  elapsedMs: number
+}
+
+/** Aggregates for the dashboard analytics strip (spec 10.9 usage). */
+export interface DashboardSummary {
+  /** Echoes the active scope, e.g. `All repositories` or `acme/api-gateway`. */
+  scope: string
+  totalSessions: number
+  running: number
+  failed: number
+  spendUsd: number
+  /** Total tokens attributed across the scope. */
+  tokens: number
+}
+
+/** Compact history entry rendered as a conversation row (spec 10.8). */
+export interface DashboardSession {
+  id: string
+  name: string
+  status: SessionStatus
+  model: string
+  provider: string
+  prompt?: string
+  createdAt: string
+  finishedAt?: string
+  targets: SessionTarget[]
+  targetCount: number
+  findingsCount: number
+  costUsd: number
+}
+
+export interface DashboardData {
+  scope: string
+  summary: DashboardSummary
+  /** Only `queued`/`running` sessions, newest first. */
+  running: LiveSession[]
+  /** Recent sessions in scope, newest first. */
+  recent: DashboardSession[]
+  generatedAt: string
+}
+
+export interface DashboardParams {
+  /** Repository full name, or omitted for every connected repository. */
+  repo?: string
+  /** Max history entries to return. */
+  limit?: number
+}
+
+/** One PR resolved from a pasted link. */
+export interface PrReference {
+  url: string
+  repository: RepositoryRef
+  number: number
+  title: string
+}
+
+export interface PreflightRequest {
+  prUrls: string[]
+}
+
+export interface PreflightResult {
+  valid: PrReference[]
+  invalid: string[]
+  /** Duplicate links collapsed, cross-repo notices, unknown repos, etc. */
+  notices: string[]
+}
+
+/** One selectable model in the workspace catalog (spec 10.2). */
+export interface ModelOption {
+  id: string
+  provider: string
+}
+
+/**
+ * Workspace model selection for New Review. `auto` is a UI-level sentinel that
+ * resolves to `defaultModelId` on the server.
+ */
+export interface ModelCatalog {
+  /** Model id `auto` resolves to. */
+  defaultModelId: string
+  defaultProvider: string
+  models: ModelOption[]
+}
+
+export interface CreateReviewRequest {
+  prUrls: string[]
+  prompt?: string
+  /** Model id for the review role, or `auto` for the workspace default. */
+  model?: string
+}
+
+/** The session produced by a successful submission. */
+export interface CreatedSession {
+  id: string
+  name: string
+  status: SessionStatus
+  model: string
+  provider: string
+  createdAt: string
+  targetCount: number
+  prompt?: string
+}
+
+/** Standard error envelope returned by the API on non-2xx responses. */
+export interface ApiErrorBody {
+  error: {
+    code: string
+    message: string
+    detail?: string
+  }
+}

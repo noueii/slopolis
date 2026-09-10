@@ -60,11 +60,16 @@ export function getMockScenario(): MockScenario {
 }
 
 /**
- * Whether request mocking is expected to be active. Mirrors the bootstrap in
- * `main.tsx`: dev builds, or any build with `VITE_MOCK=1`.
+ * Whether the app is talking to the mock API. Controls the mock-data menu:
+ * `VITE_MOCK=0` forces it off, `VITE_MOCK=1` forces it on, otherwise it is on
+ * in development. The actual mock/real swap happens at the dev proxy
+ * (`vite.config.ts`) — see `make dev-mock` / `make dev-api`.
  */
 export function isMockModeEnabled(): boolean {
-  return import.meta.env.DEV || import.meta.env.VITE_MOCK === "1"
+  const flag = import.meta.env.VITE_MOCK
+  if (flag === "0") return false
+  if (flag === "1") return true
+  return import.meta.env.DEV
 }
 
 export class ApiError extends Error {

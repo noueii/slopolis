@@ -8,6 +8,9 @@ Read `docs/WORKFLOW.md` before contributing.
 - **Non-negotiables:** request-level mocking only; the UI depends on `src/api/contract.ts`; delete mocks when a feature is wired; one worktree per feature; Conventional Commits; never commit secrets.
 
 ## Quick commands
-- `cd apps/web && bun install && bun run dev`
+- `make dev-mock` — web app + standalone mock API (default for UI work)
+- `make dev-api` — web app + real API (once `apps/server` exists)
+- `make mock` / `make api` — run one server on its own
+- `cd apps/web && bun install` — install web deps
 
 The web app uses **Bun** as its package manager and dev/build runner. Tests use **Vitest**, run through Bun (e.g. `bunx vitest`); do not use `bun test`.

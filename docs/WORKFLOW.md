@@ -33,6 +33,7 @@ docs/specification/  # versioned specs
 
 ## Mocking policy
 - Request-level mocking via **MSW** only.
+- The **standalone mock API** (`apps/web/src/mocks/server.ts`) serves the handlers over HTTP; the UI only ever calls `/api`.
 - The UI never imports from `src/mocks/`.
 - Every mock simulates success, loading, empty, and error states.
 - Delete a feature's mock once that feature is wired.
@@ -55,8 +56,12 @@ docs/specification/  # versioned specs
 - [ ] Docs index updated
 
 ## Running things
-- Web: `cd apps/web && bun install && bun run dev`
+- Web deps: `cd apps/web && bun install`
+- `make dev-mock` — web app + standalone mock API (default for UI work)
+- `make dev-api` — web app + real API (once `apps/server` exists)
+- `make dev` — web app only; `/api` is proxied to `API_TARGET`
+- `make mock` / `make api` — run just the mock / real API server
 - Web tooling: the web app uses **Bun** as its package manager and dev/build runner (`bun install`, `bun run dev`, `bun run build`).
 - Web tests: use **Vitest**, run through Bun (e.g. `bunx vitest`). Do not use `bun test`.
-- Mock mode: MSW starts automatically in development (or when `VITE_MOCK=1`).
+- Mock vs real: the dev server proxies `/api` to `API_TARGET` — the mock API on `:5174` by default, the real API on `:8000`.
 - Backend and worker commands are added in later phases.

@@ -6,32 +6,23 @@ import { Skeleton } from "@/components/ui/skeleton"
 export function DashboardSkeleton() {
   return (
     <div className="flex flex-col gap-5" aria-hidden>
-      <div className="flex flex-col gap-3">
-        <Skeleton className="h-4 w-28" />
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          {[0, 1, 2].map((index) => (
-            <Skeleton key={index} className="h-[122px] rounded-lg" />
-          ))}
-        </div>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <Skeleton className="h-8 w-52 rounded-lg" />
+        <Skeleton className="h-8 w-full rounded-md sm:w-[210px]" />
       </div>
 
-      <div className="flex flex-col gap-3">
-        <Skeleton className="h-4 w-28" />
-        <div className="overflow-hidden rounded-xl border border-border">
-          {Array.from({ length: 5 }).map((_, index) => (
-            <div
-              key={index}
-              className="flex items-start gap-3.5 border-b border-border px-4 py-3.5 last:border-b-0"
-            >
-              <Skeleton className="size-7 shrink-0 rounded-full" />
-              <div className="flex flex-1 flex-col gap-2">
-                <Skeleton className="h-3.5 w-2/5" />
-                <Skeleton className="h-3 w-3/5" />
-              </div>
-              <Skeleton className="h-3 w-16 shrink-0" />
-            </div>
-          ))}
-        </div>
+      <div className="overflow-hidden rounded-xl border border-border">
+        {Array.from({ length: 5 }).map((_, index) => (
+          <div
+            key={index}
+            className="flex items-center gap-2.5 border-b border-border px-3 py-2 last:border-b-0"
+          >
+            <Skeleton className="size-6 shrink-0 rounded" />
+            <Skeleton className="h-3.5 flex-1" />
+            <Skeleton className="hidden h-3 w-14 shrink-0 sm:block" />
+            <Skeleton className="h-4 w-16 shrink-0 rounded-full" />
+          </div>
+        ))}
       </div>
     </div>
   )

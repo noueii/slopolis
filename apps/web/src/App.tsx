@@ -40,7 +40,6 @@ export default function App() {
       <DashboardScreen
         scenario={scenario}
         onOpenSession={setDetailId}
-        onViewAllSessions={() => handleNavigate("sessions")}
         autoFocusComposer={nav === "new-review"}
       />
     )

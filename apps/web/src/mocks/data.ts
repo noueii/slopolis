@@ -136,6 +136,17 @@ function formatShortDate(date: Date): string {
   return `${months[date.getMonth()]} ${date.getDate()}`
 }
 
+function headBranchFromTitle(title: string): string {
+  const match = title.match(/^([a-z]+)(?:\([^)]*\))?:\s*(.+)$/i)
+  const type = (match?.[1] ?? "feat").toLowerCase()
+  const subject = match?.[2] ?? title
+  const slug = subject
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+  return slug ? `${type}/${slug}` : type
+}
+
 const HOUR = 60 * 60 * 1000
 const DAY = 24 * HOUR
 
@@ -213,6 +224,7 @@ export function createDataset(now = Date.now()): MockDataset {
         number,
         title,
         url: `https://github.com/${repo.fullName}/pull/${number}`,
+        headBranch: headBranchFromTitle(title),
         status: targetStatus,
         findingsCount,
         tokens,

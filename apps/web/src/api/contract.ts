@@ -46,6 +46,8 @@ export interface SessionTarget {
   number: number
   title: string
   url: string
+  /** GitHub head ref for the PR, e.g. `fix/guard-token-refresh`. */
+  headBranch: string
   status: TargetStatus
   findingsCount: number
   tokens: number
@@ -197,6 +199,8 @@ export interface LiveSession {
   title: string
   /** Canonical GitHub URL for the pull request. */
   url: string
+  /** GitHub head ref for the PR, e.g. `fix/guard-token-refresh`. */
+  headBranch: string
   model: string
   provider: string
   /** Whole-session completion, 0–100. */

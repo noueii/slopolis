@@ -183,6 +183,7 @@ function toLiveSession(session: ReviewSession, repo: string | null): LiveSession
     prLabel: `${target.repository.fullName}#${target.number}`,
     title: target.title,
     url: target.url,
+    headBranch: target.headBranch,
     model: session.model,
     provider: session.provider,
     progress,

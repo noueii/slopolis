@@ -11,12 +11,11 @@ import {
   DashboardEmpty,
   DashboardSkeleton,
 } from "./DashboardStates"
-import { LiveSessionsStrip } from "./LiveSessionsStrip"
 import {
   NewReviewComposer,
   type NewReviewComposerHandle,
 } from "./NewReviewComposer"
-import { PreviousSessions } from "./PreviousSessions"
+import { ReviewList } from "./ReviewList"
 import { PullRequestPicker } from "./components/PullRequestPicker"
 import {
   clearPullRequestCache,
@@ -34,14 +33,12 @@ import { useStickyCollapse } from "./lib/useStickyCollapse"
 export interface DashboardScreenProps {
   scenario: MockScenario
   onOpenSession: (id: string) => void
-  onViewAllSessions: () => void
   autoFocusComposer?: boolean
 }
 
 export function DashboardScreen({
   scenario,
   onOpenSession,
-  onViewAllSessions,
   autoFocusComposer = false,
 }: DashboardScreenProps) {
   const [selected, setSelected] = useState<SelectedPr[]>([])
@@ -164,22 +161,16 @@ export function DashboardScreen({
         ) : null}
 
         {showContent && dashboard.data ? (
-          <div className="flex flex-col gap-6">
-            <LiveSessionsStrip
-              sessions={dashboard.data.running}
+          dashboard.data.running.length === 0 &&
+          dashboard.data.recent.length === 0 ? (
+            <DashboardEmpty scoped={false} onNewReview={focusComposer} />
+          ) : (
+            <ReviewList
+              running={dashboard.data.running}
+              recent={dashboard.data.recent}
               onOpenSession={onOpenSession}
-              onViewAll={onViewAllSessions}
             />
-            {dashboard.data.recent.length > 0 ? (
-              <PreviousSessions
-                sessions={dashboard.data.recent}
-                onOpenSession={onOpenSession}
-                onViewAll={onViewAllSessions}
-              />
-            ) : (
-              <DashboardEmpty scoped={false} onNewReview={focusComposer} />
-            )}
-          </div>
+          )
         ) : null}
       </div>
 

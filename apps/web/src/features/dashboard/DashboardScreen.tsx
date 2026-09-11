@@ -119,59 +119,57 @@ export function DashboardScreen({
       ) : null}
 
       <div className="mx-auto flex w-full max-w-[1180px] flex-col gap-6 p-6">
-        <section className="flex flex-col gap-6 md:min-h-[calc(100dvh-16rem)]">
-          <AnalyticsStrip
-            summary={summary}
-            generatedAt={dashboard.data?.generatedAt}
-          />
+        <AnalyticsStrip
+          summary={summary}
+          generatedAt={dashboard.data?.generatedAt}
+        />
 
-          <div className="flex flex-1 items-center justify-center">
-            <div ref={composerWrapRef} className="w-full max-w-3xl">
-              <NewReviewComposer
-                ref={composerHandleRef}
-                selected={selected}
-                prompt={prompt}
-                model={model}
-                catalog={models.data}
-                catalogStatus={models.status}
-                onModelChange={setModel}
-                onRetryCatalog={refetchModels}
-                onPromptChange={setPrompt}
-                onRemove={removePr}
-                onAdd={addPr}
-                onClear={clearSelected}
-                onOpenPicker={() => setPickerOpen(true)}
-                onOpenSession={onOpenSession}
-                autoFocus={autoFocusComposer}
-              />
-            </div>
-          </div>
-        </section>
-
-        {showSkeleton ? <DashboardSkeleton /> : null}
-
-        {showError ? (
-          <DashboardError
-            message={
-              dashboard.error ??
-              "Something went wrong while loading the dashboard."
-            }
-            onRetry={refetchDashboard}
-          />
-        ) : null}
-
-        {showContent && dashboard.data ? (
-          dashboard.data.running.length === 0 &&
-          dashboard.data.recent.length === 0 ? (
-            <DashboardEmpty scoped={false} onNewReview={focusComposer} />
-          ) : (
-            <ReviewList
-              running={dashboard.data.running}
-              recent={dashboard.data.recent}
+        <section className="flex flex-col justify-center gap-6 md:min-h-[calc(100dvh-16rem)]">
+          <div ref={composerWrapRef} className="mx-auto w-full max-w-3xl">
+            <NewReviewComposer
+              ref={composerHandleRef}
+              selected={selected}
+              prompt={prompt}
+              model={model}
+              catalog={models.data}
+              catalogStatus={models.status}
+              onModelChange={setModel}
+              onRetryCatalog={refetchModels}
+              onPromptChange={setPrompt}
+              onRemove={removePr}
+              onAdd={addPr}
+              onClear={clearSelected}
+              onOpenPicker={() => setPickerOpen(true)}
               onOpenSession={onOpenSession}
+              autoFocus={autoFocusComposer}
             />
-          )
-        ) : null}
+          </div>
+
+          {showSkeleton ? <DashboardSkeleton /> : null}
+
+          {showError ? (
+            <DashboardError
+              message={
+                dashboard.error ??
+                "Something went wrong while loading the dashboard."
+              }
+              onRetry={refetchDashboard}
+            />
+          ) : null}
+
+          {showContent && dashboard.data ? (
+            dashboard.data.running.length === 0 &&
+            dashboard.data.recent.length === 0 ? (
+              <DashboardEmpty scoped={false} onNewReview={focusComposer} />
+            ) : (
+              <ReviewList
+                running={dashboard.data.running}
+                recent={dashboard.data.recent}
+                onOpenSession={onOpenSession}
+              />
+            )
+          ) : null}
+        </section>
       </div>
 
       <PullRequestPicker

@@ -118,8 +118,8 @@ export function DashboardScreen({
         />
       ) : null}
 
-      <div className="mx-auto flex w-full max-w-[1180px] flex-col gap-8 p-6">
-        <section className="flex flex-col gap-6 md:min-h-[calc(100dvh-16rem)]">
+      <div className="mx-auto flex w-full max-w-[1180px] flex-col gap-6 p-6">
+        <section className="flex flex-col gap-6 md:min-h-[calc(100dvh-24rem)]">
           <AnalyticsStrip
             summary={summary}
             generatedAt={dashboard.data?.generatedAt}

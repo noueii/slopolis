@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react"
-import { ChevronDown, Inbox } from "lucide-react"
+import { ChevronDown, ChevronUp, Inbox } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 import type {
@@ -16,6 +16,7 @@ import { RepositoryMark } from "./components/RepositoryMark"
 
 const ALL_REPOS = "all"
 const MAX_VISIBLE_REPOS = 3
+const COLLAPSED_LIMIT = 5
 
 type TabValue = "running" | "queued" | "finished"
 
@@ -92,6 +93,14 @@ function targetKey(fullName: string, number: number): string {
 export function ReviewList({ running, recent, onOpenSession }: ReviewListProps) {
   const [tab, setTab] = useState<TabValue | null>(null)
   const [repo, setRepo] = useState<string>(ALL_REPOS)
+  const [expandedTabs, setExpandedTabs] = useState<Record<TabValue, boolean>>({
+    running: false,
+    queued: false,
+    finished: false,
+  })
+
+  const toggleExpanded = (value: TabValue) =>
+    setExpandedTabs((prev) => ({ ...prev, [value]: !prev[value] }))
 
   const { runningRows, queuedRows, finishedRows } = useMemo(() => {
     const liveKeys = new Set(
@@ -197,6 +206,8 @@ export function ReviewList({ running, recent, onOpenSession }: ReviewListProps) 
           <RowList
             rows={visibleRunning}
             emptyLabel={`No running reviews${scopeSuffix(repo)}.`}
+            expanded={expandedTabs.running}
+            onToggleExpanded={() => toggleExpanded("running")}
             onOpenSession={onOpenSession}
           />
         </TabsContent>
@@ -204,6 +215,8 @@ export function ReviewList({ running, recent, onOpenSession }: ReviewListProps) 
           <RowList
             rows={visibleQueued}
             emptyLabel={`No queued reviews${scopeSuffix(repo)}.`}
+            expanded={expandedTabs.queued}
+            onToggleExpanded={() => toggleExpanded("queued")}
             onOpenSession={onOpenSession}
           />
         </TabsContent>
@@ -211,6 +224,8 @@ export function ReviewList({ running, recent, onOpenSession }: ReviewListProps) 
           <RowList
             rows={visibleFinished}
             emptyLabel={`No finished reviews${scopeSuffix(repo)}.`}
+            expanded={expandedTabs.finished}
+            onToggleExpanded={() => toggleExpanded("finished")}
             onOpenSession={onOpenSession}
           />
         </TabsContent>
@@ -241,10 +256,18 @@ function CountPill({ value, active }: { value: number; active: boolean }) {
 interface RowListProps {
   rows: ReviewRow[]
   emptyLabel: string
+  expanded: boolean
+  onToggleExpanded: () => void
   onOpenSession: (id: string) => void
 }
 
-function RowList({ rows, emptyLabel, onOpenSession }: RowListProps) {
+function RowList({
+  rows,
+  emptyLabel,
+  expanded,
+  onToggleExpanded,
+  onOpenSession,
+}: RowListProps) {
   if (rows.length === 0) {
     return (
       <div className="flex items-center justify-center gap-2 rounded-xl border border-dashed border-border bg-card/50 px-4 py-8 text-[12px] text-muted-foreground">
@@ -254,15 +277,39 @@ function RowList({ rows, emptyLabel, onOpenSession }: RowListProps) {
     )
   }
 
+  const visible = expanded ? rows : rows.slice(0, COLLAPSED_LIMIT)
+
   return (
-    <div className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
-      {rows.map((row) => (
-        <ReviewRowItem
-          key={row.id}
-          row={row}
-          onOpen={() => onOpenSession(row.id)}
-        />
-      ))}
+    <div className="overflow-hidden rounded-xl border border-border bg-card">
+      <div className="divide-y divide-border">
+        {visible.map((row) => (
+          <ReviewRowItem
+            key={row.id}
+            row={row}
+            onOpen={() => onOpenSession(row.id)}
+          />
+        ))}
+      </div>
+      {rows.length > COLLAPSED_LIMIT ? (
+        <button
+          type="button"
+          onClick={onToggleExpanded}
+          aria-expanded={expanded}
+          className="flex w-full items-center justify-center gap-1.5 border-t border-border px-3 py-2 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
+        >
+          {expanded ? (
+            <>
+              Show less
+              <ChevronUp className="size-3.5" />
+            </>
+          ) : (
+            <>
+              Show all {rows.length}
+              <ChevronDown className="size-3.5" />
+            </>
+          )}
+        </button>
+      ) : null}
     </div>
   )
 }

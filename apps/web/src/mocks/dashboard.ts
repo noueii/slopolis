@@ -23,7 +23,7 @@ import type {
   RepositorySummary,
   ReviewSession,
 } from "@/api/contract"
-import { PR_TITLES, REPOS, USERS } from "./data"
+import { PR_TITLES, REPOS, USERS, reviewTitleFromTitle } from "./data"
 import { MODEL_CATALOG, dataset } from "./dataset"
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "/api"
@@ -175,13 +175,13 @@ function toLiveSession(session: ReviewSession, repo: string | null): LiveSession
   const startedAt = new Date(Date.now() - elapsedMs).toISOString()
 
   return {
-    id: `live_${session.id}`,
+    id: session.id,
     name: session.name,
     status: "running",
     repository: target.repository,
     number: target.number,
     prLabel: `${target.repository.fullName}#${target.number}`,
-    title: target.title,
+    title: session.title,
     url: target.url,
     headBranch: target.headBranch,
     model: session.model,
@@ -196,6 +196,7 @@ function toLiveSession(session: ReviewSession, repo: string | null): LiveSession
 function toDashboardSession(session: ReviewSession): DashboardSession {
   return {
     id: session.id,
+    title: session.title,
     name: session.name,
     status: session.status,
     model: session.model,
@@ -507,6 +508,7 @@ export const dashboardHandlers = [
       id: `ses_${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)
         .toString(36)
         .padStart(3, "0")}`,
+      title: reviewTitleFromTitle(preflight.valid[0].title),
       name: buildSessionName(preflight.valid.map((item) => item.url)),
       status: "queued",
       model: resolved.id,
@@ -516,5 +518,35 @@ export const dashboardHandlers = [
       prompt: body.prompt?.trim() || undefined,
     }
     return HttpResponse.json(session, { status: 201 })
+  }),
+
+  http.patch(`${API_BASE}/sessions/:id`, async ({ request, params }) => {
+    await latency(request)
+    if (scenarioOf(request) === "error") {
+      return errorResponse(
+        500,
+        "session_rename_failed",
+        "Could not rename the review session.",
+      )
+    }
+
+    const id = String(params.id)
+    const session = dataset.sessions.find((item) => item.id === id)
+    if (!session) {
+      return errorResponse(
+        404,
+        "session_not_found",
+        `Session ${id} does not exist.`,
+      )
+    }
+
+    const body = (await request.json()) as { title?: string }
+    const title = body.title?.trim()
+    if (!title) {
+      return errorResponse(422, "title_required", "Provide a non-empty title.")
+    }
+
+    session.title = title
+    return HttpResponse.json(session)
   }),
 ]

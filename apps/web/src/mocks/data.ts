@@ -147,6 +147,17 @@ function headBranchFromTitle(title: string): string {
   return slug ? `${type}/${slug}` : type
 }
 
+export function reviewTitleFromTitle(title: string): string {
+  const match = title.match(/^[a-z]+(?:\([^)]*\))?:\s*(.+)$/i)
+  const subject = match?.[1] ?? title
+  const phrase = subject
+    .split(/\s+/)
+    .slice(0, 6)
+    .join(" ")
+    .replace(/[.,;:!?]+$/, "")
+  return phrase ? phrase.charAt(0).toUpperCase() + phrase.slice(1) : title
+}
+
 const HOUR = 60 * 60 * 1000
 const DAY = 24 * HOUR
 
@@ -259,6 +270,7 @@ export function createDataset(now = Date.now()): MockDataset {
       id: `ses_${(i + 1).toString().padStart(4, "0")}${Math.floor(rand() * 46656)
         .toString(36)
         .padStart(3, "0")}`,
+      title: reviewTitleFromTitle(first.title),
       name,
       status,
       model: model.id,

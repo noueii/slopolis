@@ -58,6 +58,8 @@ export interface SessionTarget {
 /** A single submission: one or more PRs plus an optional prompt. */
 export interface ReviewSession {
   id: string
+  /** Short, agent-assigned review title, e.g. `Guard token refresh skew`. */
+  title: string
   /** Auto-named from targets, e.g. `acme/api-gateway#142 +2 more`. */
   name: string
   status: SessionStatus
@@ -195,7 +197,7 @@ export interface LiveSession {
   number: number
   /** `owner/name#123` convenience label. */
   prLabel: string
-  /** Title of the pull request under review. */
+  /** Short, agent-assigned review title; the row's primary label. */
   title: string
   /** Canonical GitHub URL for the pull request. */
   url: string
@@ -227,6 +229,8 @@ export interface DashboardSummary {
 /** Compact history entry rendered as a conversation row (spec 10.8). */
 export interface DashboardSession {
   id: string
+  /** Short, agent-assigned review title, e.g. `Guard token refresh skew`. */
+  title: string
   name: string
   status: SessionStatus
   model: string
@@ -303,6 +307,8 @@ export interface CreateReviewRequest {
 /** The session produced by a successful submission. */
 export interface CreatedSession {
   id: string
+  /** Short, agent-assigned review title, e.g. `Guard token refresh skew`. */
+  title: string
   name: string
   status: SessionStatus
   model: string

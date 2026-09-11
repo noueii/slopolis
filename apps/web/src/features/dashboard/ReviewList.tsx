@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react"
-import { ChevronRight, Inbox } from "lucide-react"
+import { ChevronDown, Inbox } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 import type {
@@ -7,6 +7,7 @@ import type {
   LiveSession,
   SessionStatus,
 } from "@/api/contract"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { SessionStatusBadge } from "@/features/sessions/components/SessionStatusBadge"
@@ -14,6 +15,7 @@ import { formatDuration, formatRelativeTime } from "@/features/sessions/lib/form
 import { RepositoryMark } from "./components/RepositoryMark"
 
 const ALL_REPOS = "all"
+const MAX_VISIBLE_REPOS = 3
 
 type TabValue = "running" | "finished"
 
@@ -26,6 +28,7 @@ interface ReviewTarget {
 
 interface ReviewRow {
   id: string
+  title: string
   name: string
   status: SessionStatus
   timestamp: string
@@ -42,6 +45,7 @@ export interface ReviewListProps {
 function liveToRow(session: LiveSession): ReviewRow {
   return {
     id: session.id,
+    title: session.title,
     name: session.name,
     status: session.status,
     timestamp: session.startedAt,
@@ -60,6 +64,7 @@ function liveToRow(session: LiveSession): ReviewRow {
 function sessionToRow(session: DashboardSession): ReviewRow {
   return {
     id: session.id,
+    title: session.title,
     name: session.name,
     status: session.status,
     timestamp: session.createdAt,
@@ -103,8 +108,7 @@ export function ReviewList({ running, recent, onOpenSession }: ReviewListProps) 
   }, [running, recent])
 
   const finishedRows = useMemo(
-    () =>
-      recent.filter((s) => !isActiveStatus(s.status)).map(sessionToRow),
+    () => recent.filter((s) => !isActiveStatus(s.status)).map(sessionToRow),
     [recent],
   )
 
@@ -137,20 +141,14 @@ export function ReviewList({ running, recent, onOpenSession }: ReviewListProps) 
       >
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <TabsList className="h-8 self-start">
-            <TabsTrigger
-              value="running"
-              className="h-6 gap-1.5 px-2.5 text-xs"
-            >
+            <TabsTrigger value="running" className="h-6 gap-1.5 px-2.5 text-xs">
               Running
               <CountPill
                 value={visibleRunning.length}
                 active={activeTab === "running"}
               />
             </TabsTrigger>
-            <TabsTrigger
-              value="finished"
-              className="h-6 gap-1.5 px-2.5 text-xs"
-            >
+            <TabsTrigger value="finished" className="h-6 gap-1.5 px-2.5 text-xs">
               Finished
               <CountPill
                 value={visibleFinished.length}
@@ -250,73 +248,106 @@ interface ReviewRowItemProps {
 }
 
 function ReviewRowItem({ row, onOpen }: ReviewRowItemProps) {
-  const primary = row.targets[0]
-  const multi = row.targets.length > 1
+  return (
+    <div className="flex w-full items-center">
+      <button
+        type="button"
+        onClick={onOpen}
+        title={row.name}
+        aria-label={`Open session ${row.title}`}
+        className="flex min-w-0 flex-1 items-center gap-2.5 px-3 py-1.5 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
+      >
+        <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-foreground">
+          {row.title}
+        </span>
+        {row.elapsedMs === undefined ? (
+          <span className="hidden shrink-0 whitespace-nowrap text-2xs text-muted-foreground sm:inline">
+            {formatRelativeTime(row.timestamp)}
+          </span>
+        ) : (
+          <span className="hidden shrink-0 whitespace-nowrap font-mono text-[10px] tabular text-running sm:inline">
+            {formatDuration(row.elapsedMs)}
+          </span>
+        )}
+        <SessionStatusBadge
+          status={row.status}
+          showDot
+          className="shrink-0 px-1.5"
+        />
+      </button>
+
+      <Popover>
+        <PopoverTrigger asChild>
+          <button
+            type="button"
+            aria-label={`Show all ${row.targets.length} ${
+              row.targets.length === 1 ? "repository" : "repositories"
+            } and branches`}
+            className="mr-2 flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            <RepoCluster targets={row.targets} />
+            <ChevronDown className="size-3.5 opacity-70" />
+          </button>
+        </PopoverTrigger>
+        <PopoverContent align="end" className="w-80 p-1.5">
+          <RepoBranchList targets={row.targets} />
+        </PopoverContent>
+      </Popover>
+    </div>
+  )
+}
+
+function RepoCluster({ targets }: { targets: ReviewTarget[] }) {
+  const visible = targets.slice(0, MAX_VISIBLE_REPOS)
+  const overflow = targets.length - visible.length
 
   return (
-    <button
-      type="button"
-      onClick={onOpen}
-      title={row.name}
-      className="group flex w-full items-center gap-2.5 px-3 py-1.5 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-    >
-      <RepositoryMark
-        fullName={primary.fullName}
-        private={primary.private}
-        size="sm"
-      />
-
-      <span className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-0">
-        {row.targets.map((target, index) => (
-          <span
+    <span className="flex items-center">
+      <span className="flex -space-x-1.5">
+        {visible.map((target) => (
+          <RepositoryMark
             key={target.id}
-            className="inline-flex min-w-0 max-w-full items-baseline gap-1.5"
-          >
-            {index > 0 ? (
-              <span
-                aria-hidden
-                className="select-none text-[10px] leading-none text-muted-foreground/40"
-              >
-                ·
-              </span>
-            ) : null}
-            <span
-              className={cn(
-                "truncate font-mono text-[11px] font-medium text-foreground",
-                multi && "max-w-[12rem]",
-              )}
-            >
+            fullName={target.fullName}
+            private={target.private}
+            size="sm"
+          />
+        ))}
+      </span>
+      {overflow > 0 ? (
+        <span className="ml-1.5 font-mono text-[10px] tabular text-muted-foreground">
+          +{overflow}
+        </span>
+      ) : null}
+    </span>
+  )
+}
+
+function RepoBranchList({ targets }: { targets: ReviewTarget[] }) {
+  return (
+    <div className="flex flex-col gap-0.5">
+      <p className="px-2 py-1 text-2xs font-semibold uppercase tracking-widest text-muted-foreground">
+        {targets.length} {targets.length === 1 ? "repository" : "repositories"}
+      </p>
+      {targets.map((target) => (
+        <div
+          key={target.id}
+          className="flex items-center gap-2 rounded-md px-2 py-1.5"
+        >
+          <RepositoryMark
+            fullName={target.fullName}
+            private={target.private}
+            size="sm"
+          />
+          <span className="flex min-w-0 flex-col">
+            <span className="truncate font-mono text-[11px] text-foreground">
               {target.fullName}
             </span>
-            <span
-              className={cn(
-                "truncate font-mono text-[10px] text-muted-foreground",
-                multi && "max-w-[10rem]",
-              )}
-            >
+            <span className="truncate font-mono text-[10px] text-muted-foreground">
               {target.headBranch}
             </span>
           </span>
-        ))}
-      </span>
-
-      {row.elapsedMs === undefined ? (
-        <span className="hidden shrink-0 whitespace-nowrap text-2xs text-muted-foreground sm:inline">
-          {formatRelativeTime(row.timestamp)}
-        </span>
-      ) : (
-        <span className="hidden shrink-0 whitespace-nowrap font-mono text-[10px] tabular text-running sm:inline">
-          {formatDuration(row.elapsedMs)}
-        </span>
-      )}
-
-      <SessionStatusBadge
-        status={row.status}
-        showDot
-        className="shrink-0 px-1.5"
-      />
-
-      <ChevronRight className="size-3.5 shrink-0 text-muted-foreground/40 transition-transform group-hover:translate-x-0.5 group-hover:text-muted-foreground" />
-    </button>
+        </div>
+      ))}
+    </div>
   )
 }

@@ -3,3 +3,6 @@
 
 # Generated artifacts (untracked)
 .artifact/
+
+# Playwright MCP artifacts (untracked)
+.playwright-mcp/

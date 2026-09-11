@@ -64,5 +64,5 @@ docs/specification/  # versioned specs
 - `make mock` / `make api` — run just the mock / real API server
 - Web tooling: the web app uses **Bun** as its package manager and dev/build runner (`bun install`, `bun run dev`, `bun run build`).
 - Web tests: use **Vitest**, run through Bun (e.g. `bunx vitest`). Do not use `bun test`.
-- Mock vs real: `MOCK_MODE=server` proxies `/api` to the mock API (`:5174`), `off` proxies to the real API (`:8000`), and `worker` serves mocks in-browser with no server.
+- Mock vs real: `MOCK_MODE=server` proxies `/api` to the mock API (`:8300`), `off` proxies to the real API (`:8400`), and `worker` serves mocks in-browser with no server. The web dev server runs on `:8000`.
 - Backend and worker commands are added in later phases.

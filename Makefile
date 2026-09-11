@@ -40,9 +40,9 @@ wt-config: ## Bootstrap the current worktree from the primary checkout
 
 ##@ Development
 
-MOCK_PORT ?= 5174
+MOCK_PORT ?= 8300
 MOCK_API  ?= http://localhost:$(MOCK_PORT)
-REAL_API  ?= http://localhost:8000
+REAL_API  ?= http://localhost:8400
 MOCK_MODE ?= server
 API_TARGET ?= $(MOCK_API)
 
@@ -53,7 +53,7 @@ mock: ## Run the standalone mock API server
 .PHONY: api
 api: ## Run the real API server (apps/server — not implemented yet)
 	@if [ -f apps/server/pyproject.toml ]; then \
-		cd apps/server && uv run uvicorn app.main:app --reload --port 8000; \
+		cd apps/server && uv run uvicorn app.main:app --reload --port 8400; \
 	else \
 		echo "api: apps/server is not implemented yet" >&2; exit 1; \
 	fi

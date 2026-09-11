@@ -17,7 +17,7 @@ import { RepositoryMark } from "./components/RepositoryMark"
 const ALL_REPOS = "all"
 const MAX_VISIBLE_REPOS = 3
 
-type TabValue = "running" | "finished"
+type TabValue = "running" | "queued" | "finished"
 
 interface ReviewTarget {
   id: string
@@ -93,7 +93,7 @@ export function ReviewList({ running, recent, onOpenSession }: ReviewListProps) 
   const [tab, setTab] = useState<TabValue | null>(null)
   const [repo, setRepo] = useState<string>(ALL_REPOS)
 
-  const runningRows = useMemo(() => {
+  const { runningRows, queuedRows, finishedRows } = useMemo(() => {
     const liveKeys = new Set(
       running.map((s) => targetKey(s.repository.fullName, s.number)),
     )
@@ -104,25 +104,31 @@ export function ReviewList({ running, recent, onOpenSession }: ReviewListProps) 
           liveKeys.has(targetKey(t.repository.fullName, t.number)),
         ),
     )
-    return [...running.map(liveToRow), ...extraActive.map(sessionToRow)]
+    const active = [...running.map(liveToRow), ...extraActive.map(sessionToRow)]
+    return {
+      runningRows: active.filter((row) => row.status === "running"),
+      queuedRows: active.filter((row) => row.status === "queued"),
+      finishedRows: recent
+        .filter((s) => !isActiveStatus(s.status))
+        .map(sessionToRow),
+    }
   }, [running, recent])
-
-  const finishedRows = useMemo(
-    () => recent.filter((s) => !isActiveStatus(s.status)).map(sessionToRow),
-    [recent],
-  )
 
   const repoOptions = useMemo(() => {
     const names = new Set<string>()
-    for (const row of [...runningRows, ...finishedRows]) {
+    for (const row of [...runningRows, ...queuedRows, ...finishedRows]) {
       for (const target of row.targets) names.add(target.fullName)
     }
     return [...names].sort((a, b) => a.localeCompare(b))
-  }, [runningRows, finishedRows])
+  }, [runningRows, queuedRows, finishedRows])
 
   const visibleRunning = useMemo(
     () => runningRows.filter((row) => rowMatchesRepo(row, repo)),
     [runningRows, repo],
+  )
+  const visibleQueued = useMemo(
+    () => queuedRows.filter((row) => rowMatchesRepo(row, repo)),
+    [queuedRows, repo],
   )
   const visibleFinished = useMemo(
     () => finishedRows.filter((row) => rowMatchesRepo(row, repo)),
@@ -130,7 +136,12 @@ export function ReviewList({ running, recent, onOpenSession }: ReviewListProps) 
   )
 
   const activeTab: TabValue =
-    tab ?? (visibleRunning.length > 0 ? "running" : "finished")
+    tab ??
+    (visibleRunning.length > 0
+      ? "running"
+      : visibleQueued.length > 0
+        ? "queued"
+        : "finished")
 
   return (
     <section aria-label="Review sessions">
@@ -146,6 +157,13 @@ export function ReviewList({ running, recent, onOpenSession }: ReviewListProps) 
               <CountPill
                 value={visibleRunning.length}
                 active={activeTab === "running"}
+              />
+            </TabsTrigger>
+            <TabsTrigger value="queued" className="h-6 gap-1.5 px-2.5 text-xs">
+              Queued
+              <CountPill
+                value={visibleQueued.length}
+                active={activeTab === "queued"}
               />
             </TabsTrigger>
             <TabsTrigger value="finished" className="h-6 gap-1.5 px-2.5 text-xs">
@@ -179,6 +197,13 @@ export function ReviewList({ running, recent, onOpenSession }: ReviewListProps) 
           <RowList
             rows={visibleRunning}
             emptyLabel={`No running reviews${scopeSuffix(repo)}.`}
+            onOpenSession={onOpenSession}
+          />
+        </TabsContent>
+        <TabsContent value="queued" className="mt-0">
+          <RowList
+            rows={visibleQueued}
+            emptyLabel={`No queued reviews${scopeSuffix(repo)}.`}
             onOpenSession={onOpenSession}
           />
         </TabsContent>

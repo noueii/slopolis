@@ -21,10 +21,11 @@ import type {
   RepositoryRef,
   RepositoryPullRequestsResponse,
   RepositorySummary,
+  ReviewPresetCatalog,
   ReviewSession,
 } from "@/api/contract"
 import { PR_TITLES, REPOS, USERS, reviewTitleFromTitle } from "./data"
-import { MODEL_CATALOG, dataset } from "./dataset"
+import { MODEL_CATALOG, REVIEW_PRESET_CATALOG, dataset } from "./dataset"
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "/api"
 
@@ -351,6 +352,29 @@ export const dashboardHandlers = [
     return HttpResponse.json(body)
   }),
 
+  http.get(`${API_BASE}/presets`, async ({ request }) => {
+    await latency(request)
+    if (scenarioOf(request) === "error") {
+      return errorResponse(
+        500,
+        "presets_unavailable",
+        "Could not load the review presets.",
+      )
+    }
+
+    const body: ReviewPresetCatalog =
+      scenarioOf(request) === "empty"
+        ? {
+            defaultPresetId: REVIEW_PRESET_CATALOG.defaultPresetId,
+            presets: [],
+          }
+        : {
+            defaultPresetId: REVIEW_PRESET_CATALOG.defaultPresetId,
+            presets: [...REVIEW_PRESET_CATALOG.presets],
+          }
+    return HttpResponse.json(body)
+  }),
+
   http.get(`${API_BASE}/repositories`, async ({ request }) => {
     await latency(request)
     if (scenarioOf(request) === "error") {
@@ -478,7 +502,8 @@ export const dashboardHandlers = [
     const body = (await request.json()) as {
       prUrls?: string[]
       prompt?: string
-      model?: string
+      preset?: string
+      attachments?: unknown[]
     }
     const prUrls = (body.prUrls ?? []).map((value) => value.trim()).filter(Boolean)
     if (prUrls.length === 0) {
@@ -493,17 +518,6 @@ export const dashboardHandlers = [
       )
     }
 
-    const requested = body.model?.trim() || "auto"
-    const resolved =
-      requested === "auto"
-        ? {
-            id: MODEL_CATALOG.defaultModelId,
-            provider: MODEL_CATALOG.defaultProvider,
-          }
-        : (MODEL_CATALOG.models.find((item) => item.id === requested) ?? {
-            id: MODEL_CATALOG.defaultModelId,
-            provider: MODEL_CATALOG.defaultProvider,
-          })
     const session: CreatedSession = {
       id: `ses_${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)
         .toString(36)
@@ -511,8 +525,8 @@ export const dashboardHandlers = [
       title: reviewTitleFromTitle(preflight.valid[0].title),
       name: buildSessionName(preflight.valid.map((item) => item.url)),
       status: "queued",
-      model: resolved.id,
-      provider: resolved.provider,
+      model: MODEL_CATALOG.defaultModelId,
+      provider: MODEL_CATALOG.defaultProvider,
       createdAt: new Date().toISOString(),
       targetCount: preflight.valid.length,
       prompt: body.prompt?.trim() || undefined,

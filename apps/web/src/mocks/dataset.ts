@@ -20,3 +20,13 @@ export const MODEL_CATALOG = {
   defaultProvider: "Anthropic",
   models: MODEL_POOL.map((model) => ({ id: model.id, provider: model.provider })),
 } as const
+
+export const REVIEW_PRESET_CATALOG = {
+  defaultPresetId: "default",
+  presets: [
+    { id: "default", name: "Default", description: "Balanced built-in review across every target." },
+    { id: "security", name: "Security audit", description: "Prioritizes auth, injection, and secret-handling risks." },
+    { id: "performance", name: "Performance review", description: "Focuses on hot paths, N+1s, and allocation pressure." },
+    { id: "tests", name: "Test coverage", description: "Flags untested branches and missing edge cases." },
+  ],
+} as const

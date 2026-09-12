@@ -12,6 +12,7 @@ import type {
   ModelCatalog,
   RepositoryListResponse,
   RepositoryPullRequestsResponse,
+  ReviewPresetCatalog,
 } from "@/api/contract"
 import {
   useAsync,
@@ -32,6 +33,10 @@ export function useDashboard(
 
 export function useModels(): AsyncResult<ModelCatalog> {
   return useAsync(() => api.listModels(), "models")
+}
+
+export function usePresets(): AsyncResult<ReviewPresetCatalog> {
+  return useAsync(() => api.listPresets(), "presets")
 }
 
 const pullRequestCache = new Map<string, RepositoryPullRequestsResponse>()

@@ -20,7 +20,7 @@ import { PullRequestPicker } from "./components/PullRequestPicker"
 import {
   clearPullRequestCache,
   useDashboard,
-  useModels,
+  usePresets,
   useRepositories,
 } from "./lib/useDashboard"
 import {
@@ -43,7 +43,7 @@ export function DashboardScreen({
 }: DashboardScreenProps) {
   const [selected, setSelected] = useState<SelectedPr[]>([])
   const [prompt, setPrompt] = useState("")
-  const [model, setModel] = useState("auto")
+  const [preset, setPreset] = useState("default")
   const [pickerOpen, setPickerOpen] = useState(false)
 
   const rootRef = useRef<HTMLDivElement>(null)
@@ -52,10 +52,10 @@ export function DashboardScreen({
 
   const repositories = useRepositories()
   const dashboard = useDashboard({ limit: 12 })
-  const models = useModels()
+  const presets = usePresets()
   const { refetch: refetchDashboard } = dashboard
   const { refetch: refetchRepositories } = repositories
-  const { refetch: refetchModels } = models
+  const { refetch: refetchPresets } = presets
 
   const { collapsed, expand } = useStickyCollapse(rootRef, composerWrapRef)
 
@@ -68,8 +68,8 @@ export function DashboardScreen({
     clearPullRequestCache()
     refetchDashboard()
     refetchRepositories()
-    refetchModels()
-  }, [scenario, refetchDashboard, refetchRepositories, refetchModels])
+    refetchPresets()
+  }, [scenario, refetchDashboard, refetchRepositories, refetchPresets])
 
   const addPr = useCallback((pr: SelectedPr) => {
     setSelected((prev) =>
@@ -97,10 +97,10 @@ export function DashboardScreen({
     window.setTimeout(() => composerHandleRef.current?.focus(), 320)
   }, [expand])
 
-  const modelLabel = useMemo(() => {
-    if (model !== "auto") return model
-    return models.data ? `auto · ${models.data.defaultModelId}` : "auto"
-  }, [model, models.data])
+  const presetLabel = useMemo(() => {
+    const match = presets.data?.presets.find((item) => item.id === preset)
+    return match?.name ?? "Default"
+  }, [preset, presets.data])
 
   const summary = dashboard.data?.summary
   const showSkeleton = dashboard.status === "loading" && !dashboard.data
@@ -113,7 +113,7 @@ export function DashboardScreen({
         <CollapsedComposerBar
           count={selected.length}
           prompt={prompt}
-          modelLabel={modelLabel}
+          presetLabel={presetLabel}
           onExpand={expand}
         />
       ) : null}
@@ -130,11 +130,11 @@ export function DashboardScreen({
               ref={composerHandleRef}
               selected={selected}
               prompt={prompt}
-              model={model}
-              catalog={models.data}
-              catalogStatus={models.status}
-              onModelChange={setModel}
-              onRetryCatalog={refetchModels}
+              preset={preset}
+              presetCatalog={presets.data}
+              presetStatus={presets.status}
+              onPresetChange={setPreset}
+              onRetryPresets={refetchPresets}
               onPromptChange={setPrompt}
               onRemove={removePr}
               onAdd={addPr}
@@ -190,12 +190,12 @@ export function DashboardScreen({
 function CollapsedComposerBar({
   count,
   prompt,
-  modelLabel,
+  presetLabel,
   onExpand,
 }: {
   count: number
   prompt: string
-  modelLabel: string
+  presetLabel: string
   onExpand: () => void
 }) {
   const preview =
@@ -223,7 +223,7 @@ function CollapsedComposerBar({
           </span>
           <span className="hidden shrink-0 items-center gap-1.5 rounded-full border border-border bg-muted/40 px-2 py-0.5 font-mono text-[11px] text-muted-foreground md:inline-flex">
             <span className="size-1.5 rounded-full bg-accent" />
-            {modelLabel}
+            {presetLabel}
           </span>
           <span className="min-w-0 flex-1 truncate text-[13px] text-muted-foreground">
             {preview}

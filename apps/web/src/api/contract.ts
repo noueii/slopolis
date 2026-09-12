@@ -297,11 +297,39 @@ export interface ModelCatalog {
   models: ModelOption[]
 }
 
+/** One review/orchestration preset (spec: future orchestration tab). */
+export interface ReviewPreset {
+  id: string
+  name: string
+  description: string
+}
+
+export interface ReviewPresetCatalog {
+  /** Preset id used when none is chosen. */
+  defaultPresetId: string
+  presets: ReviewPreset[]
+}
+
+/**
+ * Metadata for an image attached to a review request. Bytes are never sent to
+ * this API — the client keeps a local object URL for previews only.
+ */
+export interface ReviewAttachment {
+  id: string
+  name: string
+  /** MIME type, e.g. `image/png`. */
+  mime: string
+  /** Size in bytes. */
+  size: number
+}
+
 export interface CreateReviewRequest {
   prUrls: string[]
   prompt?: string
-  /** Model id for the review role, or `auto` for the workspace default. */
-  model?: string
+  /** Review preset id, or omitted for the workspace default. */
+  preset?: string
+  /** Attached reference images (metadata only; never bytes). */
+  attachments?: ReviewAttachment[]
 }
 
 /** The session produced by a successful submission. */

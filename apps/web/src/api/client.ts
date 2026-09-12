@@ -19,6 +19,7 @@ import type {
   PreflightResult,
   RepositoryListResponse,
   RepositoryPullRequestsResponse,
+  ReviewPresetCatalog,
   ReviewSession,
   SessionFilterOptions,
   SessionListParams,
@@ -163,6 +164,10 @@ export const api = {
 
   listModels(): Promise<ModelCatalog> {
     return request<ModelCatalog>("/models")
+  },
+
+  listPresets(): Promise<ReviewPresetCatalog> {
+    return request<ReviewPresetCatalog>("/presets")
   },
 
   getDashboard(params: DashboardParams = {}): Promise<DashboardData> {

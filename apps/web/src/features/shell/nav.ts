@@ -8,6 +8,7 @@ import {
   Settings,
   SquarePen,
   Waypoints,
+  Workflow,
   type LucideIcon,
 } from "lucide-react"
 
@@ -17,6 +18,7 @@ export type NavId =
   | "new-review"
   | "repositories"
   | "providers"
+  | "templates"
   | "usage"
   | "settings"
 
@@ -65,6 +67,14 @@ export const NAV_ITEMS: NavItem[] = [
     icon: KeyRound,
     group: "Configure",
     description: "Provider credentials and the model assigned to each role.",
+  },
+  {
+    id: "templates",
+    label: "Review templates",
+    icon: Workflow,
+    group: "Configure",
+    description:
+      "Define review harnesses: an orchestrator, its sub-agents, and the rules they enforce.",
   },
   {
     id: "usage",

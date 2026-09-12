@@ -354,3 +354,54 @@ export interface ApiErrorBody {
     detail?: string
   }
 }
+
+/** Roles a node can play inside a review harness graph. */
+export type HarnessNodeKind = "orchestrator" | "agent"
+
+/**
+ * One participant in a review harness: an orchestrator that delegates, or a
+ * sub-agent that receives delegated work. `modelId`/`instruction` are optional
+ * so a partially configured harness still validates.
+ */
+export interface HarnessNode {
+  id: string
+  kind: HarnessNodeKind
+  name: string
+  role?: string
+  modelId?: string
+  instruction?: string
+}
+
+/** A delegation edge from one harness node to another. */
+export interface HarnessEdge {
+  id: string
+  from: string
+  to: string
+}
+
+/** One rule the harness enforces, optionally scoped to a single node. */
+export interface HarnessRule {
+  id: string
+  title: string
+  instruction: string
+  /** Owning node id, or omitted when the rule applies harness-wide. */
+  nodeId?: string
+}
+
+/** A reusable review harness: an agent graph plus its rules. */
+export interface ReviewTemplate {
+  id: string
+  name: string
+  description: string
+  nodes: HarnessNode[]
+  edges: HarnessEdge[]
+  rules: HarnessRule[]
+  updatedAt: string
+}
+
+/** Mutable fields accepted when creating or updating a template. */
+export type ReviewTemplateInput = Omit<ReviewTemplate, "id" | "updatedAt">
+
+export interface ReviewTemplateListResponse {
+  items: ReviewTemplate[]
+}

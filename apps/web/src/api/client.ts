@@ -21,6 +21,9 @@ import type {
   RepositoryPullRequestsResponse,
   ReviewPresetCatalog,
   ReviewSession,
+  ReviewTemplate,
+  ReviewTemplateInput,
+  ReviewTemplateListResponse,
   SessionFilterOptions,
   SessionListParams,
   SessionStats,
@@ -168,6 +171,31 @@ export const api = {
 
   listPresets(): Promise<ReviewPresetCatalog> {
     return request<ReviewPresetCatalog>("/presets")
+  },
+
+  listTemplates(): Promise<ReviewTemplateListResponse> {
+    return request<ReviewTemplateListResponse>("/templates")
+  },
+
+  getTemplate(id: string): Promise<ReviewTemplate> {
+    return request<ReviewTemplate>(`/templates/${encodeURIComponent(id)}`)
+  },
+
+  createTemplate(body: ReviewTemplateInput): Promise<ReviewTemplate> {
+    return request<ReviewTemplate>("/templates", {
+      method: "POST",
+      body: JSON.stringify(body),
+    })
+  },
+
+  updateTemplate(
+    id: string,
+    body: Partial<ReviewTemplateInput>,
+  ): Promise<ReviewTemplate> {
+    return request<ReviewTemplate>(`/templates/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    })
   },
 
   getDashboard(params: DashboardParams = {}): Promise<DashboardData> {

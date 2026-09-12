@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client"
 
 import "@fontsource-variable/hanken-grotesk"
 import "@fontsource-variable/jetbrains-mono"
+import "@xyflow/react/dist/style.css"
 import "./index.css"
 
 import App from "./App"

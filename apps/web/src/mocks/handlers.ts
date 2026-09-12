@@ -5,5 +5,10 @@
 
 import { dashboardHandlers } from "./dashboard"
 import { sessionsHandlers } from "./sessions"
+import { templatesHandlers } from "./templates"
 
-export const handlers = [...sessionsHandlers, ...dashboardHandlers]
+export const handlers = [
+  ...sessionsHandlers,
+  ...dashboardHandlers,
+  ...templatesHandlers,
+]

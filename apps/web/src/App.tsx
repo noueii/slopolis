@@ -11,6 +11,7 @@ import { ComingSoonScreen } from "@/features/placeholder/ComingSoonScreen"
 import { DashboardScreen } from "@/features/dashboard/DashboardScreen"
 import { SessionDetailStub } from "@/features/sessions/SessionDetailStub"
 import { SessionsScreen } from "@/features/sessions/SessionsScreen"
+import { TemplatesScreen } from "@/features/templates/TemplatesScreen"
 
 export default function App() {
   const [nav, setNav] = useState<NavId>("dashboard")
@@ -51,6 +52,8 @@ export default function App() {
         scenario={scenario}
       />
     )
+  } else if (nav === "templates") {
+    content = <TemplatesScreen />
   } else {
     content = <ComingSoonScreen item={navItemById(nav)} />
   }

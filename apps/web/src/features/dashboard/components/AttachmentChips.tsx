@@ -1,4 +1,4 @@
-import { X } from "lucide-react"
+import { FileText, X } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import {
@@ -16,7 +16,7 @@ export function AttachmentChips({ items, onRemove }: AttachmentChipsProps) {
 
   return (
     <ul
-      aria-label="Attached images"
+      aria-label="Attached files"
       className="flex flex-wrap gap-2"
     >
       {items.map(({ attachment, previewUrl }) => (
@@ -24,11 +24,17 @@ export function AttachmentChips({ items, onRemove }: AttachmentChipsProps) {
           key={attachment.id}
           className="flex max-w-full items-center gap-2 rounded-lg border border-border bg-muted/30 py-1 pl-1 pr-1.5"
         >
-          <img
-            src={previewUrl}
-            alt={attachment.name}
-            className="size-8 shrink-0 rounded object-cover"
-          />
+          {attachment.mime.startsWith("image/") ? (
+            <img
+              src={previewUrl}
+              alt={attachment.name}
+              className="size-8 shrink-0 rounded object-cover"
+            />
+          ) : (
+            <span className="grid size-8 shrink-0 place-items-center rounded bg-muted text-muted-foreground">
+              <FileText className="size-4" />
+            </span>
+          )}
           <span className="flex min-w-0 flex-col gap-0.5">
             <span className="max-w-[150px] truncate text-[11px] font-medium text-foreground">
               {attachment.name}

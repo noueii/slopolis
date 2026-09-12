@@ -12,11 +12,9 @@ import {
   ArrowUp,
   Check,
   Info,
-  Link2,
   ListChecks,
   Loader2,
   Paperclip,
-  Plus,
   RotateCw,
   X,
 } from "lucide-react"
@@ -28,12 +26,6 @@ import type {
   ReviewPresetCatalog,
 } from "@/api/contract"
 import { Button } from "@/components/ui/button"
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible"
-import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import {
   Tooltip,
@@ -44,7 +36,6 @@ import { SessionStatusBadge } from "@/features/sessions/components/SessionStatus
 import { formatRelativeTime } from "@/features/sessions/lib/format"
 import { PresetSelect } from "./components/PresetSelect"
 import { AttachmentChips } from "./components/AttachmentChips"
-import { parsePrLinks } from "./lib/prUrl"
 import {
   groupSelectedByRepository,
   type SelectedPr,
@@ -100,9 +91,6 @@ export const NewReviewComposer = forwardRef<
   },
   ref,
 ) {
-  const [pasteOpen, setPasteOpen] = useState(false)
-  const [pasteInput, setPasteInput] = useState("")
-  const [pasteBusy, setPasteBusy] = useState(false)
   const [phase, setPhase] = useState<Phase>("idle")
   const [error, setError] = useState<string | null>(null)
   const [notices, setNotices] = useState<string[]>([])
@@ -139,8 +127,6 @@ export const NewReviewComposer = forwardRef<
 
   const reset = () => {
     onPromptChange("")
-    setPasteInput("")
-    setPasteOpen(false)
     setPhase("idle")
     setError(null)
     setNotices([])
@@ -162,43 +148,6 @@ export const NewReviewComposer = forwardRef<
     if (files.length === 0) return
     event.preventDefault()
     addFiles(files)
-  }
-
-  const handleAddPasted = async () => {
-    const { links, invalid } = parsePrLinks(pasteInput)
-    if (links.length === 0) {
-      setError(
-        invalid.length > 0
-          ? `“${invalid[0]}” is not a GitHub pull request link.`
-          : "Paste a GitHub pull request link.",
-      )
-      return
-    }
-    setError(null)
-    setPasteBusy(true)
-    try {
-      const result = await api.preflightReview({
-        prUrls: links.map((link) => link.url),
-      })
-      if (result.valid.length === 0) {
-        setError(
-          "None of these links belong to a repository covered by this workspace.",
-        )
-        return
-      }
-      result.valid.forEach(onAdd)
-      setNotices(result.notices)
-      setPasteInput("")
-      setPasteOpen(false)
-    } catch (cause) {
-      setError(
-        cause instanceof ApiError
-          ? cause.message
-          : "Could not resolve that link.",
-      )
-    } finally {
-      setPasteBusy(false)
-    }
   }
 
   const submit = async () => {
@@ -267,13 +216,11 @@ export const NewReviewComposer = forwardRef<
   }
 
   return (
-    <Collapsible open={pasteOpen} onOpenChange={setPasteOpen}>
-      <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-[0_1px_2px_hsl(var(--foreground)/0.04),0_12px_32px_-16px_hsl(var(--foreground)/0.18)]">
+    <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-[0_1px_2px_hsl(var(--foreground)/0.04),0_12px_32px_-16px_hsl(var(--foreground)/0.18)]">
         <div className="px-5 pt-4">
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/*"
             multiple
             className="hidden"
             tabIndex={-1}
@@ -418,10 +365,6 @@ export const NewReviewComposer = forwardRef<
           </div>
 
           <div className="flex shrink-0 items-center gap-1">
-            <span className="mr-1 hidden font-mono text-[10px] text-muted-foreground/70 md:inline">
-              ⌘↵
-            </span>
-
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -429,30 +372,13 @@ export const NewReviewComposer = forwardRef<
                   variant="ghost"
                   size="icon"
                   onClick={() => fileInputRef.current?.click()}
-                  aria-label="Attach images"
+                  aria-label="Attach files"
                   className="size-9 rounded-full text-muted-foreground hover:text-foreground"
                 >
                   <Paperclip className="size-4" />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent side="top">Attach images</TooltipContent>
-            </Tooltip>
-
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <CollapsibleTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    aria-label="Paste a link"
-                    className="size-9 rounded-full text-muted-foreground hover:text-foreground"
-                  >
-                    <Link2 className="size-4" />
-                  </Button>
-                </CollapsibleTrigger>
-              </TooltipTrigger>
-              <TooltipContent side="top">Paste a link</TooltipContent>
+              <TooltipContent side="top">Attach files</TooltipContent>
             </Tooltip>
 
             <Tooltip>
@@ -483,53 +409,12 @@ export const NewReviewComposer = forwardRef<
                   ? "Checking…"
                   : phase === "creating"
                     ? "Starting…"
-                    : "Start review · ⌘↵"}
+                    : "Start review"}
               </TooltipContent>
             </Tooltip>
           </div>
         </div>
-
-        <CollapsibleContent>
-          <div className="flex flex-col gap-2 border-t border-border/70 bg-muted/20 px-5 py-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <div className="flex items-center gap-1.5 rounded-full border border-dashed border-border bg-background px-2.5 py-1">
-                <Link2 className="size-3.5 shrink-0 text-muted-foreground" />
-                <Input
-                  value={pasteInput}
-                  onChange={(event) => setPasteInput(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault()
-                      void handleAddPasted()
-                    }
-                  }}
-                  aria-label="Add pull request link"
-                  placeholder="https://github.com/owner/repo/pull/123"
-                  className="h-6 w-[280px] border-0 bg-transparent p-0 font-mono text-xs shadow-none focus-visible:ring-0"
-                />
-                <button
-                  type="button"
-                  onClick={() => void handleAddPasted()}
-                  disabled={!pasteInput.trim() || pasteBusy}
-                  aria-label="Add pull request link"
-                  className="grid size-5 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40"
-                >
-                  {pasteBusy ? (
-                    <Loader2 className="size-3.5 animate-spin" />
-                  ) : (
-                    <Plus className="size-3.5" />
-                  )}
-                </button>
-              </div>
-              <p className="text-2xs text-muted-foreground">
-                Pasting is a shortcut; selecting from the list is the primary
-                way in.
-              </p>
-            </div>
-          </div>
-        </CollapsibleContent>
-      </div>
-    </Collapsible>
+    </div>
   )
 })
 

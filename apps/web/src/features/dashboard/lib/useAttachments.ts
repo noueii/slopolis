@@ -20,18 +20,14 @@ export function formatBytes(size: number): string {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`
 }
 
-function isImageFile(file: File): boolean {
-  return file.type.startsWith("image/")
-}
-
 export function filesFromClipboard(data: DataTransfer | null): File[] {
   if (!data) return []
   const fromItems = Array.from(data.items)
-    .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+    .filter((item) => item.kind === "file")
     .map((item) => item.getAsFile())
     .filter((file): file is File => file !== null)
   if (fromItems.length > 0) return fromItems
-  return Array.from(data.files).filter(isImageFile)
+  return Array.from(data.files)
 }
 
 export function useAttachments() {
@@ -47,18 +43,18 @@ export function useAttachments() {
   const addFiles = useCallback(
     (files: FileList | File[] | null): number => {
       if (!files) return 0
-      const images = Array.from(files).filter(isImageFile)
-      if (images.length === 0) return 0
+      const list = Array.from(files)
+      if (list.length === 0) return 0
 
-      const added = images.map((file) => {
+      const added = list.map((file) => {
         const previewUrl = URL.createObjectURL(file)
         objectUrls.current.add(previewUrl)
         return {
           previewUrl,
           attachment: {
             id: createId(),
-            name: file.name || "image",
-            mime: file.type,
+            name: file.name || "file",
+            mime: file.type || "application/octet-stream",
             size: file.size,
           },
         } satisfies AttachmentItem

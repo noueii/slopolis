@@ -1,0 +1,74 @@
+# Self-hosting infrastructure for the slopolis monorepo.
+#
+# Start the data services (no secrets required):
+#   docker compose -f infra/docker-compose.yml --env-file infra/.env.example up -d postgres redis
+#
+# Optionally enable the LiteLLM gateway profile:
+#   docker compose -f infra/docker-compose.yml --env-file infra/.env.example --profile litellm up -d
+#
+# Secrets: copy infra/.env.example to .env at the repo root (or pass --env-file)
+# and fill in real values. No provider keys are hardcoded here.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-slopolis}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-slopolis}
+      POSTGRES_DB: ${POSTGRES_DB:-slopolis}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-slopolis} -d ${POSTGRES_DB:-slopolis}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    env_file:
+      - path: ../.env
+        required: false
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    restart: unless-stopped
+    profiles:
+      - litellm
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  redisdata:

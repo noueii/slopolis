@@ -1,0 +1,184 @@
+"""Session creation: pre-flight gate, persistence, and per-target enqueue.
+
+Creation is the one write path in the API. It runs pre-flight first and refuses
+to persist anything unless at least one target resolves — a failed pre-flight
+never leaves a half-built session behind. Each persisted target is enqueued as
+exactly one ARQ job named ``review_target`` with ``(session_id, target_id)``.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import re
+import uuid
+import zlib
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.adapters.workspace import WorkspaceConfigAdapter
+from app.deps import ArqPool
+from app.errors import ApiError
+from app.routers.catalog import (
+    DEFAULT_MODEL_ID,
+    DEFAULT_PROVIDER,
+)
+from app.schemas import CreatedSession, CreateReviewRequest
+from app.serializers import build_name, serialize_created_session
+from slopolis_core.preflight.models import PreflightRequest as CorePreflightRequest
+from slopolis_core.preflight.models import PrReference
+from slopolis_core.preflight.service import PreflightService
+from slopolis_db.models import (
+    GitHubInstallation,
+    Repository,
+    ReviewSession,
+    SessionTarget,
+    User,
+)
+
+__all__ = ["create_session", "review_title_from_title"]
+
+_SUBJECT_RE = re.compile(r"^[a-z]+(?:\([^)]*\))?:\s*(.+)$", re.IGNORECASE)
+_JOB_NAME = "review_target"
+
+
+async def create_session(
+    db: AsyncSession,
+    *,
+    workspace_id: uuid.UUID,
+    user: User,
+    body: CreateReviewRequest,
+    service: PreflightService,
+    pool: ArqPool,
+    now: dt.datetime | None = None,
+) -> CreatedSession:
+    """Validate, persist, and enqueue a session with one target per valid PR."""
+    urls = [value.strip() for value in body.pr_urls if value.strip()]
+    if not urls:
+        raise ApiError(422, "no_targets", "Add at least one pull request.")
+
+    outcome = await service.run(
+        CorePreflightRequest(pr_urls=urls), user_login=user.handle
+    )
+    if not outcome.valid:
+        raise ApiError(
+            422,
+            "no_valid_targets",
+            "None of the pasted links belong to a covered repository.",
+            detail="; ".join(outcome.notices) or None,
+        )
+
+    reference = outcome.valid[0]
+    model_id, provider = await _resolve_model(db, workspace_id)
+    created_at = now or dt.datetime.now(dt.UTC)
+    session = ReviewSession(
+        workspace_id=workspace_id,
+        title=review_title_from_title(reference.title),
+        name=build_name(
+            [(item.repository.full_name, item.number) for item in outcome.valid],
+            created_at,
+        ),
+        prompt=body.prompt.strip() if body.prompt else None,
+        status="queued",
+        model=model_id,
+        provider=provider,
+        triggered_by_user_id=user.id,
+    )
+    db.add(session)
+    await db.flush()
+
+    targets: list[SessionTarget] = []
+    for item in outcome.valid:
+        repository = await _resolve_repository(db, workspace_id, item)
+        target = SessionTarget(
+            session_id=session.id,
+            repository_id=repository.id,
+            number=item.number,
+            title=item.title,
+            url=item.url,
+            head_branch=item.repository.default_branch or "main",
+            status="queued",
+        )
+        db.add(target)
+        targets.append(target)
+    await db.flush()
+    await db.commit()
+
+    for target in targets:
+        await pool.enqueue_job(_JOB_NAME, str(session.id), str(target.id))
+
+    return serialize_created_session(session, target_count=len(targets))
+
+
+async def _resolve_model(db: AsyncSession, workspace_id: uuid.UUID) -> tuple[str, str]:
+    """Return the workspace default model, or the catalog fallback."""
+    resolved = await WorkspaceConfigAdapter(db, workspace_id).default_model()
+    if resolved is not None:
+        return resolved
+    return DEFAULT_MODEL_ID, DEFAULT_PROVIDER
+
+
+async def _resolve_repository(
+    db: AsyncSession, workspace_id: uuid.UUID, reference: PrReference
+) -> Repository:
+    """Find the repository row, creating it (and its installation) if needed."""
+    full_name = reference.repository.full_name
+    existing = await db.scalar(
+        select(Repository).where(
+            Repository.workspace_id == workspace_id,
+            Repository.full_name == full_name,
+        )
+    )
+    if existing is not None:
+        return existing
+
+    owner = full_name.split("/", 1)[0]
+    installation = await db.scalar(
+        select(GitHubInstallation).where(
+            GitHubInstallation.workspace_id == workspace_id,
+            GitHubInstallation.account_login == owner,
+        )
+    )
+    if installation is None:
+        installation = GitHubInstallation(
+            workspace_id=workspace_id,
+            installation_id=_synthetic_installation_id(owner),
+            account_login=owner,
+            account_type="Unknown",
+        )
+        db.add(installation)
+        await db.flush()
+
+    repository = Repository(
+        workspace_id=workspace_id,
+        installation_id=installation.id,
+        github_id=0,
+        full_name=full_name,
+        private=reference.repository.private,
+        default_branch=reference.repository.default_branch or "main",
+        connected=True,
+    )
+    db.add(repository)
+    await db.flush()
+    return repository
+
+
+def _synthetic_installation_id(owner: str) -> int:
+    """Derive a stable, negative installation id for an un-synced account.
+
+    Real installations carry GitHub's positive ids; the negative space is free
+    for placeholders created before the first sync and keeps the uniqueness
+    constraint satisfied deterministically per account.
+    """
+    checksum = zlib.crc32(owner.lower().encode("utf-8"))
+    return -(checksum % 2_000_000_000 + 1)
+
+
+def review_title_from_title(title: str) -> str:
+    """Derive a short review title from a PR title (mirrors the mock helper)."""
+    match = _SUBJECT_RE.match(title)
+    subject = match.group(1) if match else title
+    phrase = " ".join(subject.split()[:6]).rstrip(".,;:!?")
+    if not phrase:
+        return title
+    return phrase[0].upper() + phrase[1:]

@@ -58,6 +58,42 @@ api: ## Run the real API server (apps/server — not implemented yet)
 		echo "api: apps/server is not implemented yet" >&2; exit 1; \
 	fi
 
+.PHONY: worker
+worker: ## Run the ARQ background worker (apps/worker)
+	@if [ -f apps/worker/pyproject.toml ]; then \
+		cd apps/worker && uv run arq worker.main.WorkerSettings; \
+	else \
+		echo "worker: apps/worker is not implemented yet" >&2; exit 1; \
+	fi
+
+.PHONY: migrate
+migrate: ## Apply database migrations (alembic upgrade head)
+	cd packages/db && uv run alembic upgrade head
+
+.PHONY: test
+test: ## Run the Python test suite
+	uv run pytest
+
+.PHONY: lint
+lint: ## Lint the Python workspace
+	uv run ruff check .
+
+.PHONY: typecheck
+typecheck: ## Type-check the Python workspace
+	uv run basedpyright
+
+.PHONY: e2e
+e2e: ## Run the hermetic end-to-end review-flow test
+	uv run pytest tests/e2e -q
+
+.PHONY: contract
+contract: ## Run the OpenAPI contract test
+	uv run pytest tests/contract -q
+
+.PHONY: verify
+verify: ## Run the full local gate: lint, types, tests, e2e, contract
+	uv run ruff check . && uv run basedpyright && uv run pytest -q && $(MAKE) e2e && $(MAKE) contract
+
 .PHONY: dev
 dev: ## Run the web dev server; MOCK_MODE=server|worker|off
 	cd apps/web && VITE_API_PROXY_TARGET="$(API_TARGET)" VITE_MOCK="$(MOCK_MODE)" bun run dev
@@ -82,4 +118,4 @@ preview-worker: ## Build + preview the web app with the in-browser mock worker (
 
 .PHONY: help
 help: ## Show available commands
-	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z0-9_-]+:.*?## / {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)

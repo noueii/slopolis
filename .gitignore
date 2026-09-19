@@ -6,3 +6,12 @@
 
 # Playwright MCP artifacts (untracked)
 .playwright-mcp/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.basedpyright/

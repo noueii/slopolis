@@ -36,6 +36,8 @@ export interface UserRef {
   handle: string
   name: string
   avatarUrl?: string
+  /** Whether this user holds workspace admin privileges. */
+  isAdmin: boolean
 }
 
 /** One pull request within a session. */

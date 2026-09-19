@@ -27,6 +27,7 @@ import type {
   SessionFilterOptions,
   SessionListParams,
   SessionStats,
+  UserRef,
 } from "./contract"
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "/api"
@@ -102,8 +103,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers)
   headers.set("Accept", "application/json")
   if (init?.body !== undefined) headers.set("Content-Type", "application/json")
-  // Ignored by a real backend; read by the MSW handlers.
-  headers.set("x-mock-scenario", mockScenario)
+  // Read only by the MSW handlers; omitted against a real backend.
+  if (isMockModeEnabled()) headers.set("x-mock-scenario", mockScenario)
 
   const response = await fetch(`${API_BASE}${path}`, { ...init, headers })
 
@@ -126,6 +127,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  getMe(): Promise<UserRef> {
+    return request<UserRef>("/me")
+  },
+
   listSessions(params: SessionListParams = {}): Promise<Paginated<ReviewSession>> {
     const query = buildQuery({
       q: params.q?.trim() || undefined,

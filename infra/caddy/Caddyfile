@@ -1,0 +1,20 @@
+# Caddy site config for the built slopolis SPA.
+#
+# Serve the static build from /srv with SPA fallback, and reverse-proxy the
+# API to the backend service. No hardcoded domain: listen on :80 and match the
+# request Host as-is, so it works on localhost and behind any reverse proxy.
+
+:80 {
+	# API requests go to the backend (apps/server), which listens on 8400.
+	handle /api/* {
+		reverse_proxy server:8400
+	}
+
+	# Everything else is the SPA: serve the file if it exists, otherwise
+	# hand back index.html so client-side routing works on deep links.
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}

@@ -6,7 +6,6 @@ import {
   LayoutList,
   PlugZap,
   Settings,
-  SquarePen,
   Waypoints,
   Workflow,
   type LucideIcon,
@@ -15,20 +14,22 @@ import {
 export type NavId =
   | "dashboard"
   | "sessions"
-  | "new-review"
   | "repositories"
+  | "usage"
   | "providers"
   | "templates"
-  | "usage"
   | "settings"
 
-export type NavGroup = "Review" | "Configure" | "Observe" | "System"
+export type NavGroup = "Workspace" | "Admin"
+
+export type NavAudience = "user" | "admin"
 
 export interface NavItem {
   id: NavId
   label: string
   icon: LucideIcon
   group: NavGroup
+  audience: NavAudience
   description: string
 }
 
@@ -37,65 +38,69 @@ export const NAV_ITEMS: NavItem[] = [
     id: "dashboard",
     label: "Dashboard",
     icon: LayoutDashboard,
-    group: "Review",
+    group: "Workspace",
+    audience: "user",
     description: "Start a review and watch what is running across your repositories.",
   },
   {
     id: "sessions",
     label: "Sessions",
     icon: LayoutList,
-    group: "Review",
+    group: "Workspace",
+    audience: "user",
     description: "Every review session, its targets, status, and cost.",
-  },
-  {
-    id: "new-review",
-    label: "New Review",
-    icon: SquarePen,
-    group: "Review",
-    description: "Paste PR links, add an optional prompt, and run a review.",
   },
   {
     id: "repositories",
     label: "Repositories",
     icon: BookMarked,
-    group: "Configure",
-    description: "Repositories covered by the GitHub App installation.",
+    group: "Workspace",
+    audience: "user",
+    description: "Connect repositories and control which ones slopolis reviews.",
+  },
+  {
+    id: "usage",
+    label: "Usage",
+    icon: Waypoints,
+    group: "Workspace",
+    audience: "user",
+    description: "Tokens and cost over time, by model, repo, and user.",
   },
   {
     id: "providers",
     label: "Providers & Models",
     icon: KeyRound,
-    group: "Configure",
+    group: "Admin",
+    audience: "admin",
     description: "Provider credentials and the model assigned to each role.",
   },
   {
     id: "templates",
     label: "Review templates",
     icon: Workflow,
-    group: "Configure",
+    group: "Admin",
+    audience: "admin",
     description:
       "Define review harnesses: an orchestrator, its sub-agents, and the rules they enforce.",
-  },
-  {
-    id: "usage",
-    label: "Usage",
-    icon: Waypoints,
-    group: "Observe",
-    description: "Tokens and cost over time, by model, repo, and user.",
   },
   {
     id: "settings",
     label: "Settings",
     icon: Settings,
-    group: "System",
+    group: "Admin",
+    audience: "admin",
     description: "Workspace policy, caps, and access control.",
   },
 ]
 
-export const NAV_GROUPS: NavGroup[] = ["Review", "Configure", "Observe", "System"]
+export const NAV_GROUPS: NavGroup[] = ["Workspace", "Admin"]
 
 export function navItemById(id: NavId): NavItem {
   return NAV_ITEMS.find((item) => item.id === id) ?? NAV_ITEMS[0]
+}
+
+export function visibleNavItems(isAdmin: boolean): NavItem[] {
+  return NAV_ITEMS.filter((item) => item.audience === "user" || isAdmin)
 }
 
 /** Exported for convenience so screens can reference the brand marks. */

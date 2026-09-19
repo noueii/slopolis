@@ -100,7 +100,7 @@ export function SessionsTable({
   const createdDesc = sort !== "created_asc"
 
   return (
-    <Table>
+    <Table className="min-w-[1080px]">
       <TableHeader>
           <TableRow className="hover:bg-transparent">
             <TableHead className="h-10 w-[30%] pl-4 text-2xs uppercase tracking-wider">

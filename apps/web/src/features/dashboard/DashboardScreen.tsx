@@ -33,13 +33,13 @@ import { useStickyCollapse } from "./lib/useStickyCollapse"
 export interface DashboardScreenProps {
   scenario: MockScenario
   onOpenSession: (id: string) => void
-  autoFocusComposer?: boolean
+  focusComposerNonce?: number
 }
 
 export function DashboardScreen({
   scenario,
   onOpenSession,
-  autoFocusComposer = false,
+  focusComposerNonce = 0,
 }: DashboardScreenProps) {
   const [selected, setSelected] = useState<SelectedPr[]>([])
   const [prompt, setPrompt] = useState("")
@@ -94,8 +94,17 @@ export function DashboardScreen({
 
   const focusComposer = useCallback(() => {
     expand()
+    const wrap = composerWrapRef.current
+    if (wrap && typeof wrap.scrollIntoView === "function") {
+      wrap.scrollIntoView({ behavior: "smooth", block: "start" })
+    }
     window.setTimeout(() => composerHandleRef.current?.focus(), 320)
   }, [expand])
+
+  useEffect(() => {
+    if (focusComposerNonce <= 0) return
+    focusComposer()
+  }, [focusComposerNonce, focusComposer])
 
   const presetLabel = useMemo(() => {
     const match = presets.data?.presets.find((item) => item.id === preset)
@@ -141,7 +150,6 @@ export function DashboardScreen({
               onClear={clearSelected}
               onOpenPicker={() => setPickerOpen(true)}
               onOpenSession={onOpenSession}
-              autoFocus={autoFocusComposer}
             />
           </div>
 

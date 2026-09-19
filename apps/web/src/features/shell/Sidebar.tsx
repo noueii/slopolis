@@ -9,11 +9,12 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { NAV_GROUPS, NAV_ITEMS, type NavId } from "./nav"
+import { NAV_GROUPS, visibleNavItems, type NavId } from "./nav"
 
 export interface SidebarProps {
   active: NavId
   onNavigate: (id: NavId) => void
+  isAdmin: boolean
   className?: string
 }
 
@@ -22,7 +23,9 @@ const WORKSPACES = [
   { id: "orbit-labs", name: "orbit-labs", hint: "connected" },
 ]
 
-export function Sidebar({ active, onNavigate, className }: SidebarProps) {
+export function Sidebar({ active, onNavigate, isAdmin, className }: SidebarProps) {
+  const items = visibleNavItems(isAdmin)
+
   return (
     <div className={cn("flex h-full flex-col bg-sidebar", className)}>
       <div className="flex flex-col gap-3 px-4 pb-4 pt-5">
@@ -86,14 +89,14 @@ export function Sidebar({ active, onNavigate, className }: SidebarProps) {
 
       <nav className="flex flex-1 flex-col gap-5 overflow-y-auto scrollbar-thin px-2 pb-4">
         {NAV_GROUPS.map((group) => {
-          const items = NAV_ITEMS.filter((item) => item.group === group)
-          if (items.length === 0) return null
+          const groupItems = items.filter((item) => item.group === group)
+          if (groupItems.length === 0) return null
           return (
             <div key={group} className="flex flex-col gap-1">
               <p className="px-2.5 pb-1 text-2xs font-semibold uppercase tracking-widest text-sidebar-muted">
                 {group}
               </p>
-              {items.map((item) => {
+              {groupItems.map((item) => {
                 const isActive = item.id === active
                 return (
                   <button

@@ -1,6 +1,7 @@
 import { Bell, Menu, Plus } from "lucide-react"
 
 import { isMockModeEnabled, type MockScenario } from "@/api/client"
+import type { UserRef } from "@/api/contract"
 import { Button } from "@/components/ui/button"
 import { MockDataMenu } from "./MockDataMenu"
 import { UserMenu } from "./UserMenu"
@@ -8,16 +9,20 @@ import { navItemById, type NavId } from "./nav"
 
 export interface TopBarProps {
   active: NavId
+  user: UserRef | null
   onOpenNav: () => void
   onNavigate: (id: NavId) => void
+  onNewReview: () => void
   scenario: MockScenario
   onScenarioChange: (scenario: MockScenario) => void
 }
 
 export function TopBar({
   active,
+  user,
   onOpenNav,
   onNavigate,
+  onNewReview,
   scenario,
   onScenarioChange,
 }: TopBarProps) {
@@ -52,11 +57,7 @@ export function TopBar({
             onScenarioChange={onScenarioChange}
           />
         ) : null}
-        <Button
-          size="sm"
-          className="h-8"
-          onClick={() => onNavigate("new-review")}
-        >
+        <Button size="sm" className="h-8" onClick={onNewReview}>
           <Plus data-icon="inline-start" />
           <span className="hidden sm:inline">New review</span>
         </Button>
@@ -69,7 +70,7 @@ export function TopBar({
           <Bell />
           <span className="absolute right-2 top-2 size-1.5 rounded-full bg-accent" />
         </Button>
-        <UserMenu />
+        <UserMenu user={user} />
       </div>
     </header>
   )

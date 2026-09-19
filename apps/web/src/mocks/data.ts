@@ -280,6 +280,7 @@ export function createDataset(now = Date.now()): MockDataset {
         handle: user.handle,
         name: user.name,
         avatarUrl: undefined,
+        isAdmin: user.handle === "noueii",
       },
       createdAt: created.toISOString(),
       startedAt,

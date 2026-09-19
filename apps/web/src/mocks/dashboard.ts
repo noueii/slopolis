@@ -119,6 +119,7 @@ function buildOpenPullRequests(
           id: `usr_${author.handle}`,
           handle: author.handle,
           name: author.name,
+          isAdmin: author.handle === "noueii",
         },
         updatedAt: new Date(
           now - (12 + pick("updated", 72 * 60)) * 60 * 1000,

@@ -18,6 +18,7 @@ import { SessionsError } from "./SessionsError"
 import { SessionsPagination } from "./SessionsPagination"
 import { SessionsSkeleton } from "./SessionsSkeleton"
 import { SessionsTable } from "./SessionsTable"
+import { SessionsTableCard } from "./components/SessionsTableCard"
 
 export interface SessionsScreenProps {
   onOpenSession: (id: string) => void
@@ -156,11 +157,20 @@ export function SessionsScreen({
       ) : null}
 
       {showTable ? (
-        <div
-          className={cn(
-            "overflow-hidden rounded-lg border border-border bg-card transition-opacity",
-            busy && "pointer-events-none opacity-60",
-          )}
+        <SessionsTableCard
+          busy={busy}
+          footer={
+            <SessionsPagination
+              page={data.page}
+              pageSize={data.pageSize}
+              total={data.total}
+              totalPages={data.totalPages}
+              onPageChange={(page) => setParams((prev) => ({ ...prev, page }))}
+              onPageSizeChange={(pageSize) =>
+                setParams((prev) => ({ ...prev, pageSize, page: 1 }))
+              }
+            />
+          }
         >
           <SessionsTable
             sessions={data.items}
@@ -168,17 +178,7 @@ export function SessionsScreen({
             onSortChange={(sort: SessionSort) => setFilter({ sort })}
             onOpenSession={onOpenSession}
           />
-          <SessionsPagination
-            page={data.page}
-            pageSize={data.pageSize}
-            total={data.total}
-            totalPages={data.totalPages}
-            onPageChange={(page) => setParams((prev) => ({ ...prev, page }))}
-            onPageSizeChange={(pageSize) =>
-              setParams((prev) => ({ ...prev, pageSize, page: 1 }))
-            }
-          />
-        </div>
+        </SessionsTableCard>
       ) : null}
     </div>
   )

@@ -196,6 +196,46 @@ export const sessionsHandlers = [
     return HttpResponse.json(payload)
   }),
 
+  http.get(`${API_BASE}/sessions/:id/events`, async ({ request, params }) => {
+    await latency(request)
+    const found = dataset.sessions.find((s) => s.id === params.id)
+    if (!found) {
+      return errorResponse(
+        404,
+        "session_not_found",
+        "That review session does not exist.",
+        `No session with id "${String(params.id)}".`,
+      )
+    }
+
+    const payload = JSON.stringify({
+      id: found.id,
+      status: found.status,
+      targets: found.targets.map((target) => ({
+        id: target.id,
+        number: target.number,
+        status: target.status,
+      })),
+    })
+    const frames = [
+      `event: session\ndata: ${payload}\n\n`,
+      `event: done\ndata: ${payload}\n\n`,
+    ]
+    const encoder = new TextEncoder()
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const frame of frames) controller.enqueue(encoder.encode(frame))
+        controller.close()
+      },
+    })
+    return new HttpResponse(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+      },
+    })
+  }),
+
   http.get(`${API_BASE}/sessions/:id`, async ({ request, params }) => {
     await latency(request)
     if (isErrorScenario(request)) {

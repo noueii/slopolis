@@ -1,0 +1,17 @@
+# Minimal LiteLLM gateway configuration.
+#
+# This file intentionally contains NO real keys. Credentials are read from the
+# container environment (see infra/docker-compose.yml and infra/.env.example).
+#
+# The single entry below is an OpenAI-compatible passthrough: point
+# OPENAI_BASE_URL at any provider that speaks the OpenAI wire format
+# (Ollama, vLLM, OpenRouter, Together, ...).
+
+model_list:
+  - model_name: default
+    litellm_params:
+      model: openai/default
+      api_base: os.environ/OPENAI_BASE_URL
+      api_key: os.environ/OPENAI_API_KEY
+
+general_settings: {}

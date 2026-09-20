@@ -14,10 +14,23 @@ import {
   beginSignIn,
   signInAttempted,
 } from "@/api/client"
-import type { DashboardData, MeResponse, WorkspaceRef } from "@/api/contract"
+import type {
+  DashboardData,
+  MeResponse,
+  ReviewSession,
+  WorkspaceRef,
+} from "@/api/contract"
 import App from "./App"
 
+// The session detail subscribes to the SSE stream on mount; this suite is about
+// which screen the URL selects, so the transport stays out of it.
+vi.mock("@/api/events", () => ({
+  TERMINAL_SESSION_STATUSES: new Set(["done", "failed", "cancelled"]),
+  subscribeToSession: () => () => undefined,
+}))
+
 vi.mock("@/api/client", () => ({
+  githubAppInstallUrl: "/api/github/install",
   api: {
     getMe: vi.fn(),
     listWorkspaces: vi.fn(),
@@ -86,6 +99,22 @@ const emptyDashboard: DashboardData = {
   generatedAt: "2026-01-01T00:00:00.000Z",
 }
 
+const session: ReviewSession = {
+  id: "sess_7f3a",
+  title: "Guard token refresh skew",
+  name: "acme/api-gateway#142",
+  status: "done",
+  model: "claude-sonnet-4",
+  provider: "Anthropic",
+  triggeredBy: { id: "usr_noueii", handle: "noueii", name: "Noah Yu", isAdmin: true },
+  createdAt: "2026-01-01T00:00:00.000Z",
+  targets: [],
+  targetCount: 0,
+  tokens: 0,
+  costUsd: 0,
+  findingsCount: 0,
+}
+
 beforeEach(() => {
   vi.mocked(signInAttempted).mockReturnValue(false)
   vi.mocked(beginSignIn).mockResolvedValue({ started: true })
@@ -98,7 +127,11 @@ beforeEach(() => {
   })
 })
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  // `navigate` pushes real history entries; a test must not inherit them.
+  window.history.replaceState(null, "", "/")
+})
 
 describe("App navigation and focus intent", () => {
   it("does not expose a New Review nav item", async () => {
@@ -253,5 +286,40 @@ describe("Workspace onboarding gate", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Check again" }))
 
     await waitFor(() => expect(api.getMe).toHaveBeenCalledTimes(2))
+  })
+})
+
+describe("URL routing", () => {
+  it("opens a session from its permalink", async () => {
+    vi.mocked(api.getSession).mockResolvedValue(session)
+    window.history.replaceState(null, "", "/sessions/sess_7f3a")
+
+    render(<App />)
+
+    expect(await screen.findByText("Guard token refresh skew")).toBeDefined()
+    expect(api.getSession).toHaveBeenCalledWith("sess_7f3a")
+    expect(
+      within(screen.getByRole("complementary")).getByText("Sessions"),
+    ).toBeDefined()
+  })
+
+  it("records a sidebar destination in the URL", async () => {
+    render(<App />)
+    await screen.findByLabelText("Review focus")
+
+    fireEvent.click(
+      within(screen.getByRole("complementary")).getByText("Repositories"),
+    )
+
+    await waitFor(() => expect(window.location.pathname).toBe("/repositories"))
+  })
+
+  it("falls back to the dashboard for a path nothing owns", async () => {
+    window.history.replaceState(null, "", "/nope/42")
+
+    render(<App />)
+
+    await screen.findByLabelText("Review focus")
+    await waitFor(() => expect(window.location.pathname).toBe("/"))
   })
 })

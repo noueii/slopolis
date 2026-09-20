@@ -434,3 +434,207 @@ export type ReviewTemplateInput = Omit<ReviewTemplate, "id" | "updatedAt">
 export interface ReviewTemplateListResponse {
   items: ReviewTemplate[]
 }
+
+/**
+ * A BYOK credential held in the workspace vault (spec 10.2). The key itself
+ * never leaves the server — `keyLast4` is all the admin UI ever sees.
+ */
+export interface ProviderCredential {
+  id: string
+  /** Provider family, e.g. `litellm`, or the compatible endpoint's name. */
+  provider: string
+  /** Custom endpoint for OpenAI-compatible providers; `null` for the default. */
+  baseUrl: string | null
+  /** Last four characters of the stored key, for telling keys apart. */
+  keyLast4: string
+  enabled: boolean
+  /** Outcome of the last test-connection call, `null` while never tested. */
+  lastStatus: "ok" | "failed" | null
+  lastCheckedAt: string | null
+  createdAt: string
+}
+
+/** `GET /api/providers`: every credential the workspace holds. */
+export interface ProviderListResponse {
+  items: ProviderCredential[]
+}
+
+/** `POST /api/providers` body; the key is write-only. */
+export interface ProviderInput {
+  provider: string
+  baseUrl?: string | null
+  apiKey: string
+}
+
+/**
+ * `PATCH /api/providers/{id}` body. Omitted fields stay as they are; `apiKey`
+ * is only present when the key is being rotated.
+ */
+export interface ProviderUpdate {
+  baseUrl?: string | null
+  apiKey?: string
+  enabled?: boolean
+}
+
+/**
+ * Result of `POST /api/providers/{id}/test`. A provider being unreachable is a
+ * recorded status, not an API error, so the call still answers 200.
+ */
+export interface ProviderTestResult {
+  status: "ok" | "failed"
+  detail: string | null
+  checkedAt: string
+}
+
+/** One model the workspace can point a role at (spec 10.2). */
+export interface CatalogModel {
+  /** Catalog row id — model ids contain slashes, so rows are addressed by id. */
+  id: string
+  modelId: string
+  provider: string
+  displayName: string | null
+  /** `import` rows came from the provider's model list; `manual` were typed in. */
+  source: "manual" | "import"
+  /** Credential the row was imported through; `null` for manual rows. */
+  credentialId: string | null
+}
+
+/** `GET /api/catalog/models`. */
+export interface CatalogModelListResponse {
+  items: CatalogModel[]
+  /** Model `auto` resolves to — the catalog's first entry — or `null` if empty. */
+  defaultModelId: string | null
+}
+
+/** `POST /api/catalog/models` body; always creates a `manual` row. */
+export interface CatalogModelInput {
+  modelId: string
+  provider: string
+  displayName?: string | null
+}
+
+/** `POST /api/catalog/models/import` body. */
+export interface ModelImportRequest {
+  credentialId: string
+}
+
+/**
+ * `POST /api/catalog/models/import` result. `imported` counts newly created
+ * rows only; models already in the catalog are refreshed, not counted twice.
+ */
+export interface ModelImportResponse {
+  imported: number
+  items: CatalogModel[]
+}
+
+/** One role's model choice; `modelId: null` means `auto` (spec 10.2). */
+export interface RoleAssignment {
+  role: string
+  modelId: string | null
+}
+
+/** `GET /api/catalog/assignments`: the workspace default plus every role. */
+export interface AssignmentResponse {
+  defaultModelId: string | null
+  roles: RoleAssignment[]
+}
+
+/** One dimension's usage roll-up: a model, a repository, or a user (spec 10.9). */
+export interface UsageBreakdown {
+  /** Machine key for the dimension value: model id, repo full name, handle. */
+  key: string
+  label: string
+  tokens: number
+  costUsd: number
+  /** Sessions that contributed at least one token to this bucket. */
+  sessions: number
+}
+
+/** One daily bucket of the usage time series. */
+export interface UsagePoint {
+  /** Calendar day, `YYYY-MM-DD`. */
+  date: string
+  tokens: number
+  costUsd: number
+  sessions: number
+}
+
+/** `GET /api/usage`: totals plus every breakdown the usage page renders. */
+export interface UsageResponse {
+  totalTokens: number
+  totalCostUsd: number
+  totalSessions: number
+  byModel: UsageBreakdown[]
+  byRepository: UsageBreakdown[]
+  /** Attributed per user, keyed by handle. */
+  byUser: UsageBreakdown[]
+  /** Daily buckets, oldest first. */
+  series: UsagePoint[]
+}
+
+/** Depth of a run in the harness tree (spec v2 §2). */
+export type AgentRunLevel = "main" | "pr" | "sub"
+
+/** Lifecycle of one agent run; values match `slopolis_core` `AgentStatus`. */
+export type AgentRunStatus =
+  | "pending"
+  | "running"
+  | "done"
+  | "failed"
+  | "cancelled"
+
+/**
+ * One node of a session's run tree (spec v2 §7): the session's `main` run, one
+ * `pr` run per target, and the `sub` runs they spawn.
+ */
+export interface AgentRunNode {
+  id: string
+  sessionId: string
+  /** PR target this run reviews; `null` for session-level work. */
+  targetId: string | null
+  /** Spawning run's id; `null` on a root. */
+  parentRunId: string | null
+  level: AgentRunLevel
+  /** Registry role, e.g. `orchestrator.main` or `logic-reviewer`. */
+  role: string
+  /** Model resolved for the run's role; `null` until it resolves one. */
+  modelId: string | null
+  objective: string
+  status: AgentRunStatus
+  tokens: number
+  costUsd: number
+  startedAt: string | null
+  endedAt: string | null
+  error: string | null
+  children: AgentRunNode[]
+}
+
+/**
+ * `GET /api/sessions/{id}/runs/tree`: roots first — the session's `main` run
+ * when it exists — with children nested under the run that spawned them.
+ */
+export interface AgentRunTreeResponse {
+  runs: AgentRunNode[]
+}
+
+/** One persisted harness event; the source of truth for replay (spec v2 §7). */
+export interface AgentEventItem {
+  id: string
+  runId: string
+  /** Monotonic per run; also the replay cursor. */
+  seq: number
+  /** Event type, e.g. `agent.spawned` or `agent.tool_call`. */
+  type: string
+  /** Shape depends on `type`; secrets are redacted before persisting. */
+  payload: Record<string, unknown>
+  createdAt: string
+}
+
+/**
+ * A page of run events. `nextSeq` is the cursor to pass back as `afterSeq`, or
+ * `null` once the replay has caught up with the run.
+ */
+export interface AgentEventPage {
+  items: AgentEventItem[]
+  nextSeq: number | null
+}

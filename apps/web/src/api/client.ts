@@ -8,7 +8,13 @@
  */
 
 import type {
+  AgentEventPage,
+  AgentRunTreeResponse,
   ApiErrorBody,
+  AssignmentResponse,
+  CatalogModel,
+  CatalogModelInput,
+  CatalogModelListResponse,
   CreateReviewRequest,
   CreateWorkspaceRequest,
   CreatedSession,
@@ -16,9 +22,16 @@ import type {
   DashboardParams,
   MeResponse,
   ModelCatalog,
+  ModelImportRequest,
+  ModelImportResponse,
   Paginated,
   PreflightRequest,
   PreflightResult,
+  ProviderCredential,
+  ProviderInput,
+  ProviderListResponse,
+  ProviderTestResult,
+  ProviderUpdate,
   RepositoryListResponse,
   RepositoryPullRequestsResponse,
   ReviewPresetCatalog,
@@ -26,9 +39,11 @@ import type {
   ReviewTemplate,
   ReviewTemplateInput,
   ReviewTemplateListResponse,
+  RoleAssignment,
   SessionFilterOptions,
   SessionListParams,
   SessionStats,
+  UsageResponse,
   WorkspaceListResponse,
   WorkspaceRef,
 } from "./contract"
@@ -313,5 +328,115 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     })
+  },
+
+  // --- provider & model administration (spec 10.2) --------------------------
+
+  listProviders(): Promise<ProviderListResponse> {
+    return request<ProviderListResponse>("/providers")
+  },
+
+  createProvider(input: ProviderInput): Promise<ProviderCredential> {
+    return request<ProviderCredential>("/providers", {
+      method: "POST",
+      body: JSON.stringify(input),
+    })
+  },
+
+  updateProvider(
+    id: string,
+    patch: ProviderUpdate,
+  ): Promise<ProviderCredential> {
+    return request<ProviderCredential>(`/providers/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    })
+  },
+
+  deleteProvider(id: string): Promise<void> {
+    return request<void>(`/providers/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    })
+  },
+
+  testProvider(id: string): Promise<ProviderTestResult> {
+    // The provider being down comes back as `status: "failed"` with 200; only
+    // the request itself failing (missing credential, no vault) throws.
+    return request<ProviderTestResult>(
+      `/providers/${encodeURIComponent(id)}/test`,
+      { method: "POST" },
+    )
+  },
+
+  listCatalogModels(): Promise<CatalogModelListResponse> {
+    return request<CatalogModelListResponse>("/catalog/models")
+  },
+
+  addCatalogModel(input: CatalogModelInput): Promise<CatalogModel> {
+    return request<CatalogModel>("/catalog/models", {
+      method: "POST",
+      body: JSON.stringify(input),
+    })
+  },
+
+  importCatalogModels(credentialId: string): Promise<ModelImportResponse> {
+    const body: ModelImportRequest = { credentialId }
+    return request<ModelImportResponse>("/catalog/models/import", {
+      method: "POST",
+      body: JSON.stringify(body),
+    })
+  },
+
+  deleteCatalogModel(id: string): Promise<void> {
+    // Addressed by catalog row id: model ids contain slashes and would not
+    // survive as a path segment.
+    return request<void>(`/catalog/models/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    })
+  },
+
+  getAssignments(): Promise<AssignmentResponse> {
+    return request<AssignmentResponse>("/catalog/assignments")
+  },
+
+  setAssignment(
+    role: string,
+    modelId: string | null,
+  ): Promise<RoleAssignment> {
+    // `null` is `auto`: the server deletes the assignment row rather than
+    // storing a sentinel, so the role falls back to the workspace default.
+    const body: Pick<RoleAssignment, "modelId"> = { modelId }
+    return request<RoleAssignment>(
+      `/catalog/assignments/${encodeURIComponent(role)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify(body),
+      },
+    )
+  },
+
+  // --- usage (spec 10.9) ----------------------------------------------------
+
+  getUsage(): Promise<UsageResponse> {
+    return request<UsageResponse>("/usage")
+  },
+
+  // --- harness run tree (spec v2 §7) ----------------------------------------
+
+  getRunTree(sessionId: string): Promise<AgentRunTreeResponse> {
+    return request<AgentRunTreeResponse>(
+      `/sessions/${encodeURIComponent(sessionId)}/runs/tree`,
+    )
+  },
+
+  getRunEvents(
+    sessionId: string,
+    runId: string,
+    opts: { afterSeq?: number } = {},
+  ): Promise<AgentEventPage> {
+    const query = buildQuery({ afterSeq: opts.afterSeq })
+    return request<AgentEventPage>(
+      `/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/events${query}`,
+    )
   },
 }

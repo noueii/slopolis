@@ -12,6 +12,24 @@
 The caps and the per-repository access override are specified, stored and enforced as their own
 feature: [10-workspace-settings.md](./10-workspace-settings.md).
 
+## Which credential a model call uses
+
+A workspace credential is only BYOK if the model calls actually use it. Every call a workspace
+causes — pre-flight's live model check and the worker's review — runs on the **credential linked to
+the model it is about**: its base URL and its key, decrypted from the vault. That is the same
+credential and the same base URL the screen's *Test connection* exercised, so a passing test means
+the review can reach that provider.
+
+- The process-level gateway (`LITELLM_BASE_URL` + `LITELLM_MASTER_KEY`) is the **fallback**, for a
+  workspace whose model has no usable credential — the self-hosted "one shared gateway" case.
+- If neither exists, the failure names both: the model that has no credential and the variables
+  that would configure a gateway. Neither path is a silent default.
+- Using a stored credential needs `ENCRYPTION_KEY` in the process doing the call (server for the
+  live check, worker for the review); without it only the fallback is available.
+- **Base URL is given without `/v1`** (`http://host:4000`). The chat client appends
+  `chat/completions` and the connection probe appends `/v1/models`; LiteLLM/OpenAI-compatible
+  gateways serve both, so one base URL covers the probe and the call.
+
 ## Vault
 
 `slopolis_core.vault.SecretVault` is the only code that sees a key in the clear.

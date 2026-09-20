@@ -107,6 +107,23 @@ A repo-root `.env` alone is **not** enough for `make api`: the server would see 
 answer `503 oauth_not_configured`. Keep `apps/server/.env` and `apps/worker/.env` in sync (a
 symlink works), or export the variables in your shell.
 
+### Reaching a model
+
+Reviews call a model, so a deployment needs a way to reach one. Two ways, in order of preference:
+
+1. **Per-model credentials in the app** (recommended). Sign in, open **Providers & Models**, add a
+   provider credential — LiteLLM first-class, base URL given **without `/v1`**, e.g.
+   `http://127.0.0.1:4000` — import its models, and assign one to the Review role. Every call then
+   uses that credential: pre-flight's live model check and the review itself. *Test connection*
+   exercises the same base URL and key, so a passing test means a review can reach the provider.
+2. **A deployment-wide gateway.** Set `LITELLM_BASE_URL` and `LITELLM_MASTER_KEY` (see
+   `.env.example`) in both `apps/server/.env` and `apps/worker/.env`. This is the fallback for any
+   model with no usable credential, and it is the only option when `ENCRYPTION_KEY` is unset — a
+   stored credential cannot be decrypted without it.
+
+With neither, reading the app works and a submission does not: pre-flight refuses it and names the
+model plus both ways out.
+
 **The private key must be a quoted multi-line value.** `python-dotenv` parses those; a bare
 multi-line paste does not, and the current settings class does not un-escape `\n` either:
 

@@ -7,6 +7,7 @@ import { isMockModeEnabled } from "@/api/client"
 
 import { dashboardHandlers } from "./dashboard"
 import { meHandlers } from "./me"
+import { providersHandlers } from "./providers"
 import { runsHandlers } from "./runs"
 import { sessionsHandlers } from "./sessions"
 import { templatesHandlers } from "./templates"
@@ -21,6 +22,7 @@ export const featureHandlers = [
   ...runsHandlers,
   ...dashboardHandlers,
   ...usageHandlers,
+  ...providersHandlers,
 ]
 
 /**

@@ -7,6 +7,10 @@ dependencies = [
     "pydantic>=2.9",
     "pydantic-settings>=2.5",
     "httpx>=0.27",
+    # Direct dependency: `slopolis_core.vault` uses AES-256-GCM and HKDF for the
+    # BYOK secret vault (spec 10.2). It also arrives transitively via
+    # `pyjwt[crypto]`, which is why the import worked before this module existed.
+    "cryptography>=43",
     "githubkit>=0.12",
     # [crypto] pulls in `cryptography`: every App JWT is signed with RS256, and
     # githubkit's AppAuth raises NotImplementedError without it.

@@ -15,7 +15,7 @@ import uuid
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, Numeric, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from slopolis_db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -28,6 +28,21 @@ class AgentRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """One agent execution in the session → PR → sub-agent run tree."""
 
     __tablename__ = "agent_runs"
+    #: The 1:1 rule of spec §2/§15 is enforced here, not by the model: at most one
+    #: ``level='pr'`` row per (session, target), so a retried attempt reuses its row
+    #: instead of adding a second PR orchestrator. The index is partial — a session
+    #: has one ``main`` row and a target may have many ``sub`` rows. Created by
+    #: migration 0004; the dialect filters keep the constraint live on SQLite.
+    __table_args__ = (
+        Index(
+            "ix_agent_runs_pr_target",
+            "session_id",
+            "target_id",
+            unique=True,
+            postgresql_where=text("level = 'pr'"),
+            sqlite_where=text("level = 'pr'"),
+        ),
+    )
 
     session_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("review_sessions.id", ondelete="CASCADE"),

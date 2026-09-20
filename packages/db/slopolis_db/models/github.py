@@ -56,6 +56,10 @@ class Repository(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     private: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     default_branch: Mapped[str] = mapped_column(String(255), nullable=False)
     connected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    #: The workspace's own switch (spec 10.1): ``connected`` says GitHub still
+    #: grants the repository, ``enabled`` says this workspace still reviews it.
+    #: A parked row keeps its sessions and findings and is refused at pre-flight.
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     last_activity_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,

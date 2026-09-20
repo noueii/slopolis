@@ -2296,6 +2296,7 @@ name = "slopolis-core"
 version = "0.0.0"
 source = { editable = "packages/core" }
 dependencies = [
+    { name = "cryptography" },
     { name = "githubkit" },
     { name = "httpx" },
     { name = "litellm" },
@@ -2307,6 +2308,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", specifier = ">=43" },
     { name = "githubkit", specifier = ">=0.12" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "litellm", specifier = ">=1.50" },

@@ -1,4 +1,4 @@
-"""Harness V1 runtime types and event layer (plan Tasks 1.1, 1.3; spec v2 §3-§7).
+"""Harness V1 registry, model resolution, runtime, types, and events (spec v2 §3-§7).
 
 Public surface is re-exported here so importers depend on
 ``slopolis_core.harness`` rather than the internal module layout.
@@ -11,6 +11,33 @@ from slopolis_core.harness.events import (
     EventCallback,
     EventSink,
     redact,
+)
+from slopolis_core.harness.registry import (
+    BUILT_IN_AGENTS,
+    MAIN_AGENT,
+    PR_AGENT,
+    READ_ONLY_TOOLS,
+    SPAWN_TOOL,
+    UnknownRoleError,
+    agent_spec,
+    model_roles,
+)
+from slopolis_core.harness.resolver import (
+    ModelChoice,
+    ModelResolutionError,
+    ModelResolver,
+    StaticResolver,
+)
+from slopolis_core.harness.runtime import (
+    AgentResult,
+    AgentRuntime,
+    AssistantTurn,
+    LlmTurn,
+    Message,
+    RunStore,
+    Tool,
+    ToolCall,
+    ToolSpec,
 )
 from slopolis_core.harness.types import (
     AgentEvent,
@@ -27,10 +54,18 @@ from slopolis_core.harness.types import (
 )
 
 __all__ = [
+    "BUILT_IN_AGENTS",
+    "MAIN_AGENT",
+    "PR_AGENT",
+    "READ_ONLY_TOOLS",
+    "SPAWN_TOOL",
     "AgentEvent",
+    "AgentResult",
+    "AgentRuntime",
     "AgentSpec",
     "AgentStatus",
     "Aspect",
+    "AssistantTurn",
     "CallbackSink",
     "CollectingSink",
     "EventBus",
@@ -38,10 +73,23 @@ __all__ = [
     "EventSink",
     "EventType",
     "HarnessLevel",
+    "LlmTurn",
+    "Message",
+    "ModelChoice",
+    "ModelResolutionError",
+    "ModelResolver",
     "Policy",
     "RunNode",
+    "RunStore",
     "Scope",
+    "StaticResolver",
     "SubAgentResult",
     "SubtaskSpec",
+    "Tool",
+    "ToolCall",
+    "ToolSpec",
+    "UnknownRoleError",
+    "agent_spec",
+    "model_roles",
     "redact",
 ]

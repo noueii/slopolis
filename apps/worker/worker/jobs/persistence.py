@@ -16,8 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from slopolis_core.domain import SessionStatus, TargetStatus
 from slopolis_core.findings import Finding as CoreFinding
+from slopolis_core.harness import AgentStatus
 from slopolis_core.review.harness import ReviewResult
 from slopolis_db.models import Finding, SessionTarget, SessionTargetRun, UsageRecord
+from worker.jobs.agent_runs import finish_session_main_run
 
 __all__ = [
     "fail_run",
@@ -166,11 +168,21 @@ async def mark_target_cancelled(db: AsyncSession, target: SessionTarget) -> None
     await db.flush()
 
 
+#: The run status a terminal session's ``main`` node ends in (spec v2 §15).
+_SESSION_RUN_STATUS: dict[SessionStatus, AgentStatus] = {
+    SessionStatus.DONE: AgentStatus.DONE,
+    SessionStatus.FAILED: AgentStatus.FAILED,
+    SessionStatus.CANCELLED: AgentStatus.CANCELLED,
+}
+
+
 async def recompute_session(db: AsyncSession, session_id: uuid.UUID) -> SessionStatus:
     """Recompute and persist the parent session status from its targets.
 
     All targets terminal: ``failed`` if any failed, ``cancelled`` if every one
-    was cancelled, else ``done``. Otherwise the session stays ``running``.
+    was cancelled, else ``done``. Otherwise the session stays ``running``. A
+    terminal session also closes its ``main`` run (spec v2 §15), the session's
+    aggregation point in the run tree.
     """
     from slopolis_db.models import ReviewSession
 
@@ -191,6 +203,14 @@ async def recompute_session(db: AsyncSession, session_id: uuid.UUID) -> SessionS
     session.status = done
     if done is not SessionStatus.RUNNING:
         session.finished_at = dt.datetime.now(dt.UTC)
+        run_status = _SESSION_RUN_STATUS.get(done)
+        if run_status is not None:
+            await finish_session_main_run(
+                db,
+                session_id,
+                run_status,
+                summary=f"{len(statuses)} target(s) finished as {done.value}",
+            )
     await db.flush()
     return done
 

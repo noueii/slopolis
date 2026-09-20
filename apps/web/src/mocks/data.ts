@@ -211,18 +211,38 @@ export function createDataset(now = Date.now()): MockDataset {
         targetStatus === "queued"
           ? 0
           : 9000 + Math.floor(rand() * 68000)
+      // One draw, taken for the same targets as before: a failed target whose
+      // model never reported usage is one the retry has to review again.
+      const usageDraw =
+        targetStatus === "running" || targetStatus === "failed" ? rand() : 0
       const doneRatio =
         targetStatus === "done"
           ? 1
           : targetStatus === "running"
-            ? 0.35 + rand() * 0.4
+            ? 0.35 + usageDraw * 0.4
             : targetStatus === "failed"
-              ? 0.4 + rand() * 0.5
+              ? usageDraw < 0.35
+                ? 0
+                : 0.4 + usageDraw * 0.5
               : 0
       const tokens = Math.round(baseTokens * doneRatio)
       const costUsd = Number(((tokens / 1000) * model.pricePer1k).toFixed(4))
+      const drawnFindings =
+        targetStatus === "done"
+          ? Math.floor(rand() * 14)
+          : Math.floor(rand() * 4)
       const findingsCount =
-        targetStatus === "done" ? Math.floor(rand() * 14) : Math.floor(rand() * 4)
+        targetStatus === "failed" && tokens === 0 ? 0 : drawnFindings
+      // The retry action the server computes from the last attempt: a cancelled
+      // target never published anything either, so its retry is a review.
+      const retryAction: SessionTarget["retryAction"] =
+        targetStatus === "failed"
+          ? tokens > 0
+            ? "publish"
+            : "review"
+          : targetStatus === "cancelled"
+            ? "review"
+            : null
 
       return {
         id: `tgt_${i}_${index}`,
@@ -237,6 +257,7 @@ export function createDataset(now = Date.now()): MockDataset {
         url: `https://github.com/${repo.fullName}/pull/${number}`,
         headBranch: headBranchFromTitle(title),
         status: targetStatus,
+        retryAction,
         findingsCount,
         tokens,
         costUsd,

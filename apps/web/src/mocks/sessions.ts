@@ -410,7 +410,11 @@ export const sessionsHandlers = [
       )
     }
 
-    for (const target of retryable) target.status = "queued"
+    for (const target of retryable) {
+      target.status = "queued"
+      // Back on the queue: it is not a retry candidate again until it settles.
+      target.retryAction = null
+    }
     found.status = "queued"
     // The session is in flight again, so the fields that only describe a
     // finished one go with it.

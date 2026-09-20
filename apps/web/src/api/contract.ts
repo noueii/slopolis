@@ -100,6 +100,12 @@ export interface SessionTarget {
   /** GitHub head ref for the PR, e.g. `fix/guard-token-refresh`. */
   headBranch: string
   status: TargetStatus
+  /**
+   * What a manual retry will do: `"publish"` reposts the review the last
+   * attempt already produced, `"review"` runs the model again. Absent/null
+   * when the target is not retryable.
+   */
+  retryAction?: "review" | "publish" | null
   findingsCount: number
   tokens: number
   costUsd: number

@@ -271,13 +271,26 @@ export function SessionDetail({ sessionId, onBack }: SessionDetailProps) {
   // something to show; a session with no runs keeps the summary it always had.
   const activeTab = tab ?? (runTree.runs.length > 0 ? "runs" : "summary")
 
-  const retryableCount = data
-    ? data.targets.filter((target) =>
-        RETRYABLE_TARGET_STATUS[
-          liveTargetStatus(live, target.id) ?? target.status
-        ],
-      ).length
-    : 0
+  // Whether the action is offered still follows the live status — the server
+  // marks `retryAction` on the snapshot a read returned, which a running target
+  // on the stream has already outgrown. The label follows `retryAction`.
+  const retryableTargets = data
+    ? data.targets.filter(
+        (target) =>
+          RETRYABLE_TARGET_STATUS[
+            liveTargetStatus(live, target.id) ?? target.status
+          ],
+      )
+    : []
+  const retryableCount = retryableTargets.length
+
+  // Every retryable target being a publish retry means no model runs again, so
+  // the action says what it will do: repost the review already on hand (spec
+  // 10.5 §Retrying a run that only failed to publish). Anything else — including
+  // a target the server did not label — is a review retry.
+  const retryPublishesOnly =
+    retryableCount > 0 &&
+    retryableTargets.every((target) => target.retryAction === "publish")
 
   const handleRetry = useCallback(async () => {
     if (!data) return
@@ -356,8 +369,17 @@ export function SessionDetail({ sessionId, onBack }: SessionDetailProps) {
                   ) : (
                     <RotateCcw data-icon="inline-start" />
                   )}
-                  {retrying ? "Retrying…" : "Retry failed targets"}
+                  {retrying
+                    ? "Retrying…"
+                    : retryPublishesOnly
+                      ? "Retry publishing"
+                      : "Retry failed targets"}
                 </Button>
+                {retryPublishesOnly ? (
+                  <p className="max-w-xs text-right text-2xs leading-relaxed text-muted-foreground">
+                    The review is already done — no new analysis runs.
+                  </p>
+                ) : null}
                 {retryError ? (
                   <p
                     role="alert"

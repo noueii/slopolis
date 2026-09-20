@@ -2,9 +2,10 @@
  * The manual retry action (spec 10.5 §Manual retry).
  *
  * What matters here is what a reviewer of a failed session sees and can do:
- * the action is offered exactly when a target can be re-run, it posts one
- * retry for the session, the API's own refusal is the message on screen, and a
- * session that comes back queued reads that way without a reload.
+ * the action is offered exactly when a target can be re-run, it says whether
+ * the retry reposts the review already on hand or runs the model again, it
+ * posts one retry for the session, the API's own refusal is the message on
+ * screen, and a session that comes back queued reads that way without a reload.
  */
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
@@ -72,7 +73,11 @@ class MockEventSource {
 const OriginalEventSource = globalThis.EventSource
 const SESSION_ID = "ses_failed"
 
-function target(id: string, status: TargetStatus): SessionTarget {
+function target(
+  id: string,
+  status: TargetStatus,
+  retryAction?: SessionTarget["retryAction"],
+): SessionTarget {
   return {
     id,
     repository: {
@@ -86,15 +91,24 @@ function target(id: string, status: TargetStatus): SessionTarget {
     url: "https://github.com/acme/api-gateway/pull/142",
     headBranch: "fix/token-refresh",
     status,
+    retryAction,
     findingsCount: 2,
     tokens: 18_000,
     costUsd: 0.08,
   }
 }
 
+/**
+ * A status, plus the retry action the server attaches to it when the test cares
+ * about what the retry will do.
+ */
+type TargetSpec =
+  | TargetStatus
+  | { status: TargetStatus; retryAction: SessionTarget["retryAction"] }
+
 function sessionWith(
   status: SessionStatus,
-  statuses: TargetStatus[],
+  specs: TargetSpec[],
 ): ReviewSession {
   return {
     id: SESSION_ID,
@@ -110,10 +124,12 @@ function sessionWith(
       isAdmin: false,
     },
     createdAt: "2026-09-20T09:00:00.000Z",
-    targets: statuses.map((targetStatus, index) =>
-      target(`tgt_${index + 1}`, targetStatus),
-    ),
-    targetCount: statuses.length,
+    targets: specs.map((spec, index) => {
+      const { status: targetStatus, retryAction } =
+        typeof spec === "string" ? { status: spec, retryAction: undefined } : spec
+      return target(`tgt_${index + 1}`, targetStatus, retryAction)
+    }),
+    targetCount: specs.length,
     tokens: 18_000,
     costUsd: 0.08,
     findingsCount: 2,
@@ -122,10 +138,30 @@ function sessionWith(
 
 /** One target failed, one finished: the shape the action exists for. */
 const FAILED = sessionWith("failed", ["failed", "done"])
-const ALL_DONE = sessionWith("done", ["done", "done"])
+/** The last attempt bought the review and only failed to publish it. */
+const FAILED_PUBLISH = sessionWith("failed", [
+  { status: "failed", retryAction: "publish" },
+  "done",
+])
+/** The model has to run again before anything can be published. */
+const FAILED_REVIEW = sessionWith("failed", [
+  { status: "failed", retryAction: "review" },
+  "done",
+])
+/** The model has to run again for the cancelled one, so the action says so. */
+const MIXED_RETRY = sessionWith("failed", [
+  { status: "failed", retryAction: "publish" },
+  { status: "cancelled", retryAction: "review" },
+])
+const ALL_DONE = sessionWith("done", [
+  { status: "done", retryAction: null },
+  { status: "done", retryAction: null },
+])
 const REQUEUED = sessionWith("queued", ["queued", "done"])
 
 const RETRY = "Retry failed targets"
+const RETRY_PUBLISH = "Retry publishing"
+const NO_NEW_ANALYSIS = /no new analysis runs/
 
 function header(): HTMLElement {
   const found = screen.getByRole("heading", { name: "acme/api-gateway#142" })
@@ -178,6 +214,40 @@ describe("SessionDetail manual retry", () => {
     await screen.findByRole("heading", { name: "acme/api-gateway#142" })
 
     expect(screen.queryByRole("button", { name: RETRY })).toBeNull()
+    expect(screen.queryByRole("button", { name: RETRY_PUBLISH })).toBeNull()
+  })
+
+  it("says the retry will publish when every retryable target holds a review", async () => {
+    renderDetail(FAILED_PUBLISH)
+
+    // The server marked the failed target as a publish retry, so the action
+    // promises no second model call rather than a silent one.
+    const button = await screen.findByRole("button", { name: RETRY_PUBLISH })
+    expect(screen.queryByRole("button", { name: RETRY })).toBeNull()
+    expect(screen.getByText(NO_NEW_ANALYSIS)).toBeDefined()
+
+    vi.mocked(api.retrySession).mockResolvedValue(FAILED_PUBLISH)
+    fireEvent.click(button)
+    await waitFor(() =>
+      expect(api.retrySession).toHaveBeenCalledWith(SESSION_ID),
+    )
+  })
+
+  it("keeps the review label when a retryable target needs the model", async () => {
+    renderDetail(FAILED_REVIEW)
+
+    await screen.findByRole("button", { name: RETRY })
+    expect(screen.queryByRole("button", { name: RETRY_PUBLISH })).toBeNull()
+    expect(screen.queryByText(NO_NEW_ANALYSIS)).toBeNull()
+  })
+
+  it("promises a review when only some of the retryable targets can publish", async () => {
+    renderDetail(MIXED_RETRY)
+
+    // One target still needs the model, so the action must not imply otherwise.
+    await screen.findByRole("button", { name: RETRY })
+    expect(screen.queryByRole("button", { name: RETRY_PUBLISH })).toBeNull()
+    expect(screen.queryByText(NO_NEW_ANALYSIS)).toBeNull()
   })
 
   it("shows the server's refusal and frees the action again", async () => {

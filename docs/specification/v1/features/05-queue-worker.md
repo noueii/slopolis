@@ -33,3 +33,21 @@ provider back up — and resubmitting the pull request would pay for the same re
 - `409 nothing_to_retry` when no target is retryable, `409 target_running` when the caller asked for
   a target the queue owns, `404 session_not_found` (with the usual per-viewer access rules) when the
   session is not the caller's to act on.
+
+### Retrying a run that only failed to publish
+
+A review is the expensive part; publishing is a write. When a target's last attempt failed **with a
+GitHub error after the model had already run** — the attempt recorded tokens, so the review exists —
+a retry **publishes the review it already has** instead of buying the same answer again.
+
+- The decision is made where the target's state is known (the retry endpoint) and travels with the
+  job, so the worker never guesses and never re-reviews on its own initiative.
+- A **publish retry makes no model call**: it re-reads the pull request (for the head commit) and the
+  repository config, rebuilds the summary, inline and check payloads from the **persisted findings**,
+  and posts them. It records an attempt like any other, marked as a publish retry, so the history
+  says what happened.
+- Anything else is unchanged: pre-flight is not re-run, the session returns to `queued`, the run
+  tree's nodes are reused.
+- A failed target reports which retry it will get — `retryAction: "publish"` when a review is already
+  on hand, `"review"` when the model has to run again, absent when the target is not retryable — so
+  the UI can say what the button will do rather than surprising the user with a second model call.

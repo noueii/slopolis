@@ -7,6 +7,7 @@ service, and the ARQ pool. No network, no Redis, no Postgres.
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 from collections.abc import AsyncGenerator, Callable, Sequence
 from dataclasses import dataclass, field
@@ -137,6 +138,8 @@ class FakeGateway:
         self.covered = covered if covered is not None else ["acme/api", "acme/web"]
         self.access = access
         self.files = files or {}
+        #: The access override pre-flight asked each repo's check for (spec 10.10).
+        self.access_calls: list[tuple[str, str | None]] = []
 
     async def resolve_pr(self, url: str) -> PrReference:
         if url not in self.refs:
@@ -147,8 +150,14 @@ class FakeGateway:
         return list(self.covered)
 
     async def user_has_access(
-        self, repo_full_name: str, *, private: bool, user_login: str
+        self,
+        repo_full_name: str,
+        *,
+        private: bool,
+        user_login: str,
+        required: str | None = None,
     ) -> bool:
+        self.access_calls.append((repo_full_name, required))
         return self.access
 
     async def read_repo_file(self, repo_full_name: str, path: str) -> str | None:
@@ -164,10 +173,14 @@ class FakeWorkspace:
         model: tuple[str, str] | None = ("claude-sonnet-4", "Anthropic"),
         credential: bool = True,
         assigned: tuple[str, str] | None = None,
+        access: str | None = None,
     ) -> None:
         self.model = model
         self.credential = credential
         self.assigned = assigned
+        #: The repository access override this workspace reports, if any.
+        self.access = access
+        self.access_calls: list[str] = []
 
     async def default_model(self) -> tuple[str, str] | None:
         return self.model
@@ -177,6 +190,10 @@ class FakeWorkspace:
 
     async def model_assigned(self, role: str) -> tuple[str, str] | None:
         return self.assigned if self.assigned is not None else self.model
+
+    async def required_access(self, repo_full_name: str) -> str | None:
+        self.access_calls.append(repo_full_name)
+        return self.access
 
 
 class FakeAppInstallations:
@@ -394,8 +411,13 @@ async def seed_session(
     title: str = "Guard token refresh skew",
     tokens: int = 120,
     cost: str = "0.010000",
+    created_at: dt.datetime | None = None,
 ) -> ReviewSession:
-    """Create a session plus one target and commit it."""
+    """Create a session plus one target and commit it.
+
+    ``created_at`` defaults to the row's server timestamp; a test pins it when
+    it needs a session on a particular side of a date boundary.
+    """
     review = ReviewSession(
         workspace_id=workspace.id,
         title=title,
@@ -406,6 +428,8 @@ async def seed_session(
         provider="Anthropic",
         triggered_by_user_id=user.id,
     )
+    if created_at is not None:
+        review.created_at = created_at
     session.add(review)
     await session.flush()
     target = SessionTarget(

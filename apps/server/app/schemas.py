@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import CAMEL
 from slopolis_core.domain import SessionStatus, TargetStatus
+from slopolis_db.models.github import RequiredAccess
 
 __all__ = [
     "AgentEventItem",
@@ -55,6 +56,7 @@ __all__ = [
     "RepositoryPullRequestsResponse",
     "RepositoryRef",
     "RepositorySummary",
+    "RequiredAccess",
     "ReviewPreset",
     "ReviewPresetCatalog",
     "ReviewSession",
@@ -65,6 +67,8 @@ __all__ = [
     "SessionTarget",
     "UserRef",
     "WireModel",
+    "WorkspaceSettings",
+    "WorkspaceSettingsUpdate",
 ]
 
 
@@ -108,6 +112,40 @@ class CreateWorkspaceRequest(WireModel):
     """Body of ``POST /api/workspaces``."""
 
     name: str
+
+
+class WorkspaceSettings(WireModel):
+    """The workspace's caps (spec 10.10).
+
+    Every field is ``null`` when unset, which means unlimited: the caps are
+    opt-in, so a deployment that never touches them submits exactly as it did.
+    A set value is an integer >= 1.
+    """
+
+    max_concurrent_sessions: int | None = None
+    max_sessions_per_user_per_day: int | None = None
+    max_targets_per_repo: int | None = None
+    max_targets_per_installation: int | None = None
+
+
+class WorkspaceSettingsUpdate(WireModel):
+    """Body of ``PATCH /api/workspaces/settings``.
+
+    Partial on purpose: an omitted field is left as it is, while an explicit
+    ``null`` clears the cap back to unlimited — the two cannot be told apart
+    from the value alone, so the route reads ``model_fields_set``.
+    """
+
+    model_config = ConfigDict(
+        alias_generator=CAMEL,
+        populate_by_name=True,
+        extra="forbid",
+    )
+
+    max_concurrent_sessions: int | None = Field(default=None, ge=1)
+    max_sessions_per_user_per_day: int | None = Field(default=None, ge=1)
+    max_targets_per_repo: int | None = Field(default=None, ge=1)
+    max_targets_per_installation: int | None = Field(default=None, ge=1)
 
 
 class UserRef(WireModel):
@@ -247,6 +285,8 @@ class RepositorySummary(WireModel):
     connected: bool
     #: The workspace switch: a connected repository can be parked without losing its history.
     enabled: bool = True
+    #: The access policy pre-flight applies to this repository (spec 10.10).
+    required_access: RequiredAccess = "default"
 
 
 class RepositoryListResponse(WireModel):

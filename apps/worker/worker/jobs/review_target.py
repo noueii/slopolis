@@ -9,6 +9,13 @@ and recomputes the parent session. Transient failures retry with bounded
 exponential backoff; permanent failures (invalid repo config) fail the target
 immediately. One target's failure never affects another — they are separate
 jobs.
+
+The target's per-repository and per-installation caps are applied here too
+(spec 10.5): before an attempt starts, the job holds a run slot per capped
+dimension (see :mod:`worker.jobs.slots`), waiting in-job for one and, if the wait
+runs out, deferring itself back onto the queue. The gate never marks a target
+failed — the queue decides a target's fate, and the job only runs what the gate
+let through.
 """
 
 from __future__ import annotations
@@ -56,6 +63,7 @@ from worker.jobs.model_selection import ResolvedModel, resolve_model
 from worker.jobs.publish import PublishPlan, publish
 from worker.jobs.publishing import InlineTarget, inline_targets
 from worker.jobs.repo_config_load import PermanentTargetError, load_repo_config
+from worker.jobs.slots import SLOT_WAIT_FOREVER, SlotGate, SlotUnavailable
 
 __all__ = ["PermanentTargetError", "WorkerCtx", "review_target"]
 
@@ -82,6 +90,9 @@ class WorkerCtx(TypedDict):
     review: ReviewContext
     session_factory: SessionFactory
     job_try: NotRequired[int]
+    #: The per-repo/per-installation slot gate. Absent means no caps are enforced
+    #: at all — the shape every caller had before spec 10.5 existed.
+    slots: NotRequired[SlotGate]
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,27 +141,94 @@ class _ReviewStopped(RuntimeError):
 
 async def review_target(ctx: WorkerCtx, session_id: str, target_id: str) -> None:
     """Run one review target end to end, retrying transient failures via ARQ."""
-    review = ctx["review"]
     async with ctx["session_factory"]() as db:
-        load = await load_target(db, session_id, target_id)
-        if load.outcome is LoadOutcome.MISSING:
-            _LOG.warning(
-                "target not found",
-                extra={"session_id": session_id, "target_id": target_id},
-            )
-            return
-        if load.outcome is LoadOutcome.SESSION_CANCELLED and load.job is not None:
-            await _cancel_target(db, load.job)
-            await db.commit()
-            return
-        if load.outcome in (LoadOutcome.TARGET_TERMINAL, LoadOutcome.SESSION_TERMINAL):
-            return
-        job = load.job
+        job = await _guarded_target(db, session_id, target_id)
         if job is None:
             return
-        run = await persistence.start_run(db, job.target, now=_now())
+        slots = ctx.get("slots")
+        if slots is None:
+            await _start_and_run(ctx=ctx, db=db, job=job)
+            return
+        try:
+            async with slots.hold(job, wait_s=_slot_wait(ctx)) as waited:
+                if waited:
+                    # The target can sit here for a while, so re-read the guards
+                    # before running it: one cancelled while it waited must not
+                    # be reviewed anyway (spec §11).
+                    db.expire_all()
+                    reloaded = await _guarded_target(db, session_id, target_id)
+                    if reloaded is None:
+                        return
+                    job = reloaded
+                await _start_and_run(ctx=ctx, db=db, job=job)
+        except SlotUnavailable as exc:
+            raise _defer_without_slot(ctx=ctx, job=job) from exc
+
+
+async def _guarded_target(
+    db: AsyncSession, session_id: str, target_id: str
+) -> TargetJob | None:
+    """Load the target and apply the terminal and cancellation guards.
+
+    Returns the job to run, or ``None`` when there is nothing to do — which
+    includes having just recorded a cancelled session's target as cancelled.
+    """
+    load = await load_target(db, session_id, target_id)
+    if load.outcome is LoadOutcome.MISSING:
+        _LOG.warning(
+            "target not found",
+            extra={"session_id": session_id, "target_id": target_id},
+        )
+        return None
+    if load.outcome is LoadOutcome.SESSION_CANCELLED and load.job is not None:
+        await _cancel_target(db, load.job)
         await db.commit()
-        await _run_attempt(ctx=ctx, db=db, review=review, job=job, run=run)
+        return None
+    if load.outcome in (LoadOutcome.TARGET_TERMINAL, LoadOutcome.SESSION_TERMINAL):
+        return None
+    return load.job
+
+
+async def _start_and_run(*, ctx: WorkerCtx, db: AsyncSession, job: TargetJob) -> None:
+    """Open this attempt's run row and execute it."""
+    run = await persistence.start_run(db, job.target, now=_now())
+    await db.commit()
+    await _run_attempt(ctx=ctx, db=db, review=ctx["review"], job=job, run=run)
+
+
+def _slot_wait(ctx: WorkerCtx) -> float:
+    """Return how long this attempt may wait in-job for a free slot.
+
+    ARQ counts every deferral against ``max_tries``, so a target deferred from
+    its *last* permitted try would be dropped by the queue with the target still
+    ``running`` — worse than a parked worker process. That attempt therefore
+    waits out the job timeout instead of deferring, which keeps the gate from
+    being what ends a target (spec 10.5).
+    """
+    config = ctx["review"].config
+    if int(ctx.get("job_try", 1)) >= config.max_tries:
+        return SLOT_WAIT_FOREVER
+    return config.slot_wait_s
+
+
+def _defer_without_slot(*, ctx: WorkerCtx, job: TargetJob) -> Retry:
+    """Send a target that found no free slot back to the queue, unfailed.
+
+    Nothing is written about the target or its attempts, so the deferral is
+    invisible the next time this job runs: the gate decides when a target runs,
+    and the queue decides whether it does (spec 10.5).
+    """
+    config = ctx["review"].config
+    _LOG.info(
+        "no free slot; deferring target",
+        extra={
+            "session_id": str(job.session_id),
+            "target_id": str(job.target_id),
+            "repo": job.repo_full_name,
+            "waited_s": config.slot_wait_s,
+        },
+    )
+    return Retry(defer=config.slot_defer_s)
 
 
 async def _run_attempt(

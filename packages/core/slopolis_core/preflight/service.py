@@ -27,6 +27,23 @@ __all__ = ["PreflightService"]
 _REPO_CONFIG_PATH = ".codereview.yml"
 
 
+def _access_refusal(full_name: str, required: str | None) -> str:
+    """The refusal notice for a denied trigger, naming what was required.
+
+    ``required`` is the repository's override; when one is in force the notice
+    states it plainly instead of restating the spec rule (spec 10.10).
+    """
+    if required is None:
+        return (
+            f"You lack the required access to {full_name}; "
+            "private repos need read access, public repos need write access."
+        )
+    return (
+        f"You lack the required access to {full_name}; "
+        f"this repository requires {required} access."
+    )
+
+
 class _RunState:
     """Mutable accumulator for one pre-flight run."""
 
@@ -62,6 +79,7 @@ class _RunContext:
         self,
         *,
         gateway: GitHubGateway,
+        workspace: WorkspaceConfigProvider,
         state: _RunState,
         covered: set[str],
         model_id: str,
@@ -69,6 +87,7 @@ class _RunContext:
         live_check: LiveModelCheck,
     ) -> None:
         self.gateway = gateway
+        self.workspace = workspace
         self.state = state
         self.covered = covered
         self.model_id = model_id
@@ -115,6 +134,7 @@ class PreflightService:
         covered = set(await self._gateway.list_covered_repos())
         context = _RunContext(
             gateway=self._gateway,
+            workspace=self._workspace,
             state=state,
             covered=covered,
             model_id=model_id,
@@ -145,17 +165,16 @@ class PreflightService:
             )
             return
 
+        required = await context.workspace.required_access(full_name)
         has_access = await context.gateway.user_has_access(
             full_name,
             private=reference.repository.private,
             user_login=context.user_login,
+            required=required,
         )
         if not has_access:
             state.invalid.append(url)
-            state.notices.append(
-                f"You lack the required access to {full_name}; "
-                "private repos need read access, public repos need write access."
-            )
+            state.notices.append(_access_refusal(full_name, required))
             return
 
         if not await self._check_live_model(context):

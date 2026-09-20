@@ -1,9 +1,10 @@
 """``preflight.ports.WorkspaceConfigProvider`` implemented from the database.
 
-Reads the workspace's model assignment, model catalog, and credential rows to
-answer the three questions pre-flight asks: which model is assigned, is a
-credential ready, and what is the workspace default. All queries are scoped to
-a single workspace id resolved once per request.
+Reads the workspace's model assignment, model catalog, credential rows, and the
+repository access override to answer the four questions pre-flight asks: which
+model is assigned, is a credential ready, what is the workspace default, and
+what access does one repository require. All queries are scoped to a single
+workspace id resolved once per request.
 """
 
 from __future__ import annotations
@@ -13,11 +14,14 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from slopolis_db.models import ModelAssignment, ModelCatalog, ProviderCredential
+from slopolis_db.models import ModelAssignment, ModelCatalog, ProviderCredential, Repository
 
 __all__ = ["WorkspaceConfigAdapter"]
 
 _REVIEW_ROLE = "review"
+
+#: ``repositories.required_access`` value meaning "apply the spec rule".
+_DEFAULT_ACCESS = "default"
 
 
 class WorkspaceConfigAdapter:
@@ -62,6 +66,23 @@ class WorkspaceConfigAdapter:
         if assignment is None:
             return None
         return await self._model_for_assignment(assignment)
+
+    async def required_access(self, repo_full_name: str) -> str | None:
+        """Return the repository's access override, or ``None`` for the spec rule.
+
+        ``None`` covers both "no override stored" and "the workspace holds no
+        row for this repository": either way pre-flight applies the default rule,
+        and only a stored ``read``/``write`` changes what is required.
+        """
+        override = await self._db.scalar(
+            select(Repository.required_access).where(
+                Repository.workspace_id == self._workspace_id,
+                Repository.full_name == repo_full_name,
+            )
+        )
+        if override is None or override == _DEFAULT_ACCESS:
+            return None
+        return override
 
     async def _assignment(self, role: str) -> ModelAssignment | None:
         """Fetch the assignment row for ``role`` in this workspace."""

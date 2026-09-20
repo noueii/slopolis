@@ -25,6 +25,23 @@ from slopolis_core.github.transport import translate_errors
 
 __all__ = ["RepoReads"]
 
+_TRIGGER_LEVELS = ("read", "write")
+
+
+def _required_level(*, private: bool, required: str | None) -> str:
+    """Resolve the permission a trigger needs (overview §4, spec 10.10).
+
+    ``required`` is the workspace's per-repository override; ``None`` means no
+    override is in force and the spec rule applies.
+    """
+    if required is None:
+        return "read" if private else "write"
+    if required not in _TRIGGER_LEVELS:
+        raise ValueError(
+            f"required must be one of {_TRIGGER_LEVELS} or None, got {required!r}"
+        )
+    return required
+
 
 class RepoReads:
     """Repository-wide and installation-wide queries."""
@@ -170,19 +187,27 @@ class RepoReads:
 
     @translate_errors
     async def user_can_trigger(
-        self, repo_full_name: str, *, private: bool, user_login: str
+        self,
+        repo_full_name: str,
+        *,
+        private: bool,
+        user_login: str,
+        required: str | None = None,
     ) -> bool:
         """Return whether ``user_login`` may trigger a review (overview §4).
 
-        Public repos require **write**; private repos require **read**. Any auth
-        failure fails closed (``False``).
+        With no ``required`` the spec rule stands: public repos require
+        **write**, private repos require **read**. A workspace override
+        (spec 10.10) supplies the literal instead, loosening or tightening the
+        rule per repository. Any auth failure fails closed (``False``); a
+        literal outside the two values is a programming error.
         """
+        level = _required_level(private=private, required=required)
         try:
             permission = await self._fetch_permission(repo_full_name, user_login)
         except GitHubError:
             return False
-        required = "read" if private else "write"
-        return permission_satisfies(permission, required=required)
+        return permission_satisfies(permission, required=level)
 
     @translate_errors
     async def _fetch_permission(self, repo_full_name: str, user_login: str) -> str:

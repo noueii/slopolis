@@ -12,6 +12,7 @@ import datetime as dt
 import re
 import uuid
 import zlib
+from collections.abc import Sequence
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +27,7 @@ from app.routers.catalog import (
 from app.routers.reviews import explain_parked
 from app.schemas import CreatedSession, CreateReviewRequest
 from app.serializers import build_name, serialize_created_session
+from slopolis_core.domain import SessionStatus
 from slopolis_core.harness import MAIN_AGENT, AgentStatus, HarnessLevel
 from slopolis_core.preflight.models import PreflightRequest as CorePreflightRequest
 from slopolis_core.preflight.models import PrReference
@@ -37,12 +39,27 @@ from slopolis_db.models import (
     ReviewSession,
     SessionTarget,
     User,
+    Workspace,
 )
 
 __all__ = ["create_session", "review_title_from_title"]
 
 _SUBJECT_RE = re.compile(r"^[a-z]+(?:\([^)]*\))?:\s*(.+)$", re.IGNORECASE)
 _JOB_NAME = "review_target"
+
+#: Session statuses that still hold a slot; every other status is terminal.
+_ACTIVE_STATUSES = (SessionStatus.QUEUED.value, SessionStatus.RUNNING.value)
+
+#: How many live session names a cap refusal lists before summarising the rest.
+_MAX_LISTED_SESSIONS = 5
+
+#: The refusal text per cap code, so the caller knows which switch to ask about.
+_CAP_MESSAGES = {
+    "session_limit_reached": (
+        "This submission would exceed the workspace's concurrent session limit."
+    ),
+    "user_daily_limit_reached": "You have reached your daily session limit.",
+}
 
 
 async def create_session(
@@ -60,6 +77,11 @@ async def create_session(
     if not urls:
         raise ApiError(422, "no_targets", "Add at least one pull request.")
 
+    created_at = now or dt.datetime.now(dt.UTC)
+    # The caps come before pre-flight: a submission that cannot be accepted must
+    # not spend GitHub or live-model calls, and must not leave a session row.
+    await _enforce_caps(db, workspace_id=workspace_id, user=user, now=created_at)
+
     outcome = await service.run(
         CorePreflightRequest(pr_urls=urls), user_login=user.handle
     )
@@ -76,7 +98,6 @@ async def create_session(
 
     reference = outcome.valid[0]
     model_id, provider = await _resolve_model(db, workspace_id)
-    created_at = now or dt.datetime.now(dt.UTC)
     session = ReviewSession(
         workspace_id=workspace_id,
         title=review_title_from_title(reference.title),
@@ -115,6 +136,90 @@ async def create_session(
         await pool.enqueue_job(_JOB_NAME, str(session.id), str(target.id))
 
     return serialize_created_session(session, target_count=len(targets))
+
+
+async def _enforce_caps(
+    db: AsyncSession, *, workspace_id: uuid.UUID, user: User, now: dt.datetime
+) -> None:
+    """Refuse a submission that would exceed the workspace's caps (spec 10.10).
+
+    Both counts look only at sessions **still holding a slot** — a cap bounds
+    concurrency, not observed usage — and both exclude the submission being
+    refused, which has not been written yet.
+
+    Reading the caps is all a workspace that never set one pays for: when both
+    are ``NULL`` this returns before counting anything, so "unset means
+    unlimited" is literally a no-op rather than merely equivalent.
+    """
+    caps = (
+        await db.execute(
+            select(
+                Workspace.max_concurrent_sessions,
+                Workspace.max_sessions_per_user_per_day,
+            ).where(Workspace.id == workspace_id)
+        )
+    ).one_or_none()
+    if caps is None:
+        return
+    concurrent, daily = caps
+    if concurrent is None and daily is None:
+        return
+
+    if concurrent is not None:
+        active = await _active_session_names(db, workspace_id=workspace_id)
+        if len(active) >= concurrent:
+            raise _cap_error(
+                "session_limit_reached", "maxConcurrentSessions", concurrent, active
+            )
+
+    if daily is not None:
+        today = await _active_session_names(
+            db,
+            workspace_id=workspace_id,
+            user_id=user.id,
+            # "Since 00:00 UTC" of the day the submission is being made.
+            since=dt.datetime.combine(now.date(), dt.time.min, tzinfo=dt.UTC),
+        )
+        if len(today) >= daily:
+            raise _cap_error(
+                "user_daily_limit_reached", "maxSessionsPerUserPerDay", daily, today
+            )
+
+
+async def _active_session_names(
+    db: AsyncSession,
+    *,
+    workspace_id: uuid.UUID,
+    user_id: uuid.UUID | None = None,
+    since: dt.datetime | None = None,
+) -> list[str]:
+    """Names of the workspace's (or the caller's) sessions still holding a slot."""
+    query = select(ReviewSession.name).where(
+        ReviewSession.workspace_id == workspace_id,
+        ReviewSession.status.in_(_ACTIVE_STATUSES),
+    )
+    if user_id is not None:
+        query = query.where(ReviewSession.triggered_by_user_id == user_id)
+    if since is not None:
+        query = query.where(ReviewSession.created_at >= since)
+    return list((await db.scalars(query.order_by(ReviewSession.created_at))).all())
+
+
+def _cap_error(code: str, cap: str, limit: int, active: Sequence[str]) -> ApiError:
+    """The refusal for one cap: which cap, how many are live, and which ones."""
+    listed = ", ".join(active[:_MAX_LISTED_SESSIONS])
+    if len(active) > _MAX_LISTED_SESSIONS:
+        listed += f" and {len(active) - _MAX_LISTED_SESSIONS} more"
+    sessions = "session" if len(active) == 1 else "sessions"
+    return ApiError(
+        409,
+        code,
+        _CAP_MESSAGES[code],
+        detail=(
+            f"{cap} is {limit}; {len(active)} {sessions} already "
+            f"queued or running: {listed}."
+        ),
+    )
 
 
 async def _ensure_main_run(

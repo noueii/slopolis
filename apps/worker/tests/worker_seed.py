@@ -2,7 +2,8 @@
 
 Builds the minimal workspace -> installation -> repository -> session -> target
 graph and a ``ReviewContext`` whose client factory returns the fake GitHub
-clients. No network, no Redis.
+clients. The workspace's caps are the only thing that turns the slot gate on, so
+a test sets them the way an admin would. No network, no Redis.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from worker.config import WorkerConfig
 from worker.deps import InstallationClients, InstallationRef, ReviewContext, SessionFactory
 from worker.jobs.review_target import WorkerCtx
+from worker.jobs.slots import SlotCounter, SlotGate, WorkspaceLimits
 from worker_fakes import (
     CATALOG_MODEL,
     CATALOG_PROVIDER,
@@ -61,9 +63,19 @@ class Harness:
     session_factory: SessionFactory
 
 
-async def seed_graph(db: AsyncSession) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
+async def seed_graph(
+    db: AsyncSession,
+    *,
+    repo_cap: int | None = None,
+    installation_cap: int | None = None,
+) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
     """Create the minimal graph and return (workspace_id, session_id, target_id)."""
-    workspace = Workspace(name="Acme", slug=f"acme-{uuid.uuid4().hex[:8]}")
+    workspace = Workspace(
+        name="Acme",
+        slug=f"acme-{uuid.uuid4().hex[:8]}",
+        max_targets_per_repo=repo_cap,
+        max_targets_per_installation=installation_cap,
+    )
     db.add(workspace)
     await db.flush()
 
@@ -147,8 +159,17 @@ def build_harness(
     seed: Seed,
     config: WorkerConfig | None = None,
     job_try: int = 1,
+    redis: SlotCounter | None = None,
 ) -> Harness:
-    """Wire a ReviewContext whose client factory returns the seeded fakes."""
+    """Wire a ReviewContext whose client factory returns the seeded fakes.
+
+    ``redis`` is what turns the slot gate on: without it the context looks the
+    way it did before spec 10.5, which is the shape the caps-are-unset deployment
+    has too.
+    """
+    worker_config = (
+        config if config is not None else WorkerConfig(WORKER_MAX_TRIES=4, WORKER_RETRY_BACKOFF_S=1)
+    )
 
     async def client_factory(
         installation: InstallationRef, cache: TokenCache
@@ -157,11 +178,7 @@ def build_harness(
 
     review = ReviewContext(
         llm=seed.llm,
-        config=(
-            config
-            if config is not None
-            else WorkerConfig(WORKER_MAX_TRIES=4, WORKER_RETRY_BACKOFF_S=1)
-        ),
+        config=worker_config,
         client_factory=client_factory,
     )
     ctx: WorkerCtx = {
@@ -169,6 +186,8 @@ def build_harness(
         "session_factory": session_factory,
         "job_try": job_try,
     }
+    if redis is not None:
+        ctx["slots"] = SlotGate(redis, limits=WorkspaceLimits(), config=worker_config)
     return Harness(ctx=ctx, seed=seed, session_factory=session_factory)
 
 
@@ -179,10 +198,15 @@ async def seed_and_build(
     llm: FakeLlm | None = None,
     config: WorkerConfig | None = None,
     job_try: int = 1,
+    redis: SlotCounter | None = None,
+    repo_cap: int | None = None,
+    installation_cap: int | None = None,
 ) -> Harness:
     """Seed the graph, then return a harness wired to the supplied fakes."""
     async with session_factory() as db:
-        workspace_id, session_id, target_id = await seed_graph(db)
+        workspace_id, session_id, target_id = await seed_graph(
+            db, repo_cap=repo_cap, installation_cap=installation_cap
+        )
     seed = Seed(
         workspace_id=workspace_id,
         session_id=session_id,
@@ -192,5 +216,9 @@ async def seed_and_build(
         llm=llm if llm is not None else FakeLlm([]),
     )
     return build_harness(
-        session_factory=session_factory, seed=seed, config=config, job_try=job_try
+        session_factory=session_factory,
+        seed=seed,
+        config=config,
+        job_try=job_try,
+        redis=redis,
     )

@@ -129,12 +129,25 @@ class GitHubGatewayAdapter:
         return resolved is not None and not resolved.row.enabled
 
     async def user_has_access(
-        self, repo_full_name: str, *, private: bool, user_login: str
+        self,
+        repo_full_name: str,
+        *,
+        private: bool,
+        user_login: str,
+        required: str | None = None,
     ) -> bool:
-        """Return whether ``user_login`` may trigger a review on the repo."""
+        """Return whether ``user_login`` may trigger a review on the repo.
+
+        ``required`` is the repository's access override (spec 10.10), resolved
+        by pre-flight through the workspace port: ``None`` lets the client apply
+        the spec rule, while ``read``/``write`` is what it must check instead.
+        """
         client = await self._client_for(repo_full_name)
         return await client.user_can_trigger(
-            repo_full_name, private=private, user_login=user_login
+            repo_full_name,
+            private=private,
+            user_login=user_login,
+            required=required,
         )
 
     async def read_repo_file(self, repo_full_name: str, path: str) -> str | None:

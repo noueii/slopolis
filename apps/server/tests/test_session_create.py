@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 
-from slopolis_db.models import Repository, ReviewSession, SessionTarget
+from slopolis_db.models import Repository, ReviewSession, SessionTarget, User, Workspace
 
-from .conftest import ApiHarness, FakeGateway, make_ref
+from .conftest import (
+    ApiHarness,
+    FakeGateway,
+    FakeLiveCheck,
+    make_ref,
+    seed_session,
+)
 
 _URL_A = "https://github.com/acme/api/pull/11"
 _URL_B = "https://github.com/acme/web/pull/22"
@@ -148,3 +155,227 @@ async def test_create_session_keeps_the_uncovered_notice_for_an_unknown_reposito
     assert error["code"] == "no_valid_targets"
     assert "other/repo is not covered by the GitHub App installation." in error["detail"]
     assert "disabled" not in error["detail"]
+
+
+# --- stopgap caps (spec 10.10) ----------------------------------------------
+
+
+async def set_caps(
+    session_factory: Any, workspace_id: uuid.UUID, **caps: int | None
+) -> None:
+    """Pin the workspace's caps for the test; a cap left unset stays unlimited."""
+    async with session_factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        for name, value in caps.items():
+            setattr(workspace, name, value)
+        await session.commit()
+
+
+async def seed_live_session(
+    session_factory: Any,
+    seeded: Any,
+    *,
+    number: int,
+    user_id: uuid.UUID | None = None,
+    status: str = "queued",
+    created_at: dt.datetime | None = None,
+) -> None:
+    """Add one session to the seeded workspace, optionally by another member."""
+    async with session_factory() as session:
+        workspace = await session.get(Workspace, seeded.workspace_id)
+        user = await session.get(User, user_id or seeded.user_id)
+        repository = await session.get(Repository, seeded.repository_id)
+        assert workspace is not None and user is not None and repository is not None
+        await seed_session(
+            session,
+            workspace=workspace,
+            user=user,
+            repository=repository,
+            number=number,
+            status=status,
+            created_at=created_at,
+        )
+
+
+async def test_the_concurrent_cap_refuses_before_preflight_or_any_row(
+    seeded: Any, session_factory: Any, build_harness: Any
+) -> None:
+    # Given a workspace capped at two concurrent sessions with two already live
+    await set_caps(session_factory, seeded.workspace_id, max_concurrent_sessions=2)
+    await seed_live_session(session_factory, seeded, number=8)
+    gateway = FakeGateway(refs={_URL_A: make_ref("acme/api", 11)})
+    live_check = FakeLiveCheck()
+    harness: ApiHarness = await build_harness(
+        user_id=seeded.user_id, gateway=gateway, live_check=live_check
+    )
+
+    # When another submission arrives
+    response = await harness.client.post("/api/sessions", json={"prUrls": [_URL_A]})
+
+    # Then it is refused with the cap's own code, naming the cap, the count, and
+    # what is already running, so the user knows which switch to ask about
+    assert response.status_code == 409
+    error = response.json()["error"]
+    assert error["code"] == "session_limit_reached"
+    assert "maxConcurrentSessions is 2" in error["detail"]
+    assert "2 sessions already queued or running" in error["detail"]
+    assert "acme/api#7 - Jan 1" in error["detail"]
+
+    # ...without spending a GitHub or live-model call...
+    assert gateway.access_calls == []
+    assert live_check.calls == []
+
+    # ...and without a session row or an enqueued job
+    async with session_factory() as session:
+        count = await session.scalar(select(func.count(ReviewSession.id)))
+    assert count == 2
+    assert harness.pool.jobs == []
+
+
+async def test_no_cap_leaves_submissions_unlimited(
+    seeded: Any, session_factory: Any, build_harness: Any
+) -> None:
+    # Given a workspace that never set a cap, with three sessions already live
+    await seed_live_session(session_factory, seeded, number=8)
+    await seed_live_session(session_factory, seeded, number=9)
+    gateway = FakeGateway(refs={_URL_A: make_ref("acme/api", 11)})
+    harness: ApiHarness = await build_harness(user_id=seeded.user_id, gateway=gateway)
+
+    # When another submission arrives
+    response = await harness.client.post("/api/sessions", json={"prUrls": [_URL_A]})
+
+    # Then it is accepted: an unset cap means unlimited, not zero
+    assert response.status_code == 201, response.text
+    assert harness.pool.jobs and harness.pool.jobs[0][0] == "review_target"
+
+
+async def test_an_unset_cap_costs_a_submission_no_session_count(
+    seeded: Any, engine: Any, build_harness: Any
+) -> None:
+    # Given a workspace with no caps at all, and a recorder over its SQL
+    statements: list[str] = []
+
+    def record(
+        _conn: Any,
+        _cursor: Any,
+        statement: str,
+        _parameters: Any,
+        _context: Any,
+        _executemany: Any,
+    ) -> None:
+        statements.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", record)
+    gateway = FakeGateway(refs={_URL_A: make_ref("acme/api", 11)})
+    harness: ApiHarness = await build_harness(user_id=seeded.user_id, gateway=gateway)
+
+    try:
+        # When a submission is accepted
+        response = await harness.client.post("/api/sessions", json={"prUrls": [_URL_A]})
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", record)
+
+    # Then no session was counted: an unset cap is a literal no-op, not a
+    # comparison against zero
+    assert response.status_code == 201, response.text
+    assert [statement for statement in statements if "FROM review_sessions" in statement] == []
+
+
+async def test_the_concurrent_cap_ignores_terminal_sessions(
+    seeded: Any, session_factory: Any, build_harness: Any
+) -> None:
+    # Given a workspace capped at one, whose only session has already finished
+    await set_caps(session_factory, seeded.workspace_id, max_concurrent_sessions=1)
+    async with session_factory() as session:
+        row = await session.get(ReviewSession, seeded.session_id)
+        assert row is not None
+        row.status = "done"
+        await session.commit()
+    gateway = FakeGateway(refs={_URL_A: make_ref("acme/api", 11)})
+    harness: ApiHarness = await build_harness(user_id=seeded.user_id, gateway=gateway)
+
+    # When a submission arrives
+    response = await harness.client.post("/api/sessions", json={"prUrls": [_URL_A]})
+
+    # Then it is accepted: a finished session no longer holds a slot
+    assert response.status_code == 201, response.text
+
+
+async def test_the_daily_cap_counts_only_the_callers_live_sessions_today(
+    seeded: Any, session_factory: Any, build_harness: Any
+) -> None:
+    # Given a per-user daily cap of one, where the caller already has one live
+    # session today while another member's live session and the caller's own
+    # finished one must not count against them
+    await set_caps(session_factory, seeded.workspace_id, max_sessions_per_user_per_day=1)
+    async with session_factory() as session:
+        other = User(
+            workspace_id=seeded.workspace_id,
+            github_id=7007,
+            handle="teammate",
+            name="Team Mate",
+            avatar_url=None,
+        )
+        session.add(other)
+        await session.commit()
+        other_id = other.id
+    await seed_live_session(session_factory, seeded, number=8, user_id=other_id)
+    await seed_live_session(
+        session_factory,
+        seeded,
+        number=9,
+        status="done",
+        created_at=dt.datetime.now(dt.UTC),
+    )
+    gateway = FakeGateway(refs={_URL_A: make_ref("acme/api", 11)})
+    harness: ApiHarness = await build_harness(user_id=seeded.user_id, gateway=gateway)
+
+    # When the caller submits
+    response = await harness.client.post("/api/sessions", json={"prUrls": [_URL_A]})
+
+    # Then the refusal names their daily cap and only their own live session
+    assert response.status_code == 409
+    error = response.json()["error"]
+    assert error["code"] == "user_daily_limit_reached"
+    assert "maxSessionsPerUserPerDay is 1; 1 session already queued or running" in (
+        error["detail"]
+    )
+    assert "acme/api#7 - Jan 1" in error["detail"]
+    assert harness.pool.jobs == []
+
+
+async def test_the_daily_cap_ignores_other_users_and_earlier_days(
+    seeded: Any, session_factory: Any, build_harness: Any
+) -> None:
+    # Given a per-user daily cap of one, another member's live session today,
+    # and the caller's own session from one minute before 00:00 UTC today
+    await set_caps(session_factory, seeded.workspace_id, max_sessions_per_user_per_day=1)
+    midnights = dt.datetime.combine(
+        dt.datetime.now(dt.UTC).date(), dt.time.min, tzinfo=dt.UTC
+    )
+    async with session_factory() as session:
+        other = User(
+            workspace_id=seeded.workspace_id,
+            github_id=7008,
+            handle="teammate",
+            name="Team Mate",
+            avatar_url=None,
+        )
+        session.add(other)
+        await session.commit()
+        other_id = other.id
+    await seed_live_session(session_factory, seeded, number=8, user_id=other_id)
+    async with session_factory() as session:
+        row = await session.get(ReviewSession, seeded.session_id)
+        assert row is not None
+        row.created_at = midnights - dt.timedelta(minutes=1)
+        await session.commit()
+    gateway = FakeGateway(refs={_URL_A: make_ref("acme/api", 11)})
+    harness: ApiHarness = await build_harness(user_id=seeded.user_id, gateway=gateway)
+
+    # When the caller submits
+    response = await harness.client.post("/api/sessions", json={"prUrls": [_URL_A]})
+
+    # Then it is accepted: neither someone else's session nor yesterday's counts
+    assert response.status_code == 201, response.text

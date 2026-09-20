@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.adapters.github import GitHubGatewayAdapter
+from app.adapters.workspace import WorkspaceConfigAdapter
+from app.services.github_clients import WorkspaceRepositories
 from sqlalchemy import func, select
 
 from slopolis_core.github.errors import GitHubNotFoundError
@@ -49,6 +52,8 @@ class GatewayClient:
         self.files = files or {}
         self.access = access
         self.calls: list[str] = []
+        #: The access override each check was asked for (spec 10.10).
+        self.required_levels: list[str | None] = []
 
     async def list_installation_repositories(self) -> list[InstallationRepository]:
         self.calls.append("list_installation_repositories")
@@ -70,9 +75,15 @@ class GatewayClient:
         return pull
 
     async def user_can_trigger(
-        self, repo_full_name: str, *, private: bool, user_login: str
+        self,
+        repo_full_name: str,
+        *,
+        private: bool,
+        user_login: str,
+        required: str | None = None,
     ) -> bool:
         self.calls.append(f"user_can_trigger:{repo_full_name}")
+        self.required_levels.append(required)
         return self.access
 
     async def list_open_pull_requests(self, full_name: str) -> list[GitHubPullRequest]:
@@ -404,3 +415,128 @@ async def test_preflight_still_reports_a_repository_github_no_longer_grants(
     assert body["valid"] == []
     assert any("acme/api is not covered" in notice for notice in body["notices"])
     assert not any("disabled" in notice for notice in body["notices"])
+
+
+# --- the per-repository access override (spec 10.10) ------------------------
+
+
+async def test_preflight_hands_the_resolved_override_to_the_access_check(
+    seeded: Any, build_harness: Any
+) -> None:
+    # Given a workspace whose repository is held to write access
+    workspace = FakeWorkspace(access="write")
+    gateway = FakeGateway(refs={_VALID_URL: make_ref("acme/api", 11)})
+    harness: ApiHarness = await build_harness(
+        user_id=seeded.user_id, gateway=gateway, workspace=workspace
+    )
+
+    # When a link in it is pre-flighted
+    response = await harness.client.post(
+        "/api/reviews/preflight", json={"prUrls": [_VALID_URL]}
+    )
+
+    # Then the override was read for that repository and handed to the check,
+    # which is the only thing that can apply it
+    assert response.status_code == 200
+    assert [item["url"] for item in response.json()["valid"]] == [_VALID_URL]
+    assert workspace.access_calls == ["acme/api"]
+    assert gateway.access_calls == [("acme/api", "write")]
+
+
+async def test_the_workspace_adapter_reports_the_access_override(
+    seeded: Any, session_factory: Any
+) -> None:
+    # Given a workspace whose one repository is stored on the spec rule
+    async with session_factory() as session:
+        row = await session.get(Repository, seeded.repository_id)
+        assert row is not None
+        assert row.required_access == "default"
+        adapter = WorkspaceConfigAdapter(session, seeded.workspace_id)
+        untouched = await adapter.required_access("acme/api")
+
+        # When it is loosened and then put back on the default
+        row.required_access = "read"
+        await session.flush()
+        loosened = await adapter.required_access("acme/api")
+        row.required_access = "default"
+        await session.flush()
+        restored = await adapter.required_access("acme/api")
+        unknown = await adapter.required_access("other/repo")
+
+    # Then only a stored override is reported; the default rule and a
+    # repository the workspace holds no row for both mean "apply the spec rule"
+    assert untouched is None
+    assert loosened == "read"
+    assert restored is None
+    assert unknown is None
+
+
+async def test_the_gateway_adapter_passes_the_override_to_github(
+    seeded: Any, session_factory: Any
+) -> None:
+    # Given a repository read through its own installation's client
+    client = GatewayClient(installation_id=555, covered=["acme/api"])
+    registry: FakeInstallationClients[Any] = FakeInstallationClients({555: client})
+
+    # When the gateway checks access with a resolved override
+    async with session_factory() as session:
+        gateway = GitHubGatewayAdapter(
+            WorkspaceRepositories(session, seeded.workspace_id, registry)
+        )
+        allowed = await gateway.user_has_access(
+            "acme/api", private=True, user_login="octocat", required="write"
+        )
+
+    # Then the level reaches the client, which is the thing that applies it
+    assert allowed is True
+    assert client.required_levels == ["write"]
+
+
+async def test_preflight_applies_each_repositorys_access_override(
+    seeded: Any, session_factory: Any, build_harness: Any
+) -> None:
+    # Given one repository tightened to write access and one left on the spec rule
+    async with session_factory() as session:
+        await seed_review_model(session, seeded.workspace_id)
+        row = await session.get(Repository, seeded.repository_id)
+        assert row is not None
+        row.required_access = "write"
+        await session.commit()
+    async with session_factory() as session:
+        await add_installation(
+            session,
+            seeded.workspace_id,
+            installation_id=777,
+            account_login="widgets",
+            repositories=["widgets/app"],
+        )
+    acme = GatewayClient(
+        installation_id=555,
+        covered=["acme/api"],
+        pulls={_VALID_URL: _pull("acme/api", 11)},
+    )
+    widgets = GatewayClient(
+        installation_id=777,
+        covered=["widgets/app"],
+        pulls={_WIDGETS_URL: _pull("widgets/app", 5)},
+    )
+    harness: ApiHarness = await build_harness(
+        user_id=seeded.user_id,
+        real_preflight=True,
+        github_clients=FakeInstallationClients({555: acme, 777: widgets}),
+    )
+
+    # When both links are pre-flighted
+    response = await harness.client.post(
+        "/api/reviews/preflight", json={"prUrls": [_VALID_URL, _WIDGETS_URL]}
+    )
+
+    # Then the overridden repository's check is told what it requires...
+    assert response.status_code == 200
+    assert [item["url"] for item in response.json()["valid"]] == [
+        _VALID_URL,
+        _WIDGETS_URL,
+    ]
+    assert acme.required_levels == ["write"]
+    # ...while one on the spec rule is told nothing, i.e. the client decides
+    assert widgets.required_levels == [None]

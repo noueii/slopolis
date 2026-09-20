@@ -29,6 +29,13 @@ class WorkerConfig(BaseSettings):
     retry_backoff_s: int = Field(default=15, alias="WORKER_RETRY_BACKOFF_S")
     #: Upper bound on the computed backoff so retries stay responsive.
     retry_backoff_cap_s: int = Field(default=600, alias="WORKER_RETRY_BACKOFF_CAP_S")
+    #: Seconds a target waits in-job for a free per-repo/installation slot before
+    #: deferring itself back onto the queue; 0 defers on the first refusal.
+    slot_wait_s: float = Field(default=60.0, alias="WORKER_SLOT_WAIT_S")
+    #: Seconds between attempts while that wait is running.
+    slot_poll_s: float = Field(default=1.0, alias="WORKER_SLOT_POLL_S")
+    #: Seconds between a target giving up its slot wait and being run again.
+    slot_defer_s: float = Field(default=15.0, alias="WORKER_SLOT_DEFER_S")
     #: Default severity at/above which findings get an inline comment.
     inline_severity_threshold: str = Field(
         default="warning", alias="WORKER_INLINE_SEVERITY_THRESHOLD"

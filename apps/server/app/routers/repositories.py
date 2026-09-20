@@ -25,9 +25,10 @@ import datetime as dt
 import logging
 import uuid
 from collections.abc import Sequence
+from typing import Any
 
 from fastapi import APIRouter, Request
-from pydantic import ConfigDict
+from pydantic import ConfigDict, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -46,6 +47,7 @@ from app.schemas import (
     RepositoryPullRequestsResponse,
     RepositoryRef,
     RepositorySummary,
+    RequiredAccess,
     UserRef,
     WireModel,
 )
@@ -172,11 +174,15 @@ async def list_repository_pulls(
 
 
 class RepositoryUpdateRequest(WireModel):
-    """Body of ``PATCH /api/repositories/{id}`` — the workspace's own switch.
+    """Body of ``PATCH /api/repositories/{id}`` — the workspace's own switches.
 
     Lives here rather than in ``app.schemas`` because it is the only body this
     router owns; it speaks the same camelCase wire shape as every other model.
     Public because it names a component of the published OpenAPI document.
+
+    Both fields are optional but at least one must be supplied: omitting a field
+    leaves it as it is, while the two switches are unrelated, so an empty body
+    has nothing to do and is refused rather than silently accepted.
     """
 
     model_config = ConfigDict(
@@ -185,7 +191,17 @@ class RepositoryUpdateRequest(WireModel):
         extra="forbid",
     )
 
-    enabled: bool
+    enabled: bool | None = None
+    #: The access override pre-flight applies (spec 10.10); the three literals
+    #: are the whole vocabulary, so anything else is a 422.
+    required_access: RequiredAccess | None = None
+
+    @model_validator(mode="after")
+    def _at_least_one_switch(self) -> RepositoryUpdateRequest:
+        """Refuse a body that carries no switch at all."""
+        if self.enabled is None and self.required_access is None:
+            raise ValueError("supply enabled and/or requiredAccess")
+        return self
 
 
 @router.patch("/{repository_id}")
@@ -198,13 +214,15 @@ async def update_repository(
     repositories: WorkspaceRepositoriesDep,
     user: CurrentUserDep,
 ) -> RepositorySummary:
-    """Park or re-enable one repository, returning its updated summary.
+    """Park, re-enable, or re-policy one repository, returning its summary.
 
     Parking is how a workspace stops reviewing a repository GitHub still grants:
     the row — and with it every session and finding in its history — stays, and
-    pre-flight refuses its pull requests. Another workspace's id is a 404, and an
-    id already in the requested state is a no-op (no write, no audit row, same
-    body), so retrying a toggle is safe.
+    pre-flight refuses its pull requests. ``requiredAccess`` is the other
+    per-repository decision (spec 10.10): the access rule pre-flight applies to
+    its pull requests. Both switches are audited independently, and a field left
+    as it already is changes nothing (no write, no audit row, same body), so
+    retrying a toggle is safe. Another workspace's id is a 404.
     """
     row = await db.scalar(
         select(Repository).where(
@@ -219,7 +237,8 @@ async def update_repository(
             "The repository is not connected to this workspace.",
         )
 
-    if row.enabled != body.enabled:
+    changed = False
+    if body.enabled is not None and row.enabled != body.enabled:
         row.enabled = body.enabled
         _audit(
             db,
@@ -229,6 +248,20 @@ async def update_repository(
             target_type="repository",
             target_id=row.id,
         )
+        changed = True
+    if body.required_access is not None and row.required_access != body.required_access:
+        row.required_access = body.required_access
+        _audit(
+            db,
+            workspace_id=workspace_id,
+            actor_id=user.id,
+            action="repository.access_updated",
+            target_type="repository",
+            target_id=row.id,
+            detail={"requiredAccess": row.required_access},
+        )
+        changed = True
+    if changed:
         await db.commit()
         await db.refresh(row)
 
@@ -245,6 +278,7 @@ def _audit(
     action: str,
     target_type: str,
     target_id: uuid.UUID | None = None,
+    detail: dict[str, Any] | None = None,
 ) -> None:
     """Stage one audit row for the caller to commit with its mutation."""
     db.add(
@@ -254,6 +288,7 @@ def _audit(
             action=action,
             target_type=target_type,
             target_id=target_id,
+            detail=detail,
         )
     )
 
@@ -461,6 +496,7 @@ def _summary_from_row(row: Repository, *, open_pr_count: int = 0) -> RepositoryS
         last_activity_at=activity,
         connected=row.connected,
         enabled=row.enabled,
+        required_access=row.required_access,
     )
 
 

@@ -2,11 +2,13 @@
 
 Kept in a uniquely named module (not ``conftest``) so pyright resolves it via
 the repo's ``extraPaths`` without colliding with other test suites' conftest.
-No network is used.
+No network is used, and no Redis: :class:`FakeRedis` is the sorted-set subset the
+slot gate talks to.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from slopolis_core.context import PrContext
@@ -33,7 +35,61 @@ __all__ = [
     "FakeLlm",
     "FakePublisher",
     "FakeReader",
+    "FakeRedis",
 ]
+
+
+class FakeRedis:
+    """An in-memory stand-in for the Redis sorted sets the slot gate uses.
+
+    Members are scores, keyed by dimension, the way Redis stores them; every
+    command is counted so a test can prove an unlimited workspace never reaches
+    Redis at all.
+    """
+
+    def __init__(self) -> None:
+        self.sets: dict[str, dict[str, float]] = {}
+        self.calls = 0
+
+    def members(self, name: str) -> dict[str, float]:
+        """Return the raw members of one key (the gate's hold bookkeeping)."""
+        return dict(self.sets.get(name, {}))
+
+    async def zadd(self, name: str, mapping: Mapping[str, float]) -> int:
+        self.calls += 1
+        members = self.sets.setdefault(name, {})
+        added = 0
+        for member, score in mapping.items():
+            added += 1 if member not in members else 0
+            members[member] = score
+        return added
+
+    async def zcard(self, name: str) -> int:
+        self.calls += 1
+        return len(self.sets.get(name, {}))
+
+    async def zrem(self, name: str, *values: str) -> int:
+        self.calls += 1
+        members = self.sets.get(name, {})
+        removed = 0
+        for value in values:
+            removed += 1 if members.pop(value, None) is not None else 0
+        return removed
+
+    async def zremrangebyscore(self, name: str, min: float, max: float) -> int:
+        self.calls += 1
+        members = self.sets.get(name, {})
+        stale = [member for member, score in members.items() if min <= score <= max]
+        for member in stale:
+            del members[member]
+        return len(stale)
+
+    async def pexpire(self, name: str, time_ms: int) -> bool:
+        self.calls += 1
+        # Membership never expires here: the gate's dead-hold recovery is driven
+        # by member scores, which a test can wind back the way a dying worker
+        # would have left them.
+        return bool(self.sets.get(name))
 
 
 class FakeLlm:

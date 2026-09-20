@@ -218,13 +218,20 @@ async def test_list_check_runs_returns_the_head_commits_runs(
 
 
 @pytest.mark.parametrize(
-    ("private", "permission", "expected"),
+    ("private", "permission", "required", "expected"),
     [
-        (False, "read", False),
-        (False, "write", True),
-        (True, "read", True),
-        (True, "none", False),
-        (False, None, False),
+        (False, "read", None, False),
+        (False, "write", None, True),
+        (True, "read", None, True),
+        (True, "none", None, False),
+        (False, None, None, False),
+        # An override loosens a public repo from write to read.
+        (False, "read", "read", True),
+        (False, "none", "read", False),
+        # An override tightens a private repo from read to write.
+        (True, "read", "write", False),
+        (True, "write", "write", True),
+        (True, "admin", "write", True),
     ],
 )
 @respx.mock(base_url=_BASE)
@@ -232,11 +239,27 @@ async def test_user_can_trigger_policy(
     respx_mock: respx.Router,
     private: bool,
     permission: str | None,
+    required: str | None,
     expected: bool,
 ) -> None:
     """Given a privacy/permission pair, the trigger policy matches spec §4."""
     _mock_permission(respx_mock, permission)
 
-    allowed = await _client().user_can_trigger(_REPO, private=private, user_login="alice")
+    allowed = await _client().user_can_trigger(
+        _REPO, private=private, user_login="alice", required=required
+    )
 
     assert allowed is expected
+
+
+@respx.mock(base_url=_BASE)
+async def test_user_can_trigger_rejects_an_unknown_level(
+    respx_mock: respx.Router,
+) -> None:
+    """Given a required level outside the literals, it fails before any call."""
+    with pytest.raises(ValueError, match="required must be"):
+        await _client().user_can_trigger(
+            _REPO, private=False, user_login="alice", required="admin"
+        )
+
+    assert len(respx_mock.calls) == 0

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import String
+from sqlalchemy import Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from slopolis_db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -23,6 +23,19 @@ class Workspace(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+
+    #: Stopgap caps (spec 10.10), enforced by the submit path. ``None`` is
+    #: unlimited, so a cap is opt-in and an existing deployment keeps behaving
+    #: exactly as it did.
+    max_concurrent_sessions: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_sessions_per_user_per_day: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    #: Queue concurrency limits (spec 10.10), read only where jobs run.
+    max_targets_per_repo: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_targets_per_installation: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
 
     users: Mapped[list[User]] = relationship(back_populates="workspace")
     installations: Mapped[list[GitHubInstallation]] = relationship(back_populates="workspace")

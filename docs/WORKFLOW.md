@@ -67,6 +67,11 @@ docs/specification/  # versioned specs
 - Mock vs real: `MOCK_MODE=server` proxies `/api` to the mock API (`:8300`), `off` proxies to the real API (`:8400`), and `worker` serves mocks in-browser with no server. The web dev server runs on `:8000`.
 - Database: `make migrate` applies `packages/db` migrations to the dev database. Nothing migrates at
   boot (`RUN_MIGRATIONS` is set in some `.env` files but read by no code).
+- Model gateway: the API opens its LiteLLM client at boot from `LITELLM_BASE_URL` +
+  `LITELLM_MASTER_KEY` (`apps/server/.env`); the worker builds its own from the same values
+  (`apps/worker/.env`). Without the key the server still serves, but pre-flight refuses every
+  submission that reaches the live model check with a notice naming `LITELLM_MASTER_KEY`, and the
+  worker will not start — a review cannot call a model without a gateway.
 - The dev database is **shared by every worktree** (one `slopolis-postgres-1` container, one
   `slopolis` database), so a worktree whose `packages/db/slopolis_db/migrations` diverged from
   `main` can leave it stamped with a revision this checkout cannot resolve: `alembic current` fails

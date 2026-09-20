@@ -34,6 +34,7 @@ __all__ = [
     "CurrentUserDep",
     "DbSessionDep",
     "GitHubGatewayDep",
+    "OptionalUserDep",
     "PreflightServiceDep",
     "WorkspaceIdDep",
     "decode_user_id",
@@ -42,6 +43,7 @@ __all__ = [
     "get_current_user",
     "get_db",
     "get_github_gateway",
+    "get_optional_user",
     "get_preflight_service",
     "get_settings_dep",
     "get_workspace_id",
@@ -114,6 +116,27 @@ async def get_current_user(
 
 
 CurrentUserDep = Annotated[User, Depends(get_current_user)]
+
+
+async def get_optional_user(
+    db: DbSessionDep,
+    settings: AppSettingsDep,
+    session_token: Annotated[str | None, Cookie(alias="slopolis_session")] = None,
+) -> User | None:
+    """Resolve the signed-in user, or ``None`` when there is no valid session.
+
+    Browser-navigation routes (the GitHub install callback) need to *redirect*
+    an anonymous visitor to sign-in rather than answer with a 401 envelope.
+    """
+    if not session_token:
+        return None
+    user_id = decode_user_id(session_token, settings)
+    if user_id is None:
+        return None
+    return await db.get(User, user_id)
+
+
+OptionalUserDep = Annotated[User | None, Depends(get_optional_user)]
 
 
 async def get_workspace_id(user: CurrentUserDep) -> uuid.UUID:

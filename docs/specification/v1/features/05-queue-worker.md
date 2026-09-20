@@ -7,3 +7,6 @@
 - **Concurrency limits** (all configurable): per-repo, per-installation, and global pool size.
 - Jobs have timeouts and are **durable across worker restarts**.
 - App-triggered sessions are never automatically cancelled by newer activity.
+
+The two per-key limits and the session caps that gate submission are specified in
+[10-workspace-settings.md](./10-workspace-settings.md).

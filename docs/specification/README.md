@@ -6,8 +6,8 @@ Versioned, feature-per-file specification for slopolis. Each version lives in it
 
 | Version | Status | Overview | Features |
 |---|---|---|---|
-| v1 | MVP approved; later phases scoped | [v1/overview.md](./v1/overview.md) | [01 account + GitHub App](./v1/features/01-account-github-app.md) · [02 provider & model config](./v1/features/02-provider-model-config.md) · [03 pre-flight](./v1/features/03-preflight-validation.md) · [04 session form](./v1/features/04-session-creation.md) · [05 queue + worker](./v1/features/05-queue-worker.md) · [06 review harness](./v1/features/06-review-harness.md) · [07 publish](./v1/features/07-publish-github.md) · [08 history + live status](./v1/features/08-session-history.md) · [09 usage + cost](./v1/features/09-usage.md) |
-| v2 | V1.1 built; V1.2–V1.4 open | [v2/overview.md](./v2/overview.md) | [01 supervisor + sub-agents](./v2/features/01-supervisor-subagents.md) · [02 Magentic orchestration](./v2/features/02-magentic-orchestration.md) (parked) |
+| v1 | MVP approved; later phases scoped | [v1/overview.md](./v1/overview.md) | [01 account + GitHub App](./v1/features/01-account-github-app.md) · [02 provider & model config](./v1/features/02-provider-model-config.md) · [03 pre-flight](./v1/features/03-preflight-validation.md) · [04 session form](./v1/features/04-session-creation.md) · [05 queue + worker](./v1/features/05-queue-worker.md) · [06 review harness](./v1/features/06-review-harness.md) · [07 publish](./v1/features/07-publish-github.md) · [08 history + live status](./v1/features/08-session-history.md) · [09 usage + cost](./v1/features/09-usage.md) · [10 settings, caps + policy](./v1/features/10-workspace-settings.md) |
+| v2 | V1.1 built; V1.2–V1.4 deferred | [v2/overview.md](./v2/overview.md) | [01 supervisor + sub-agents](./v2/features/01-supervisor-subagents.md) · [02 Magentic orchestration](./v2/features/02-magentic-orchestration.md) (parked) |
 
 ## v1 features
 
@@ -25,6 +25,7 @@ from an implementation. Update the column when a feature lands.
 | 10.7 | Publish to GitHub + app results | [07-publish-github.md](./v1/features/07-publish-github.md) | yes — rolling summary comment, inline comments, check run |
 | 10.8 | Session history, permalink, live status | [08-session-history.md](./v1/features/08-session-history.md) | yes — `/sessions/{id}` is a real SPA route, SSE carries session + `agent` events, the run tree and its event replay have endpoints, and every session read is filtered by the viewer's own repository access |
 | 10.9 | Usage and cost tracking | [09-usage.md](./v1/features/09-usage.md) | yes — API totals, breakdowns by model / repository / user, a daily series, and the Usage screen |
+| 10.10 | Workspace settings: caps, limits, access policy | [10-workspace-settings.md](./v1/features/10-workspace-settings.md) | yes — admin-only session caps enforced at submit (before pre-flight), per-repo / per-installation run limits leased through Redis by the worker, the per-repository access override carried into pre-flight, and the Settings screen |
 
 ## v2 features
 
@@ -38,11 +39,13 @@ from an implementation. Update the column when a feature lands.
 Known deviations from the specification, each a candidate next slice. Verified
 against the code on this branch rather than planned:
 
-1. **Harness V1.2–V1.4 are not built.** The runtime supports model-driven
-   `spawn_subagents` (batched, bounded, depth-aware, budgeted) and has tests for it, but no
-   deployed agent drives it: the PR orchestrator is deterministic and runs the single-pass
-   reviewer as its one sub-agent, so aspect sub-agents, findings merge/dedupe at the PR level,
-   full cancellation propagation, and the golden-PR quality harness are still ahead (v2 §13).
+1. **Harness V1.2–V1.4 are deferred, not next.** V1.1 is in place (persisted run rows, the
+   event log, the tree and replay endpoints, the live tree UI, and the single-pass reviewer as the
+   one sub-agent). The model-driven fan-out is deliberately parked for now: `spawn_subagents`
+   exists in the runtime and is tested, but no deployed agent calls it, so aspect sub-agents,
+   PR-level findings merge/dedupe, full cancellation propagation and the golden-PR quality harness
+   wait until the delegation phase is picked up again (v2 §13). Until then the review path stays
+   single-pass per target.
 2. **Comment triggers are Phase 2.** `POST /api/github/webhook` synchronizes installations and
    repositories only; `@slopolis review`, auto-triggers and thread replies do not exist, and no
    webhook delivery creates a session.

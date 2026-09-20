@@ -9,6 +9,9 @@
 - **Stopgap caps (no cost accounting):** max concurrent sessions and max sessions per user per day.
 - **Budgets are deferred** to a later phase.
 
+The caps and the per-repository access override are specified, stored and enforced as their own
+feature: [10-workspace-settings.md](./10-workspace-settings.md).
+
 ## Vault
 
 `slopolis_core.vault.SecretVault` is the only code that sees a key in the clear.

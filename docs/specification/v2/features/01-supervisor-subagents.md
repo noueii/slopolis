@@ -269,6 +269,12 @@ Agent definitions are built-in in V1; workspace-level custom agents come later (
 
 ## 13. Build order
 
+> **Status (2026-09-20):** V1.1 is built and running in the worker. V1.2–V1.4 are **deferred** —
+> the product work below them (the full pre-spawn path: provider config, pre-flight policy, session
+> caps, queue limits) comes first. Until V1.2 lands, the review path stays single-pass per target
+> and the run tree is what V1.1 made observable; `spawn_subagents` exists in the runtime with
+> tests, but no deployed agent calls it.
+
 | Step | Deliverable |
 |---|---|
 | **V1.1** | `agent_run`/`agent_event` schema + persistence; run-tree API + SSE; main orchestrator spawns one PR orchestrator per target; PR orchestrator runs the existing single-pass review as one sub-agent. Observable end-to-end tree. |

@@ -20,8 +20,10 @@ import type {
 import {
   findRun,
   flattenRuns,
+  isTerminalRunStatus,
   mergeAgentEvent,
 } from "@/features/sessions/lib/runTree"
+import { RETRY_SESSION_ID } from "./data"
 import { dataset } from "./dataset"
 import { runsHandlers } from "./runs"
 import { sessionsHandlers } from "./sessions"
@@ -216,6 +218,38 @@ describe("mock session stream", () => {
     ).toBe("running")
     expect(foldFrames(before, agentEvents(frames), session.id)).toEqual(after)
   }, STREAM_TIMEOUT_MS)
+
+  it("seeds a requeued session whose tree is the superseded attempt", async () => {
+    const retried = dataset.sessions.find(
+      (session) => session.id === RETRY_SESSION_ID,
+    )
+    if (!retried) throw new Error("the dataset lost its retried session")
+
+    // The rows went back to `queued`; nothing about them is running again yet.
+    expect(retried.status).toBe("queued")
+    expect(retried.targets.every((target) => target.status === "queued")).toBe(
+      true,
+    )
+
+    // The tree, though, is the attempt that already failed — the state the run
+    // tree panel has to explain instead of showing a blank pending session.
+    const runs = flattenRuns(await readTree(retried.id))
+    expect(runs.length).toBeGreaterThan(0)
+    expect(runs.every(({ node }) => isTerminalRunStatus(node.status))).toBe(true)
+    const main = runs.find(({ node }) => node.level === "main")
+    expect(main?.node.status).toBe("failed")
+    expect(
+      runs.some(
+        ({ node }) => node.level === "pr" && node.status === "failed",
+      ),
+    ).toBe(true)
+
+    // A queued session has no worker streaming for it, so the stream is one
+    // snapshot and a close.
+    const frames = await readStream(retried.id)
+    expect(frames.map((frame) => frame.event)).toEqual(["session", "done"])
+    expect(lastSnapshot(frames).status).toBe("queued")
+  })
 
   it("sends a settled session a snapshot and a close, and nothing else", async () => {
     const settled = dataset.sessions.find((session) => session.status === "done")

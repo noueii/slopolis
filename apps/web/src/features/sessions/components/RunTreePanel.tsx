@@ -1,6 +1,6 @@
 import { useState } from "react"
 
-import type { AgentEventItem, AgentRunNode } from "@/api/contract"
+import type { AgentEventItem, AgentRunNode, SessionStatus } from "@/api/contract"
 
 import { findRun } from "../lib/runTree"
 import type { RunTreeStatus } from "../lib/useRunTree"
@@ -10,6 +10,8 @@ import { RunTreePane } from "./RunTreePane"
 export interface RunTreePanelProps {
   sessionId: string
   runs: AgentRunNode[]
+  /** Session status: drives whether a finished run reads as history. */
+  sessionStatus: SessionStatus
   status: RunTreeStatus
   error: string | null
   /** Live stream buffer; the detail pane folds in the selected run's events. */
@@ -21,6 +23,7 @@ export interface RunTreePanelProps {
 export function RunTreePanel({
   sessionId,
   runs,
+  sessionStatus,
   status,
   error,
   liveEvents,
@@ -35,6 +38,7 @@ export function RunTreePanel({
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)] lg:items-start">
       <RunTreePane
         runs={runs}
+        sessionStatus={sessionStatus}
         status={status}
         error={error}
         selectedRunId={activeRunId}
@@ -44,6 +48,7 @@ export function RunTreePanel({
       <RunNodeDetail
         sessionId={sessionId}
         run={activeRun}
+        sessionStatus={sessionStatus}
         liveEvents={liveEvents}
       />
     </div>

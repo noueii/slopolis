@@ -161,6 +161,93 @@ export function reviewTitleFromTitle(title: string): string {
 const HOUR = 60 * 60 * 1000
 const DAY = 24 * HOUR
 
+/** The session the dataset seeds as a retry in flight. */
+export const RETRY_SESSION_ID = "ses_0000retry"
+
+/**
+ * What that session's superseded attempt ended as.
+ *
+ * A real deployment keeps the runs a failed attempt left when the queue picks
+ * the session up again, so the run tree still serves them; the mock builds its
+ * trees from the session's current state alone and cannot recover them. Without
+ * this, a queued session would always show a blank pending tree, and the
+ * "queued header over failed runs" state would not be reachable in
+ * `make dev-mock`.
+ */
+export const RETRY_SESSION_ATTEMPT: {
+  session: SessionStatus
+  target: TargetStatus
+} = { session: "failed", target: "failed" }
+
+/**
+ * The dataset's retry in flight: a review that failed — its main orchestrator
+ * and both targets — and was put back on the queue. Its targets are `queued`
+ * again (spec 10.5 requeues what it retries) while the usage and findings they
+ * carry are the failed attempt's, which is the pair the run tree has to read as
+ * history rather than as the current result.
+ */
+function retriedSession(now: number): ReviewSession {
+  const model = MODELS[2]
+  const createdMs = now - 3 * 60 * 1000
+  const repos = [REPOS[0], REPOS[3]]
+  const targets: SessionTarget[] = repos.map((repo, index) => {
+    const number = 900 + index * 7
+    const title = PR_TITLES[index]
+    const tokens = 14_200 - index * 3_400
+    return {
+      id: `tgt_retry_${index}`,
+      repository: {
+        id: `repo_${repo.fullName.replace(/[^a-z0-9]/gi, "_")}`,
+        fullName: repo.fullName,
+        private: repo.isPrivate,
+        defaultBranch: "main",
+      } satisfies RepositoryRef,
+      number,
+      title,
+      url: `https://github.com/${repo.fullName}/pull/${number}`,
+      headBranch: headBranchFromTitle(title),
+      status: "queued",
+      // Requeued by the retry, so not a retry candidate again until it settles.
+      retryAction: null,
+      findingsCount: index === 0 ? 2 : 0,
+      tokens,
+      costUsd: Number(((tokens / 1000) * model.pricePer1k).toFixed(4)),
+    }
+  })
+  const tokens = targets.reduce((sum, target) => sum + target.tokens, 0)
+  const findingsCount = targets.reduce(
+    (sum, target) => sum + target.findingsCount,
+    0,
+  )
+  return {
+    id: RETRY_SESSION_ID,
+    title: reviewTitleFromTitle(targets[0].title),
+    name: `${targets[0].repository.fullName}#${targets[0].number} +1 more — ${formatShortDate(new Date(createdMs))}`,
+    status: "queued",
+    model: model.id,
+    provider: model.provider,
+    triggeredBy: {
+      id: "usr_noueii",
+      handle: "noueii",
+      name: "Noah Yu",
+      avatarUrl: undefined,
+      isAdmin: true,
+    },
+    createdAt: new Date(createdMs).toISOString(),
+    // The failed attempt's start is still on the row; the retry cleared the
+    // finish time, which is what makes the session read as queued again.
+    startedAt: new Date(createdMs + 4_000).toISOString(),
+    targets,
+    targetCount: targets.length,
+    tokens,
+    costUsd: Number(
+      targets.reduce((sum, target) => sum + target.costUsd, 0).toFixed(4),
+    ),
+    findingsCount,
+    prompt: PROMPTS[3],
+  }
+}
+
 export interface MockDataset {
   sessions: ReviewSession[]
   generatedAt: number
@@ -319,10 +406,13 @@ export function createDataset(now = Date.now()): MockDataset {
     })
   }
 
+  // One seeded retry in flight, so `make dev-mock` can show a queued session
+  // whose runs are the failed attempt's without a hand-rolled API call.
+  sessions.push(retriedSession(now))
+
   sessions.sort(
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
   )
-
   return {
     sessions,
     generatedAt: now,

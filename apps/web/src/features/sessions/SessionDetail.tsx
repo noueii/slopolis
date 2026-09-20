@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import {
   ArrowLeft,
+  Clock,
   ExternalLink,
   Loader2,
   RotateCcw,
@@ -25,6 +26,7 @@ import {
   formatAbsoluteTime,
   formatCost,
   formatDuration,
+  formatRelativeTime,
   formatTokens,
 } from "./lib/format"
 import {
@@ -267,6 +269,11 @@ export function SessionDetail({ sessionId, onBack }: SessionDetailProps) {
     if (liveStatus && TERMINAL_SESSION_STATUSES.has(liveStatus)) refetch()
   }, [liveStatus, refetch])
 
+  // What the reader sees: the stream's projection outruns the read that
+  // predates it, so the header badge and everything that describes the session
+  // read the same status.
+  const shownStatus: SessionStatus | undefined = liveStatus ?? data?.status
+
   // The run tree is the session's delegation surface, so it leads once it has
   // something to show; a session with no runs keeps the summary it always had.
   const activeTab = tab ?? (runTree.runs.length > 0 ? "runs" : "summary")
@@ -351,7 +358,7 @@ export function SessionDetail({ sessionId, onBack }: SessionDetailProps) {
         <>
           <header className="flex flex-wrap items-center gap-3">
             <h1 className="text-xl font-semibold tracking-tight">{data.name}</h1>
-            <SessionStatusBadge status={live?.status ?? data.status} />
+            <SessionStatusBadge status={shownStatus ?? data.status} />
             <LiveIndicator mode={mode} />
             <span className="font-mono text-xs text-muted-foreground">
               {data.id}
@@ -392,6 +399,19 @@ export function SessionDetail({ sessionId, onBack }: SessionDetailProps) {
             ) : null}
           </header>
           <p className="text-sm text-muted-foreground">{data.title}</p>
+          {shownStatus === "queued" ? (
+            <p
+              role="status"
+              className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-muted-foreground"
+            >
+              <Clock className="size-3.5 shrink-0" />
+              {/* `createdAt` is the only queue timestamp the wire carries: a
+                  session the queue has not touched yet has nothing newer. */}
+              Waiting for a worker — queued{" "}
+              {formatRelativeTime(data.createdAt)}. If it stays queued, check
+              that a worker is running.
+            </p>
+          ) : null}
           <Tabs
             value={activeTab}
             onValueChange={(value) => setTab(value as "summary" | "runs")}
@@ -412,6 +432,7 @@ export function SessionDetail({ sessionId, onBack }: SessionDetailProps) {
               <RunTreePanel
                 sessionId={data.id}
                 runs={runTree.runs}
+                sessionStatus={shownStatus ?? data.status}
                 status={runTree.status}
                 error={runTree.error}
                 liveEvents={runTree.events}

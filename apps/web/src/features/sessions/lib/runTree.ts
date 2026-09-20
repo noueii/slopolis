@@ -13,6 +13,7 @@ import type {
   AgentRunLevel,
   AgentRunNode,
   AgentRunStatus,
+  SessionStatus,
 } from "@/api/contract"
 
 export const RUN_STATUS_LABELS: Record<AgentRunStatus, string> = {
@@ -33,6 +34,25 @@ const TERMINAL_RUN_STATUSES: Record<AgentRunStatus, boolean> = {
 
 export function isTerminalRunStatus(status: AgentRunStatus): boolean {
   return TERMINAL_RUN_STATUSES[status]
+}
+
+/**
+ * Whether a finished run belongs to the attempt before the one now in flight.
+ *
+ * A queued or running session is one the queue owns again (a manual retry, spec
+ * 10.5): the runs a newer attempt has not replaced yet are the superseded
+ * attempt's, so a terminal status there reads as history rather than as the
+ * session's current result. The status itself is untouched — only its reading
+ * changes (`run_status` stays whatever the API stored).
+ */
+export function isPreviousAttempt(
+  sessionStatus: SessionStatus,
+  runStatus: AgentRunStatus,
+): boolean {
+  return (
+    (sessionStatus === "queued" || sessionStatus === "running") &&
+    isTerminalRunStatus(runStatus)
+  )
 }
 
 /**

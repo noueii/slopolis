@@ -1,18 +1,21 @@
 import { ChevronRight, RotateCw } from "lucide-react"
 import { useState } from "react"
 
-import type { AgentRunNode } from "@/api/contract"
+import type { AgentRunNode, SessionStatus } from "@/api/contract"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { cn } from "@/lib/utils"
 
 import { formatCost, formatTokens } from "../lib/format"
-import { countRuns } from "../lib/runTree"
+import { countRuns, isPreviousAttempt } from "../lib/runTree"
 import type { RunTreeStatus } from "../lib/useRunTree"
 import { RunLevelChip, RunStatusBadge } from "./RunStatusBadge"
 
 export interface RunTreePaneProps {
   runs: AgentRunNode[]
+  /** Session status: a run that ended while the session is in flight is history. */
+  sessionStatus: SessionStatus
   status: RunTreeStatus
   error: string | null
   selectedRunId: string | null
@@ -26,6 +29,7 @@ export interface RunTreePaneProps {
  */
 export function RunTreePane({
   runs,
+  sessionStatus,
   status,
   error,
   selectedRunId,
@@ -85,6 +89,7 @@ export function RunTreePane({
             <RunTreeRow
               key={node.id}
               node={node}
+              sessionStatus={sessionStatus}
               selectedRunId={selectedRunId}
               onSelect={onSelect}
             />
@@ -106,16 +111,19 @@ function countFailed(runs: AgentRunNode[]): number {
 
 function RunTreeRow({
   node,
+  sessionStatus,
   selectedRunId,
   onSelect,
 }: {
   node: AgentRunNode
+  sessionStatus: SessionStatus
   selectedRunId: string | null
   onSelect: (runId: string) => void
 }) {
   const [open, setOpen] = useState(true)
   const selected = node.id === selectedRunId
   const hasChildren = node.children.length > 0
+  const previousAttempt = isPreviousAttempt(sessionStatus, node.status)
 
   return (
     <li>
@@ -181,6 +189,15 @@ function RunTreeRow({
           </span>
           <RunStatusBadge status={node.status} className="shrink-0" />
         </button>
+
+        {previousAttempt ? (
+          <Badge
+            variant="outline"
+            className="shrink-0 px-1.5 py-0 text-2xs font-semibold uppercase tracking-wider text-muted-foreground"
+          >
+            previous attempt
+          </Badge>
+        ) : null}
       </div>
 
       {hasChildren && open ? (
@@ -189,6 +206,7 @@ function RunTreeRow({
             <RunTreeRow
               key={child.id}
               node={child}
+              sessionStatus={sessionStatus}
               selectedRunId={selectedRunId}
               onSelect={onSelect}
             />

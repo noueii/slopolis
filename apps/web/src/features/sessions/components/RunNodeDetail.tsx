@@ -1,20 +1,23 @@
 import { RotateCw } from "lucide-react"
 import { useMemo } from "react"
 
-import type { AgentEventItem, AgentRunNode } from "@/api/contract"
+import type { AgentEventItem, AgentRunNode, SessionStatus } from "@/api/contract"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { cn } from "@/lib/utils"
 
 import { formatAbsoluteTime, formatCost, formatDuration, formatTokens } from "../lib/format"
 import { describeRunEvent, type RunEventTone } from "../lib/runEvents"
-import { mergeRunEvents } from "../lib/runTree"
+import { isPreviousAttempt, mergeRunEvents } from "../lib/runTree"
 import { useRunNodeEvents } from "../lib/useRunNodeEvents"
 import { RunLevelChip, RunStatusBadge } from "./RunStatusBadge"
 
 export interface RunNodeDetailProps {
   sessionId: string | null
   run: AgentRunNode | null
+  /** Session status: a run that ended while the session is in flight is history. */
+  sessionStatus: SessionStatus
   /** Live stream buffer; events for other runs are ignored here. */
   liveEvents: AgentEventItem[]
 }
@@ -60,7 +63,7 @@ function runDuration(run: AgentRunNode): string {
   return run.status === "running" ? "in progress" : "—"
 }
 
-export function RunNodeDetail({ sessionId, run, liveEvents }: RunNodeDetailProps) {
+export function RunNodeDetail({ sessionId, run, sessionStatus, liveEvents }: RunNodeDetailProps) {
   const { items, status, error, hasMore, loadingMore, loadMore, reload } =
     useRunNodeEvents(sessionId, run?.id ?? null)
 
@@ -87,7 +90,11 @@ export function RunNodeDetail({ sessionId, run, liveEvents }: RunNodeDetailProps
     )
   }
 
-  const note = statusNote(run)
+  const previousAttempt = isPreviousAttempt(sessionStatus, run.status)
+  // A superseded run's status says what the last attempt did, so the note that
+  // reads it as this session's outcome ("the main orchestrator failed, which
+  // ends the session as failed") would contradict the queued session above it.
+  const note = previousAttempt ? null : statusNote(run)
 
   return (
     <section
@@ -116,7 +123,20 @@ export function RunNodeDetail({ sessionId, run, liveEvents }: RunNodeDetailProps
         </div>
       </header>
 
-      {note ? (
+      {previousAttempt ? (
+        <div className="flex flex-wrap items-center gap-2 border-b border-border bg-muted/30 px-4 py-2">
+          <Badge
+            variant="outline"
+            className="px-1.5 py-0 text-2xs font-semibold uppercase tracking-wider text-muted-foreground"
+          >
+            previous attempt
+          </Badge>
+          <p className="text-2xs leading-relaxed text-muted-foreground">
+            This result is from the previous attempt, not the one now in
+            flight — the retry reopens this run and records new events here.
+          </p>
+        </div>
+      ) : note ? (
         <p className="border-b border-border bg-muted/30 px-4 py-2 text-2xs leading-relaxed text-muted-foreground">
           {note}
         </p>

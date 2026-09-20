@@ -8,6 +8,7 @@ import type {
   AgentEventPage,
   AgentRunNode,
   ReviewSession,
+  SessionTarget,
 } from "@/api/contract"
 import { SessionDetail } from "./SessionDetail"
 
@@ -67,6 +68,24 @@ class MockEventSource {
 const OriginalEventSource = globalThis.EventSource
 const SESSION_ID = "ses_1"
 
+const TARGET: SessionTarget = {
+  id: "tgt_1",
+  repository: {
+    id: "repo_1",
+    fullName: "acme/api-gateway",
+    private: true,
+    defaultBranch: "main",
+  },
+  number: 142,
+  title: "fix: guard token refresh",
+  url: "https://github.com/acme/api-gateway/pull/142",
+  headBranch: "fix/token-refresh",
+  status: "done",
+  findingsCount: 2,
+  tokens: 18_000,
+  costUsd: 0.08,
+}
+
 function session(overrides: Partial<ReviewSession> = {}): ReviewSession {
   return {
     id: SESSION_ID,
@@ -82,25 +101,7 @@ function session(overrides: Partial<ReviewSession> = {}): ReviewSession {
       isAdmin: false,
     },
     createdAt: "2026-09-20T09:00:00.000Z",
-    targets: [
-      {
-        id: "tgt_1",
-        repository: {
-          id: "repo_1",
-          fullName: "acme/api-gateway",
-          private: true,
-          defaultBranch: "main",
-        },
-        number: 142,
-        title: "fix: guard token refresh",
-        url: "https://github.com/acme/api-gateway/pull/142",
-        headBranch: "fix/token-refresh",
-        status: "done",
-        findingsCount: 2,
-        tokens: 18_000,
-        costUsd: 0.08,
-      },
-    ],
+    targets: [TARGET],
     targetCount: 1,
     tokens: 18_000,
     costUsd: 0.08,
@@ -189,6 +190,38 @@ const RUNNING_SUB = run({
   costUsd: 0.004,
   endedAt: null,
 })
+
+/**
+ * After a retry (spec 10.5): the queue owns the session again, so no run is
+ * live, but the runs the failed attempt left are still what the tree serves.
+ */
+const REQUEUED_TREE: AgentRunNode[] = [
+  run({
+    id: "run_main",
+    level: "main",
+    role: "orchestrator.main",
+    objective: "Coordinate the review of every target in this session",
+    status: "failed",
+    error: "provider unreachable after retry",
+    tokens: 1_200,
+    costUsd: 0.01,
+    children: [
+      run({
+        id: "run_pr",
+        parentRunId: "run_main",
+        targetId: "tgt_1",
+        level: "pr",
+        role: "orchestrator.pr",
+        objective: "Review PR #142: fix: guard token refresh",
+        status: "failed",
+        error: "sub-agent returned no findings",
+        tokens: 5_400,
+        costUsd: 0.02,
+        children: [FAILED_SUB],
+      }),
+    ],
+  }),
+]
 
 /** Same shape while the session is still working. */
 const LIVE_TREE: AgentRunNode[] = [
@@ -293,8 +326,11 @@ function page(items: AgentEventItem[], nextSeq: number | null): AgentEventPage {
   return { items, nextSeq }
 }
 
-function mockApi(runs: AgentRunNode[]) {
-  vi.mocked(api.getSession).mockResolvedValue(session())
+function mockApi(
+  runs: AgentRunNode[],
+  sessionOverrides: Partial<ReviewSession> = {},
+) {
+  vi.mocked(api.getSession).mockResolvedValue(session(sessionOverrides))
   vi.mocked(api.getRunTree).mockResolvedValue({ runs })
   vi.mocked(api.getRunEvents).mockResolvedValue(page([], null))
 }
@@ -354,6 +390,13 @@ describe("SessionDetail run tree", () => {
     if (!header) throw new Error("the session header is missing")
     expect(within(header).getByText("Done")).toBeDefined()
     expect(within(header).queryByText("Failed")).toBeNull()
+
+    // A settled session's runs are its result, not history, and nothing is
+    // waiting on a worker.
+    expect(within(tree).queryByText(/previous attempt/i)).toBeNull()
+    expect(screen.queryByText(/previous attempt/i)).toBeNull()
+    expect(screen.queryByText(/Waiting for a worker/)).toBeNull()
+    expect(screen.queryByText(/reopens this run/)).toBeNull()
   })
 
   it("shows the selected run's events in words, without dumping the payload", async () => {
@@ -454,6 +497,65 @@ describe("SessionDetail run tree", () => {
     expect(within(row).getByText("Done")).toBeDefined()
     expect(within(row).getByText("5.0k")).toBeDefined()
     expect(within(row).getByText("$0.02")).toBeDefined()
+  })
+
+  it("reads a requeued session's finished runs as the previous attempt", async () => {
+    const createdAt = new Date(Date.now() - 4 * 60_000).toISOString()
+    mockApi(REQUEUED_TREE, {
+      status: "queued",
+      createdAt,
+      startedAt: createdAt,
+      targets: [{ ...TARGET, status: "queued" }],
+    })
+
+    render(<SessionDetail sessionId={SESSION_ID} onBack={vi.fn()} />)
+
+    // The contradiction this state used to read as: the header says queued
+    // while the tree's runs still say failed.
+    const tree = await screen.findByRole("region", { name: "Agent run tree" })
+    expect(screen.getByText("Queued")).toBeDefined()
+    expect(within(tree).getAllByText("Failed").length).toBeGreaterThan(0)
+
+    // Each finished run is labelled as history rather than as this attempt.
+    expect(within(tree).getAllByText("previous attempt")).toHaveLength(3)
+    const mainButton = within(tree).getByRole("button", {
+      name: /orchestrator\.main — Coordinate the review/,
+    })
+    // The row's own element, not the nested <li>: the children are rows too.
+    const mainRow = mainButton.parentElement
+    if (!mainRow) throw new Error("the main run is not in a row")
+    expect(within(mainRow).getByText("Failed")).toBeDefined()
+    expect(within(mainRow).getByText("previous attempt")).toBeDefined()
+
+    // The note that reads the failure as the session's outcome is gone: the
+    // session has not failed, it is waiting to run again.
+    const detail = await screen.findByRole("region", { name: "Run details" })
+    expect(
+      await within(detail).findByText(/the retry reopens this run/),
+    ).toBeDefined()
+    expect(within(detail).queryByText(/ends the session as failed/)).toBeNull()
+
+    // And the header says what the queue is doing with the session.
+    const waiting = screen.getByText(/Waiting for a worker/)
+    expect(waiting.textContent).toMatch(/queued 4m ago/)
+    expect(waiting.textContent).toMatch(/check that a worker is running/)
+  })
+
+  it("leaves a live session's runs as the current attempt", async () => {
+    mockApi(LIVE_TREE, { status: "running" })
+
+    render(<SessionDetail sessionId={SESSION_ID} onBack={vi.fn()} />)
+
+    const tree = await screen.findByRole("region", { name: "Agent run tree" })
+    const row = within(tree)
+      .getByRole("button", { name: /logic-reviewer — Review control flow/ })
+      .closest("li")
+    if (!row) throw new Error("the running sub-agent is not in a row")
+    expect(within(row).getByText("Running")).toBeDefined()
+
+    expect(within(tree).queryByText(/previous attempt/i)).toBeNull()
+    expect(screen.queryByText(/previous attempt/i)).toBeNull()
+    expect(screen.queryByText(/Waiting for a worker/)).toBeNull()
   })
 
   it("puts a quiet placeholder where a session has no runs yet", async () => {

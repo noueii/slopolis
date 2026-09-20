@@ -27,6 +27,7 @@ import type {
   SessionTarget,
   TargetStatus,
 } from "@/api/contract"
+import { RETRY_SESSION_ATTEMPT, RETRY_SESSION_ID } from "./data"
 import { dataset } from "./dataset"
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "/api"
@@ -173,7 +174,22 @@ class RunLog {
   }
 }
 
-function buildSessionRuns(session: ReviewSession): SessionRuns {
+function buildSessionRuns(stored: ReviewSession): SessionRuns {
+  // A queued session is one the queue owns again (a manual retry, spec 10.5):
+  // the row went back to `queued` because no new attempt has started yet, but
+  // the runs the superseded attempt left are still what a real deployment
+  // serves, so that is the attempt this tree describes.
+  const history = stored.id === RETRY_SESSION_ID ? RETRY_SESSION_ATTEMPT : null
+  const session: ReviewSession = history
+    ? {
+        ...stored,
+        status: history.session,
+        targets: stored.targets.map((target) => ({
+          ...target,
+          status: history.target,
+        })),
+      }
+    : stored
   const events = new Map<string, AgentEventItem[]>()
   const startedMs = session.startedAt
     ? new Date(session.startedAt).getTime()
@@ -311,7 +327,9 @@ function buildSessionRuns(session: ReviewSession): SessionRuns {
   return {
     runs: [mainNode],
     events,
-    live: buildLiveFrames(session, mainNode, events),
+    // The live script follows the stored row, not the replayed attempt: a
+    // queued session has no worker streaming for it.
+    live: buildLiveFrames(stored, mainNode, events),
     targetStatus: new Map(),
   }
 }

@@ -1,11 +1,21 @@
 """Connected repositories and their open pull requests.
 
 Repository rows come from the workspace DB; open pull requests are fetched live
-from GitHub through this request's client and mapped onto the wire shape,
-including real diff size and rolled-up CI checks. GitHub reports diff size and
-check state per pull request only, so one listing costs one read per pull
-request. A repository the workspace does not own is a 404 in the standard error
-envelope, matching the mock.
+from GitHub through the client for **each repository's own installation** and
+mapped onto the wire shape, including real diff size and rolled-up CI checks.
+GitHub reports diff size and check state per pull request only, so one listing
+costs one read per pull request. A repository the workspace does not own is a 404
+in the standard error envelope, matching the mock.
+
+The workspace also owns the **enable switch** (spec 10.1): ``PATCH
+/repositories/{id}`` parks a connected repository — it stays listed with its
+history and pre-flight refuses its pull requests — or brings it back. Both
+transitions are audited.
+
+Both of those reads are memoized per app for a few seconds
+(:data:`_PULL_CACHE_TTL_SECONDS`), so mounting the picker twice does not spend
+GitHub rate limit twice. The one visible consequence: **the picker may be up to
+30s stale about PR counts and CI state.**
 """
 
 from __future__ import annotations
@@ -13,15 +23,20 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import uuid
 from collections.abc import Sequence
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
+from pydantic import ConfigDict
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import CAMEL
 from app.deps import (
+    CurrentUserDep,
     DbSessionDep,
-    OptionalGitHubClientDep,
     WorkspaceIdDep,
+    WorkspaceRepositoriesDep,
 )
 from app.errors import ApiError
 from app.schemas import (
@@ -32,11 +47,14 @@ from app.schemas import (
     RepositoryRef,
     RepositorySummary,
     UserRef,
+    WireModel,
 )
+from app.services.github_clients import WorkspaceRepositories
+from slopolis_core.cache import TTLCache
 from slopolis_core.github.client import GitHubClient
 from slopolis_core.github.errors import GitHubError, GitHubNotFoundError
 from slopolis_core.github.models import CheckRun, GitHubPullRequest
-from slopolis_db.models import Repository
+from slopolis_db.models import AuditLog, GitHubInstallation, Repository
 
 __all__ = ["router"]
 
@@ -47,6 +65,15 @@ router = APIRouter(prefix="/repositories", tags=["repositories"])
 #: GitHub reads a single request may have in flight at once.
 _MAX_CONCURRENT_READS = 8
 
+#: How long a picker answer may be served without asking GitHub again. Long
+#: enough to absorb a page's worth of mounts, short enough that a review the
+#: user just pushed to shows up while they are still looking at the picker.
+_PULL_CACHE_TTL_SECONDS = 30.0
+
+#: ``app.state`` names for the two caches, so a deployment can swap them.
+_PULL_COUNTS_CACHE = "pull_counts_cache"
+_OPEN_PULLS_CACHE = "open_pulls_cache"
+
 #: Check-run conclusions that count as green.
 _PASSING_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
 
@@ -56,26 +83,51 @@ _FAILING_CONCLUSIONS = frozenset(
 )
 
 
+#: A cache entry is scoped to the installation and repository it was read through.
+type _CacheKey = tuple[int | None, str]
+
+
+def _cache_key(client: GitHubClient, full_name: str) -> _CacheKey:
+    """Scope a cache entry to the installation and repository that produced it.
+
+    A repository re-pointed at another installation can never be served the old
+    installation's answer, and a revoke cannot leak into a new install. The test
+    seam's fake client carries no installation id, which still keys per
+    repository.
+    """
+    return getattr(client, "installation_id", None), full_name
+
+
+def _app_cache[V](request: Request, name: str) -> TTLCache[_CacheKey, V]:
+    """Return the app's cache called ``name``, creating it on first use.
+
+    The cache hangs off the app rather than a module global so test apps do not
+    share entries and a deployment can replace it with its own TTL.
+    """
+    cache: TTLCache[_CacheKey, V] | None = getattr(request.app.state, name, None)
+    if cache is None:
+        cache = TTLCache(ttl_seconds=_PULL_CACHE_TTL_SECONDS)
+        setattr(request.app.state, name, cache)
+    return cache
+
+
 @router.get("")
 async def list_repositories(
-    db: DbSessionDep,
-    workspace_id: WorkspaceIdDep,
-    client: OptionalGitHubClientDep,
+    request: Request,
+    repositories: WorkspaceRepositoriesDep,
 ) -> RepositoryListResponse:
-    """Return every repository connected to the workspace, with its open count."""
-    rows = list(
-        (
-            await db.scalars(
-                select(Repository)
-                .where(Repository.workspace_id == workspace_id)
-                .order_by(Repository.full_name)
-            )
-        ).all()
-    )
-    counts = (
-        await _open_pull_counts(client, [row.full_name for row in rows])
-        if client is not None
-        else {}
+    """Return every repository connected to the workspace, with its open count.
+
+    A workspace can hold several installations, so the rows are grouped by the
+    installation that grants them and each group is read through its own client;
+    the union, in name order, is what the caller sees. A group whose
+    installation cannot be read keeps its rows without a live count.
+    """
+    groups = await repositories.by_installation()
+    counts = await _open_pull_counts_by_installation(request, repositories, groups)
+    rows = sorted(
+        (row for _installation, group_rows in groups for row in group_rows),
+        key=lambda row: row.full_name,
     )
     return RepositoryListResponse(
         items=[
@@ -89,37 +141,195 @@ async def list_repositories(
 async def list_repository_pulls(
     owner: str,
     name: str,
-    db: DbSessionDep,
-    workspace_id: WorkspaceIdDep,
-    client: OptionalGitHubClientDep,
+    request: Request,
+    repositories: WorkspaceRepositoriesDep,
 ) -> RepositoryPullRequestsResponse:
     """Return the open pull requests for one connected repository."""
     full_name = f"{owner}/{name}"
-    row = await db.scalar(
-        select(Repository).where(
-            Repository.workspace_id == workspace_id,
-            Repository.full_name == full_name,
-        )
-    )
-    if row is None:
+    resolved = await repositories.resolve(full_name)
+    if resolved is None:
         raise ApiError(
             404,
             "repository_not_found",
             f"{full_name} is not connected to this workspace.",
         )
+    client = resolved.client
     if client is None:
-        # The repository is known, but answering for it needs GitHub.
+        # The repository is known, but reading it needs its installation.
         raise ApiError(
             503,
             "github_not_configured",
             "The GitHub App is not configured for this workspace.",
         )
 
-    pulls = await _list_open_pulls(client, full_name)
+    pull_requests = await _cached_open_pulls(request, client, full_name)
     return RepositoryPullRequestsResponse(
-        repository=_summary_from_row(row, open_pr_count=len(pulls)),
-        pull_requests=await _open_pull_requests(client, full_name, pulls),
+        repository=_summary_from_row(
+            resolved.row, open_pr_count=len(pull_requests)
+        ),
+        pull_requests=pull_requests,
     )
+
+
+class RepositoryUpdateRequest(WireModel):
+    """Body of ``PATCH /api/repositories/{id}`` — the workspace's own switch.
+
+    Lives here rather than in ``app.schemas`` because it is the only body this
+    router owns; it speaks the same camelCase wire shape as every other model.
+    Public because it names a component of the published OpenAPI document.
+    """
+
+    model_config = ConfigDict(
+        alias_generator=CAMEL,
+        populate_by_name=True,
+        extra="forbid",
+    )
+
+    enabled: bool
+
+
+@router.patch("/{repository_id}")
+async def update_repository(
+    repository_id: uuid.UUID,
+    body: RepositoryUpdateRequest,
+    request: Request,
+    db: DbSessionDep,
+    workspace_id: WorkspaceIdDep,
+    repositories: WorkspaceRepositoriesDep,
+    user: CurrentUserDep,
+) -> RepositorySummary:
+    """Park or re-enable one repository, returning its updated summary.
+
+    Parking is how a workspace stops reviewing a repository GitHub still grants:
+    the row — and with it every session and finding in its history — stays, and
+    pre-flight refuses its pull requests. Another workspace's id is a 404, and an
+    id already in the requested state is a no-op (no write, no audit row, same
+    body), so retrying a toggle is safe.
+    """
+    row = await db.scalar(
+        select(Repository).where(
+            Repository.id == repository_id,
+            Repository.workspace_id == workspace_id,
+        )
+    )
+    if row is None:
+        raise ApiError(
+            404,
+            "repository_not_found",
+            "The repository is not connected to this workspace.",
+        )
+
+    if row.enabled != body.enabled:
+        row.enabled = body.enabled
+        _audit(
+            db,
+            workspace_id=workspace_id,
+            actor_id=user.id,
+            action="repository.enabled" if body.enabled else "repository.disabled",
+            target_type="repository",
+            target_id=row.id,
+        )
+        await db.commit()
+        await db.refresh(row)
+
+    return _summary_from_row(
+        row, open_pr_count=await _open_count_for(request, repositories, row)
+    )
+
+
+def _audit(
+    db: AsyncSession,
+    *,
+    workspace_id: uuid.UUID,
+    actor_id: uuid.UUID,
+    action: str,
+    target_type: str,
+    target_id: uuid.UUID | None = None,
+) -> None:
+    """Stage one audit row for the caller to commit with its mutation."""
+    db.add(
+        AuditLog(
+            workspace_id=workspace_id,
+            actor_user_id=actor_id,
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+        )
+    )
+
+
+async def _open_count_for(
+    request: Request, repositories: WorkspaceRepositories, row: Repository
+) -> int:
+    """The repository's live open count, or 0 when its installation is unreadable.
+
+    Served through the same cache the listing uses, so the summary a toggle
+    answers with matches the row the caller is looking at.
+    """
+    resolved = await repositories.resolve(row.full_name)
+    if resolved is None or resolved.client is None:
+        return 0
+    semaphore = asyncio.Semaphore(_MAX_CONCURRENT_READS)
+    counts = await _cached_open_pull_counts(
+        request, resolved.client, [row.full_name], semaphore
+    )
+    return counts.get(row.full_name, 0)
+
+
+async def _open_pull_counts_by_installation(
+    request: Request,
+    repositories: WorkspaceRepositories,
+    groups: Sequence[tuple[GitHubInstallation, list[Repository]]],
+) -> dict[str, int]:
+    """Open pull-request counts for every group, read concurrently but bounded.
+
+    The bound is shared across installations, so several installations do not
+    multiply the GitHub reads one listing may have in flight. An installation
+    that cannot be read contributes nothing: its rows still list, with no live
+    count, and nothing is cached for them.
+    """
+    semaphore = asyncio.Semaphore(_MAX_CONCURRENT_READS)
+
+    async def read(
+        installation: GitHubInstallation, rows: Sequence[Repository]
+    ) -> dict[str, int]:
+        client = await repositories.client_for_installation(installation)
+        if client is None:
+            return {}
+        return await _cached_open_pull_counts(
+            request, client, [row.full_name for row in rows], semaphore
+        )
+
+    counts: dict[str, int] = {}
+    for part in await asyncio.gather(
+        *(read(installation, rows) for installation, rows in groups)
+    ):
+        counts.update(part)
+    return counts
+
+
+async def _cached_open_pulls(
+    request: Request, client: GitHubClient, full_name: str
+) -> list[OpenPullRequest]:
+    """The repository's open pull requests, mapped, served from the cache.
+
+    These are the expensive reads — diff size and check runs, one pair per pull
+    request — so a hit touches GitHub not at all, and the CI state it reports may
+    be up to :data:`_PULL_CACHE_TTL_SECONDS` seconds old. Failures propagate
+    unmapped, so nothing is cached for a repository GitHub would not answer for.
+    """
+    cache: TTLCache[_CacheKey, list[OpenPullRequest]] = _app_cache(
+        request, _OPEN_PULLS_CACHE
+    )
+    key = _cache_key(client, full_name)
+    hit = cache.get(key)
+    if hit is not None:
+        # Hand out a copy: the cached list must survive whatever the caller does.
+        return list(hit)
+    pulls = await _list_open_pulls(client, full_name)
+    mapped = await _open_pull_requests(client, full_name, pulls)
+    cache.put(key, mapped)
+    return list(mapped)
 
 
 async def _list_open_pulls(
@@ -179,17 +389,51 @@ async def _open_pull_requests(
         ) from exc
 
 
-async def _open_pull_counts(
-    client: GitHubClient, full_names: Sequence[str]
+async def _cached_open_pull_counts(
+    request: Request,
+    client: GitHubClient,
+    full_names: Sequence[str],
+    semaphore: asyncio.Semaphore,
 ) -> dict[str, int]:
+    """Open pull-request counts per repository, cached per installation.
+
+    Only repositories without a live entry are read, so mounting the picker
+    repeatedly costs one read per repository per
+    :data:`_PULL_CACHE_TTL_SECONDS` instead of one per mount. A count GitHub
+    refused is never cached, so the next request retries it.
+    """
+    cache: TTLCache[_CacheKey, int] = _app_cache(request, _PULL_COUNTS_CACHE)
+    counts: dict[str, int] = {}
+    unread: list[str] = []
+    for full_name in full_names:
+        hit = cache.get(_cache_key(client, full_name))
+        if hit is None:
+            unread.append(full_name)
+        else:
+            counts[full_name] = hit
+    if not unread:
+        return counts
+    read = await _open_pull_counts(client, unread, semaphore)
+    for full_name, count in read.items():
+        if count is None:
+            counts[full_name] = 0
+        else:
+            cache.put(_cache_key(client, full_name), count)
+            counts[full_name] = count
+    return counts
+
+
+async def _open_pull_counts(
+    client: GitHubClient, full_names: Sequence[str], semaphore: asyncio.Semaphore
+) -> dict[str, int | None]:
     """Open pull-request counts per repository, concurrently but bounded.
 
     One repository the App cannot read must not fail the whole list: its count
-    falls back to 0 and the failure is logged.
+    is ``None`` — the caller falls back to 0 — and the failure is logged so it
+    is not mistaken for a real zero.
     """
-    semaphore = asyncio.Semaphore(_MAX_CONCURRENT_READS)
 
-    async def count(full_name: str) -> tuple[str, int]:
+    async def count(full_name: str) -> tuple[str, int | None]:
         async with semaphore:
             try:
                 pulls = await client.list_open_pull_requests(full_name)
@@ -197,7 +441,7 @@ async def _open_pull_counts(
                 _logger.warning(
                     "open pull requests unavailable for %s: %s", full_name, exc
                 )
-                return full_name, 0
+                return full_name, None
             return full_name, len(pulls)
 
     return dict(await asyncio.gather(*(count(name) for name in full_names)))
@@ -216,6 +460,7 @@ def _summary_from_row(row: Repository, *, open_pr_count: int = 0) -> RepositoryS
         open_pr_count=open_pr_count,
         last_activity_at=activity,
         connected=row.connected,
+        enabled=row.enabled,
     )
 
 

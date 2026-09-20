@@ -8,20 +8,23 @@ service, and the ARQ pool. No network, no Redis, no Postgres.
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
 import pytest_asyncio
+from app.auth import GitHubProfile
 from app.deps import (
     get_arq_pool,
     get_current_user,
     get_db,
     get_optional_user,
     get_preflight_service,
+    get_repo_access_checker,
 )
 from app.main import create_app
+from app.services.repo_access import RepoAccessChecker
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -30,7 +33,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from slopolis_core.github.errors import GitHubNotFoundError
+from slopolis_core.github.errors import GitHubError, GitHubNotFoundError
 from slopolis_core.github.models import AppInstallation, InstallationRepository
 from slopolis_core.llm.client import LlmError
 from slopolis_core.preflight.models import PrReference, RepositoryRef
@@ -38,6 +41,9 @@ from slopolis_core.preflight.service import PreflightService
 from slopolis_db.base import Base
 from slopolis_db.models import (
     GitHubInstallation,
+    ModelAssignment,
+    ModelCatalog,
+    ProviderCredential,
     Repository,
     ReviewSession,
     SessionTarget,
@@ -87,6 +93,33 @@ class FakeGitHubClient:
 
     async def list_check_runs(self, full_name: str, ref: str) -> list[Any]:
         return self._checks.get((full_name, ref), [])
+
+
+class FakeInstallationClients[Client]:
+    """In-memory per-installation client registry.
+
+    Stands in for the server's ``InstallationClients``: it answers every
+    installation id with the fake registered for it, records the ids it was
+    asked to mint for, and refuses an id it knows nothing about — the shape of a
+    real mint failure (a suspended installation, an unsynced placeholder).
+    """
+
+    def __init__(
+        self,
+        clients: dict[int, Client] | None = None,
+        *,
+        default: Client | None = None,
+    ) -> None:
+        self.clients = clients or {}
+        self.default = default
+        self.minted: list[int] = []
+
+    async def client_for(self, installation_id: int) -> Client:
+        self.minted.append(installation_id)
+        client = self.clients.get(installation_id, self.default)
+        if client is None:
+            raise GitHubError(f"No installation {installation_id}")
+        return client
 
 
 class FakeGateway:
@@ -195,6 +228,25 @@ class FakeLiveCheck:
         self.calls.append(model)
         if self.fail:
             raise LlmError("model unavailable")
+
+
+class FakeOAuthClient:
+    """In-memory OAuth exchange: records the calls, answers with a canned profile."""
+
+    def __init__(self, profile: GitHubProfile | None = None) -> None:
+        self.profile = profile or GitHubProfile(
+            id=9001, login="newcomer", name="New Comer", avatar_url=None
+        )
+        self.codes: list[str] = []
+        self.tokens: list[str] = []
+
+    async def exchange_code(self, *, client_id: str, client_secret: str, code: str) -> str:
+        self.codes.append(code)
+        return "gho_test_token"
+
+    async def fetch_user(self, *, token: str) -> GitHubProfile:
+        self.tokens.append(token)
+        return self.profile
 
 
 def make_ref(
@@ -372,6 +424,93 @@ async def seed_session(
     return review
 
 
+async def seed_empty_workspace(
+    session: AsyncSession, *, handle: str = "rookie", github_id: int = 3003
+) -> tuple[Workspace, User]:
+    """Create a workspace with a member and nothing connected to it yet."""
+    workspace = Workspace(name="Widgets", slug="widgets")
+    session.add(workspace)
+    await session.flush()
+    user = User(
+        workspace_id=workspace.id,
+        github_id=github_id,
+        handle=handle,
+        name=handle.title(),
+        avatar_url=None,
+    )
+    session.add(user)
+    await session.commit()
+    return workspace, user
+
+
+async def add_installation(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    *,
+    installation_id: int,
+    account_login: str,
+    repositories: Sequence[str] = (),
+) -> GitHubInstallation:
+    """Record an installation and the repositories it grants for a workspace."""
+    installation = GitHubInstallation(
+        workspace_id=workspace_id,
+        installation_id=installation_id,
+        account_login=account_login,
+        account_type="Organization",
+    )
+    session.add(installation)
+    await session.flush()
+    for index, full_name in enumerate(repositories):
+        session.add(
+            Repository(
+                workspace_id=workspace_id,
+                installation_id=installation.id,
+                github_id=installation_id * 100 + index,
+                full_name=full_name,
+                private=False,
+                default_branch="main",
+            )
+        )
+    await session.commit()
+    return installation
+
+
+async def seed_review_model(
+    session: AsyncSession, workspace_id: uuid.UUID, *, model: str = "claude-sonnet-4"
+) -> None:
+    """Give a workspace an enabled credential and an assigned review model.
+
+    The real pre-flight assembly reads both from the database, so tests that
+    exercise it end to end need them.
+    """
+    credential = ProviderCredential(
+        workspace_id=workspace_id,
+        provider="Anthropic",
+        encrypted_api_key=b"\x01test",
+        key_last4="test",
+        enabled=True,
+    )
+    session.add(credential)
+    await session.flush()
+    catalog = ModelCatalog(
+        workspace_id=workspace_id,
+        credential_id=credential.id,
+        model_id=model,
+        provider="Anthropic",
+        source="imported",
+    )
+    session.add(catalog)
+    await session.flush()
+    session.add(
+        ModelAssignment(
+            workspace_id=workspace_id,
+            role="review",
+            model_catalog_id=catalog.id,
+        )
+    )
+    await session.commit()
+
+
 # --- app + client -----------------------------------------------------------
 
 
@@ -389,7 +528,11 @@ async def build_harness(
         workspace: FakeWorkspace | None = None,
         live_check: FakeLiveCheck | None = None,
         github_client: FakeGitHubClient | None = None,
+        github_clients: FakeInstallationClients[Any] | None = None,
+        real_preflight: bool = False,
         app_installations: FakeAppInstallations | None = None,
+        oauth_client: FakeOAuthClient | None = None,
+        repo_access: RepoAccessChecker | None = None,
     ) -> ApiHarness:
         app = create_app()
 
@@ -423,20 +566,30 @@ async def build_harness(
         app.dependency_overrides[get_db] = override_db
         app.dependency_overrides[get_current_user] = override_user
         app.dependency_overrides[get_optional_user] = override_optional_user
-        app.dependency_overrides[get_preflight_service] = lambda: service
+        if not real_preflight:
+            app.dependency_overrides[get_preflight_service] = lambda: service
         app.dependency_overrides[get_arq_pool] = lambda: pool
+        # Per-viewer repo-access checks talk to GitHub; a test that exercises
+        # them passes a checker over its own fake probe.
+        if repo_access is not None:
+            access = repo_access
+            app.dependency_overrides[get_repo_access_checker] = lambda: access
 
-        async def build_github_client() -> FakeGitHubClient:
-            assert github_client is not None
-            return github_client
-
-        # Routes build their GitHub client per request; the harness pins the fake
-        # (or leaves the factory unset, which is the unconfigured-App path).
-        app.state.github_client_factory = (
-            build_github_client if github_client is not None else None
-        )
+        # Routes resolve a GitHub client per request, per installation. The
+        # harness stands in the process-wide registry, or leaves it unset — the
+        # unconfigured-App path. ``github_client`` is shorthand for a registry
+        # that answers every installation with that one fake.
+        registry = github_clients
+        if registry is None and github_client is not None:
+            registry = FakeInstallationClients(default=github_client)
+        app.state.github_clients = registry
         app.state.app_installations = app_installations
+        # The real pre-flight assembly takes its live check from the app.
+        app.state.live_model_check = live_check or FakeLiveCheck()
         app.state.arq_pool = pool
+        # The OAuth client is process state, like the GitHub one: the routes read
+        # it from the app, and leaving it unset is the unconfigured-deployment path.
+        app.state.oauth_client = oauth_client
 
         client = AsyncClient(
             transport=ASGITransport(app=app), base_url="http://testserver"

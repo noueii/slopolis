@@ -23,6 +23,7 @@ REQUIRED_PATHS: tuple[str, ...] = (
     "/api/reviews/preflight",
     "/api/dashboard",
     "/api/repositories",
+    "/api/repositories/{repository_id}",
     "/api/models",
     "/api/presets",
     "/api/usage",

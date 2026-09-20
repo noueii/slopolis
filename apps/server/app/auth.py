@@ -4,18 +4,27 @@ Implements the three-step browser flow: redirect to GitHub, exchange the
 ``code`` for an access token, fetch the profile, then upsert the ``User`` (and
 its workspace) and set a signed httpOnly cookie. Logout clears the cookie.
 
+The round trip is bound to the browser that started it: login mints a single-use
+``state``, sends it to GitHub, and parks it in a short-lived signed cookie scoped
+to the auth routes; the callback exchanges a ``code`` only when it comes back
+with that state. A visitor who never started a sign-in cannot plant one.
+
 The GitHub HTTP calls go through :class:`GitHubOAuthClient`, a narrow port over
 ``httpx.AsyncClient`` so tests can substitute a fake without network access.
 """
 
 from __future__ import annotations
 
+import datetime as dt
+import hmac
+import secrets
 import urllib.parse
 from typing import Annotated, cast
 
 import httpx
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Cookie, Depends, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse
+from itsdangerous import BadSignature, URLSafeTimedSerializer
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,11 +34,13 @@ from app.deps import (
     AppSettingsDep,
     CurrentUserDep,
     DbSessionDep,
+    OptionalVaultDep,
     encode_user_id,
 )
 from app.errors import ApiError
 from app.schemas import MeResponse
 from app.serializers import workspace_ref
+from slopolis_core.vault import SecretVault
 from slopolis_db.models import User, Workspace
 
 __all__ = ["GitHubOAuthClient", "me_router", "router"]
@@ -38,6 +49,14 @@ _AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
 _TOKEN_URL = "https://github.com/login/oauth/access_token"
 _USER_URL = "https://api.github.com/user"
 _SCOPES = "read:user user:email repo"
+
+# The login redirect parks its single-use ``state`` in this cookie, scoped to the
+# auth routes so it never travels with ordinary API calls and only has to survive
+# one trip through GitHub. It is signed with the session cookie's key.
+_STATE_COOKIE = "slopolis_oauth_state"
+_STATE_COOKIE_PATH = "/api/auth"
+_STATE_TTL_SECONDS = 600
+_STATE_SALT = "oauth-state"
 
 
 class GitHubOAuthClient:
@@ -136,18 +155,76 @@ def _require_credentials(settings: AppSettings) -> tuple[str, str]:
     return core.github_client_id, core.github_client_secret
 
 
+def _sign_state(state: str, settings: AppSettings) -> str:
+    """Sign an OAuth ``state`` for the cookie, with the session cookie's key."""
+    return URLSafeTimedSerializer(settings.cookie_secret, salt=_STATE_SALT).dumps(state)
+
+
+def _read_state(cookie: str, settings: AppSettings) -> str | None:
+    """Return the ``state`` a signed cookie carries, or ``None`` when unusable."""
+    serializer = URLSafeTimedSerializer(settings.cookie_secret, salt=_STATE_SALT)
+    try:
+        loaded: object = serializer.loads(cookie, max_age=_STATE_TTL_SECONDS)
+    except BadSignature:
+        return None
+    return loaded if isinstance(loaded, str) else None
+
+
+def _state_matches(state: str | None, cookie: str | None, settings: AppSettings) -> bool:
+    """Whether a callback presents the state the browser was given.
+
+    The comparison is constant-time (and over bytes, so a non-ASCII guess is
+    simply wrong rather than an error), leaving nothing to narrow a state down.
+    """
+    if not state or not cookie:
+        return False
+    expected = _read_state(cookie, settings)
+    if expected is None:
+        return False
+    return hmac.compare_digest(state.encode(), expected.encode())
+
+
+def _invalid_state_error() -> ApiError:
+    """Refuse a callback whose ``state`` cannot be matched, dropping the cookie.
+
+    The cookie has to go on this path too, and the app-level error handler only
+    renders the envelope — so the deletion header is built by a throwaway
+    response and carried on the error.
+    """
+    probe = Response()
+    probe.delete_cookie(_STATE_COOKIE, path=_STATE_COOKIE_PATH)
+    return ApiError(
+        400,
+        "invalid_oauth_state",
+        "The sign-in attempt could not be verified; start again.",
+        headers={"set-cookie": probe.headers["set-cookie"]},
+    )
+
+
 @router.get("/github/login")
 async def github_login(settings: AppSettingsDep) -> RedirectResponse:
-    """Redirect the browser to GitHub's OAuth consent screen."""
+    """Redirect the browser to GitHub's OAuth consent screen, binding the attempt."""
     client_id, _secret = _require_credentials(settings)
+    state = secrets.token_urlsafe(32)
     query = urllib.parse.urlencode(
         {
             "client_id": client_id,
             "scope": _SCOPES,
             "redirect_uri": f"{settings.core.app_url}/api/auth/github/callback",
+            "state": state,
         }
     )
-    return RedirectResponse(f"{_AUTHORIZE_URL}?{query}", status_code=302)
+    response = RedirectResponse(f"{_AUTHORIZE_URL}?{query}", status_code=302)
+    response.set_cookie(
+        key=_STATE_COOKIE,
+        value=_sign_state(state, settings),
+        max_age=_STATE_TTL_SECONDS,
+        httponly=True,
+        samesite="lax",
+        secure=settings.core.app_url.startswith("https"),
+        path=_STATE_COOKIE_PATH,
+    )
+    return response
 
 
 @router.get("/github/callback")
@@ -156,14 +233,25 @@ async def github_callback(
     db: DbSessionDep,
     settings: AppSettingsDep,
     oauth: OAuthClientDep,
+    vault: OptionalVaultDep,
+    state: str | None = None,
+    state_cookie: Annotated[str | None, Cookie(alias=_STATE_COOKIE)] = None,
 ) -> RedirectResponse:
-    """Exchange the code, upsert the user, and set the signed session cookie."""
+    """Exchange the code, upsert the user, and set the signed session cookie.
+
+    A ``code`` is only worth exchanging when it comes back with the ``state``
+    this browser asked for; the cookie is consumed on both outcomes, which is
+    what makes a replay of a stolen state fail.
+    """
     client_id, client_secret = _require_credentials(settings)
+    if not _state_matches(state, state_cookie, settings):
+        raise _invalid_state_error()
     token = await oauth.exchange_code(
         client_id=client_id, client_secret=client_secret, code=code
     )
     profile = await oauth.fetch_user(token=token)
     user = await _upsert_user(db, profile)
+    _store_github_token(user, token, vault)
     await db.commit()
 
     response = RedirectResponse(settings.core.app_url, status_code=302)
@@ -176,6 +264,7 @@ async def github_callback(
         secure=settings.core.app_url.startswith("https"),
         path="/",
     )
+    response.delete_cookie(_STATE_COOKIE, path=_STATE_COOKIE_PATH)
     return response
 
 
@@ -197,6 +286,19 @@ async def me(user: CurrentUserDep, db: DbSessionDep) -> MeResponse:
     """
     workspace = await db.get(Workspace, user.workspace_id) if user.workspace_id else None
     return _to_user_ref(user, workspace)
+
+
+def _store_github_token(user: User, token: str, vault: SecretVault | None) -> None:
+    """Seal the user's access token for later repo-access checks (spec 10.1).
+
+    A deployment with no ``ENCRYPTION_KEY`` still signs in — it has nothing to
+    seal with, so it stores no token and every check for this account is then
+    unverifiable (10.8 §Access). The token is never logged and never returned.
+    """
+    if vault is None:
+        return
+    user.encrypted_github_token = vault.seal(token)
+    user.token_updated_at = dt.datetime.now(dt.UTC)
 
 
 async def _upsert_user(db: AsyncSession, profile: GitHubProfile) -> User:

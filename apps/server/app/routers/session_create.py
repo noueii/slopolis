@@ -23,12 +23,15 @@ from app.routers.catalog import (
     DEFAULT_MODEL_ID,
     DEFAULT_PROVIDER,
 )
+from app.routers.reviews import explain_parked
 from app.schemas import CreatedSession, CreateReviewRequest
 from app.serializers import build_name, serialize_created_session
+from slopolis_core.harness import MAIN_AGENT, AgentStatus, HarnessLevel
 from slopolis_core.preflight.models import PreflightRequest as CorePreflightRequest
 from slopolis_core.preflight.models import PrReference
 from slopolis_core.preflight.service import PreflightService
 from slopolis_db.models import (
+    AgentRun,
     GitHubInstallation,
     Repository,
     ReviewSession,
@@ -60,6 +63,9 @@ async def create_session(
     outcome = await service.run(
         CorePreflightRequest(pr_urls=urls), user_login=user.handle
     )
+    # A parked repository is left out of the coverage set, so pre-flight can only
+    # call it "not covered". Name the real reason before refusing the submission.
+    outcome = await explain_parked(db, workspace_id, outcome)
     if not outcome.valid:
         raise ApiError(
             422,
@@ -86,6 +92,7 @@ async def create_session(
     )
     db.add(session)
     await db.flush()
+    await _ensure_main_run(db, session, started_at=created_at)
 
     targets: list[SessionTarget] = []
     for item in outcome.valid:
@@ -108,6 +115,40 @@ async def create_session(
         await pool.enqueue_job(_JOB_NAME, str(session.id), str(target.id))
 
     return serialize_created_session(session, target_count=len(targets))
+
+
+async def _ensure_main_run(
+    db: AsyncSession, session: ReviewSession, *, started_at: dt.datetime
+) -> None:
+    """Create the session's ``main`` run so its tree exists from submit (spec §15).
+
+    A session whose target jobs all fail to start still has a root node this way,
+    and the worker's lazy creation finds this row instead of opening a second one.
+    Find-or-create rather than blind insert because both paths may race for the
+    same session.
+    """
+    existing = await db.scalar(
+        select(AgentRun.id).where(
+            AgentRun.session_id == session.id,
+            AgentRun.level == HarnessLevel.MAIN.value,
+        )
+    )
+    if existing is not None:
+        return
+    db.add(
+        AgentRun(
+            session_id=session.id,
+            target_id=None,
+            parent_run_id=None,
+            level=HarnessLevel.MAIN.value,
+            role=MAIN_AGENT,
+            model_id=None,
+            objective=f"Coordinate the review of {session.name}",
+            status=AgentStatus.RUNNING.value,
+            started_at=started_at,
+        )
+    )
+    await db.flush()
 
 
 async def _resolve_model(db: AsyncSession, workspace_id: uuid.UUID) -> tuple[str, str]:

@@ -9,6 +9,8 @@ FastAPI OpenAPI schema the UI is allowed to depend on.
 from __future__ import annotations
 
 import datetime as dt
+import uuid
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -16,7 +18,16 @@ from app.config import CAMEL
 from slopolis_core.domain import SessionStatus, TargetStatus
 
 __all__ = [
+    "AgentEventItem",
+    "AgentEventPage",
+    "AgentRunNode",
+    "AgentRunTreeResponse",
     "ApiErrorBody",
+    "AssignmentResponse",
+    "AssignmentUpdateRequest",
+    "CatalogModelCreateRequest",
+    "CatalogModelListResponse",
+    "CatalogModelRef",
     "CreateReviewRequest",
     "CreatedSession",
     "DashboardData",
@@ -26,12 +37,19 @@ __all__ = [
     "FilterOption",
     "LiveSession",
     "ModelCatalog",
+    "ModelImportRequest",
+    "ModelImportResponse",
     "ModelOption",
     "OpenPullRequest",
     "Paginated",
     "PrReference",
     "PreflightRequest",
     "PreflightResult",
+    "ProviderCreateRequest",
+    "ProviderCredentialRef",
+    "ProviderListResponse",
+    "ProviderTestResult",
+    "ProviderUpdateRequest",
     "PullRequestChecks",
     "RepositoryListResponse",
     "RepositoryPullRequestsResponse",
@@ -40,6 +58,7 @@ __all__ = [
     "ReviewPreset",
     "ReviewPresetCatalog",
     "ReviewSession",
+    "RoleAssignmentRef",
     "SessionFilterOptions",
     "SessionListParams",
     "SessionStats",
@@ -226,6 +245,8 @@ class RepositorySummary(WireModel):
     open_pr_count: int
     last_activity_at: dt.datetime
     connected: bool
+    #: The workspace switch: a connected repository can be parked without losing its history.
+    enabled: bool = True
 
 
 class RepositoryListResponse(WireModel):
@@ -485,6 +506,7 @@ class UsageResponse(WireModel):
     total_sessions: int
     by_model: list[UsageBreakdown] = Field(default_factory=list)
     by_repository: list[UsageBreakdown] = Field(default_factory=list)
+    by_user: list[UsageBreakdown] = Field(default_factory=list)
     series: list[UsagePoint] = Field(default_factory=list)
 
 
@@ -503,3 +525,160 @@ class ApiErrorBody(WireModel):
     """Standard error envelope returned on every non-2xx response."""
 
     error: ApiErrorDetail
+
+
+# --- provider & model configuration ----------------------------------------
+
+
+class ProviderCredentialRef(WireModel):
+    """A BYOK credential as the admin screen sees it — never the key itself."""
+
+    id: str
+    provider: str
+    base_url: str | None = None
+    key_last4: str
+    enabled: bool
+    last_status: str | None = None
+    last_checked_at: dt.datetime | None = None
+    created_at: dt.datetime
+
+
+class ProviderListResponse(WireModel):
+    """Every provider credential the workspace holds."""
+
+    items: list[ProviderCredentialRef] = Field(default_factory=list)
+
+
+class ProviderCreateRequest(WireModel):
+    """Body of ``POST /api/providers``; the key is write-only."""
+
+    provider: str
+    base_url: str | None = None
+    api_key: str
+
+
+class ProviderUpdateRequest(WireModel):
+    """Body of ``PATCH /api/providers/{id}``; omitted fields stay as they are."""
+
+    base_url: str | None = None
+    api_key: str | None = None
+    enabled: bool | None = None
+
+
+class ProviderTestResult(WireModel):
+    """Outcome of ``POST /api/providers/{id}/test``.
+
+    An unreachable provider is a recorded status, not an API error, so the
+    response is still 200 with ``status: "failed"``.
+    """
+
+    status: str
+    detail: str | None = None
+    checked_at: dt.datetime
+
+
+class CatalogModelRef(WireModel):
+    """One model in the workspace catalog."""
+
+    id: str
+    model_id: str
+    provider: str
+    display_name: str | None = None
+    source: str
+    credential_id: str | None = None
+
+
+class CatalogModelListResponse(WireModel):
+    """The workspace catalog plus the model ``auto`` resolves to."""
+
+    items: list[CatalogModelRef] = Field(default_factory=list)
+    default_model_id: str | None = None
+
+
+class CatalogModelCreateRequest(WireModel):
+    """Body of ``POST /api/catalog/models``; always creates a ``manual`` row."""
+
+    model_id: str
+    provider: str
+    display_name: str | None = None
+
+
+class ModelImportRequest(WireModel):
+    """Body of ``POST /api/catalog/models/import``."""
+
+    credential_id: str
+
+
+class ModelImportResponse(WireModel):
+    """``imported`` counts newly created rows; refreshed rows are not counted."""
+
+    imported: int
+    items: list[CatalogModelRef] = Field(default_factory=list)
+
+
+class RoleAssignmentRef(WireModel):
+    """One role's model choice; ``modelId: null`` means ``auto``."""
+
+    role: str
+    model_id: str | None = None
+
+
+class AssignmentResponse(WireModel):
+    """The workspace default plus one entry per assignable role."""
+
+    default_model_id: str | None = None
+    roles: list[RoleAssignmentRef] = Field(default_factory=list)
+
+
+class AssignmentUpdateRequest(WireModel):
+    """Body of ``PUT /api/catalog/assignments/{role}``; ``null`` means ``auto``."""
+
+    model_id: str | None = None
+
+
+# --- agent runs (harness V1) ------------------------------------------------
+
+
+class AgentRunNode(WireModel):
+    """One node of a session's run tree (spec v2 §7): main → PR → sub-agent."""
+
+    id: uuid.UUID
+    session_id: uuid.UUID
+    target_id: uuid.UUID | None = None
+    parent_run_id: uuid.UUID | None = None
+    level: str
+    role: str
+    model_id: str | None = None
+    objective: str
+    status: str
+    tokens: int
+    cost_usd: float
+    started_at: dt.datetime | None = None
+    ended_at: dt.datetime | None = None
+    error: str | None = None
+    children: list[AgentRunNode] = Field(default_factory=list)
+
+
+class AgentRunTreeResponse(WireModel):
+    """The roots of a session's run tree; normally just the session's main run."""
+
+    runs: list[AgentRunNode] = Field(default_factory=list)
+
+
+class AgentEventItem(WireModel):
+    """One persisted run event, as the replay endpoint and the SSE stream carry it."""
+
+    id: uuid.UUID
+    run_id: uuid.UUID
+    parent_run_id: uuid.UUID | None = None
+    seq: int
+    type: str
+    payload: dict[str, Any]
+    created_at: dt.datetime
+
+
+class AgentEventPage(WireModel):
+    """A page of a run's events; ``next_seq`` is the cursor for the next call."""
+
+    items: list[AgentEventItem] = Field(default_factory=list)
+    next_seq: int | None = None

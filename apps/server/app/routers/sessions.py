@@ -21,10 +21,17 @@ from app.deps import (
     CurrentUserDep,
     DbSessionDep,
     PreflightServiceDep,
+    RepoAccessCheckerDep,
     WorkspaceIdDep,
 )
 from app.errors import ApiError
-from app.routers._session_data import load_session, load_sessions, serialize_targets
+from app.routers._session_data import (
+    accessible_views,
+    load_session,
+    load_sessions,
+    require_session_access,
+    serialize_targets,
+)
 from app.routers._session_query import filter_sessions, sort_sessions
 from app.routers.session_create import create_session
 from app.schemas import (
@@ -50,6 +57,8 @@ router = APIRouter(prefix="/sessions", tags=["sessions"])
 async def list_sessions(
     db: DbSessionDep,
     workspace_id: WorkspaceIdDep,
+    viewer: CurrentUserDep,
+    checker: RepoAccessCheckerDep,
     q: Annotated[str | None, Query()] = None,
     repo: Annotated[str | None, Query()] = None,
     user: Annotated[str | None, Query()] = None,
@@ -71,9 +80,17 @@ async def list_sessions(
         sort=sort,
     )
     sessions = await load_sessions(db, workspace_id=workspace_id)
+
+    # The per-viewer access filter runs before the user's own filters: the page,
+    # its totals, and its counters must all describe the readable set (a page
+    # cannot claim 57 sessions while showing the three this viewer may read), and
+    # no filter may match content the viewer cannot see (spec 10.8 §Access).
+    views = await accessible_views(db, sessions, viewer=viewer, checker=checker)
+    readable = {session.id: views[session.id].targets for session in sessions}
     rows = filter_sessions(
-        sessions,
+        [session for session in sessions if readable[session.id]],
         params,
+        targets=readable,
         repo_ids=await _repo_ids(db, workspace_id, params.repo),
         user_ids=await _user_ids(db, workspace_id, params.user),
     )
@@ -87,7 +104,7 @@ async def list_sessions(
     items: list[ReviewSessionSchema] = []
     for session in page_sessions:
         triggered_by = await _triggered_by(db, session)
-        targets = await serialize_targets(db, session.targets)
+        targets = await serialize_targets(db, readable[session.id])
         items.append(serialize_session(session, triggered_by=triggered_by, targets=targets))
 
     return Paginated(
@@ -141,11 +158,22 @@ async def session_stats(
 
 @router.get("/{session_id}")
 async def get_session(
-    session_id: uuid.UUID, db: DbSessionDep, workspace_id: WorkspaceIdDep
+    session_id: uuid.UUID,
+    db: DbSessionDep,
+    workspace_id: WorkspaceIdDep,
+    viewer: CurrentUserDep,
+    checker: RepoAccessCheckerDep,
 ) -> ReviewSessionSchema:
-    """Return one session with targets and per-target aggregates."""
+    """Return one session with only the targets and findings the viewer may read.
+
+    Nothing left to show is 404 when the checks ran, and 403
+    ``repo_access_unverified`` when they could not run at all (spec 10.8 §Access).
+    """
     session = await _require_session(db, session_id, workspace_id)
-    return await _serialize(db, session)
+    view = await require_session_access(db, session, viewer=viewer, checker=checker)
+    triggered_by = await _triggered_by(db, session)
+    targets = await serialize_targets(db, view.targets)
+    return serialize_session(session, triggered_by=triggered_by, targets=targets)
 
 
 @router.patch("/{session_id}")

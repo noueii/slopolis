@@ -2,14 +2,13 @@
 
 Builds the app, mounts every router under ``/api``, wires CORS for the dev SPA,
 installs the standard error envelope, and — when the environment provides them —
-opens the GitHub client, OAuth client, and ARQ pool once for the process. All
-startup wiring is best-effort: a self-hosted server with no GitHub or Redis
-configured still boots and serves ``/healthz`` and ``/openapi.json``.
+opens the GitHub App surfaces, the OAuth client, and the ARQ pool once for the
+process. All startup wiring is best-effort: a self-hosted server with no GitHub
+or Redis configured still boots and serves ``/healthz`` and ``/openapi.json``.
 """
 
 from __future__ import annotations
 
-import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -25,16 +24,17 @@ from app.routers import (
     dashboard,
     events,
     github_install,
+    providers,
     repositories,
     reviews,
+    runs,
     sessions,
     usage,
+    webhooks,
     workspaces,
 )
 
 __all__ = ["app", "create_app"]
-
-_logger = logging.getLogger(__name__)
 
 _API_PREFIX = "/api"
 
@@ -55,51 +55,26 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
 
 async def _open_github(app: FastAPI, settings: AppSettings) -> None:
-    """Wire the App-JWT surface and the per-request GitHub client factory."""
+    """Wire the App-JWT surface and the per-installation client registry."""
     core = settings.core
     if not core.github_app_id or not core.github_app_private_key:
-        app.state.github_client_factory = None
+        app.state.github_clients = None
         app.state.app_installations = None
         return
 
+    from app.services.github_clients import InstallationClients
     from slopolis_core.github.app_installations import AppInstallations
-    from slopolis_core.github.auth import TokenCache
-    from slopolis_core.github.client import GitHubClient
 
     app_id = int(core.github_app_id)
     private_key = core.github_app_private_key
     # The App-JWT surface needs no network at construction, so the install flow
-    # works even when the installation-token client below cannot be built yet.
+    # works before any installation is recorded. Neither half resolves an
+    # installation here: the App may have none yet, a workspace may hold several,
+    # and gaining one must not need a restart — the registry mints a token for
+    # whichever installation a request reads through, and caches it until it
+    # nears expiry.
     app.state.app_installations = AppInstallations(app_id, private_key)
-    token_cache = TokenCache()
-    try:
-        client = await GitHubClient.from_app(app_id, private_key, cache=token_cache)
-    except Exception as exc:
-        # Never fail silently here: a missing client disables every GitHub read,
-        # and the reason (bad key, no installation) is exactly what an operator
-        # needs to see.
-        _logger.warning("GitHub client unavailable at startup: %s", exc)
-        app.state.github_client_factory = None
-        return
-
-    installation_id = client.installation_id
-
-    async def build_client() -> GitHubClient:
-        """Build one client per request over the shared installation token.
-
-        The read cache and tool budget are per-job memos, so a process-wide
-        client would answer a fresh listing out of another request's memo (and
-        spend the review budget across requests). Reusing the token cache keeps
-        the mint off the hot path until the token nears expiry.
-        """
-        return await GitHubClient.from_app(
-            app_id,
-            private_key,
-            installation_id=installation_id,
-            cache=token_cache,
-        )
-
-    app.state.github_client_factory = build_client
+    app.state.github_clients = InstallationClients(app_id, private_key)
 
 
 async def _open_arq(app: FastAPI, settings: AppSettings) -> None:
@@ -160,12 +135,15 @@ def _routers() -> list[APIRouter]:
         workspaces.router,
         github_install.router,
         catalog.router,
+        providers.router,
         repositories.router,
         dashboard.router,
         reviews.router,
         sessions.router,
         events.router,
+        runs.router,
         usage.router,
+        webhooks.router,
     ]
 
 

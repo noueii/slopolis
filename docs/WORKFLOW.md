@@ -58,10 +58,19 @@ docs/specification/  # versioned specs
 ## Running things
 - Web deps: `cd apps/web && bun install`
 - `make dev-mock` — web app + standalone mock API (default for UI work)
-- `make dev-api` — web app + real API (once `apps/server` exists)
-- `make dev-worker` — web app only, in-browser mock worker (no server needed)
+- `make dev-api` — web app + real API. **No worker**: a submitted session stays `queued` forever
+  until something consumes the queue.
+- `make dev-all` — the whole local stack: real API + **ARQ worker** + web app. Use this when a
+  submitted session has to actually run.
+- `make worker` — just the ARQ worker, in its own shell (`uv run arq worker.main.WorkerSettings`).
+  It needs Redis and the DB from `infra/docker-compose.yml`, and `apps/worker/.env`.
+- `make dev-browser-mock` — web app only, against the in-browser MSW mock; no API, no worker.
+  (Formerly `dev-worker`: that name collided with the ARQ worker, which it is not.)
 - `make dev` — web app only; `MOCK_MODE=server|worker|off`, `/api` proxied for server/off
 - `make mock` / `make api` — run just the mock / real API server
+- Reviewing a session **writes to GitHub**: the worker posts the rolling summary comment, the
+  inline comments, and a check run for each target (`worker/jobs/publish.py`). The hermetic
+  `make e2e` run exercises the same path with fakes and writes nothing.
 - Web tooling: the web app uses **Bun** as its package manager and dev/build runner (`bun install`, `bun run dev`, `bun run build`).
 - Web tests: use **Vitest**, run through Bun (e.g. `bunx vitest`). Do not use `bun test`.
 - Mock vs real: `MOCK_MODE=server` proxies `/api` to the mock API (`:8300`), `off` proxies to the real API (`:8400`), and `worker` serves mocks in-browser with no server. The web dev server runs on `:8000`.

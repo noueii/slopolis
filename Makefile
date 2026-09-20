@@ -51,7 +51,7 @@ mock: ## Run the standalone mock API server
 	cd apps/web && MOCK_PORT=$(MOCK_PORT) bun run mock
 
 .PHONY: api
-api: ## Run the real API server (apps/server — not implemented yet)
+api: ## Run the real API server (apps/server)
 	@if [ -f apps/server/pyproject.toml ]; then \
 		cd apps/server && uv run uvicorn app.main:app --reload --port 8400; \
 	else \
@@ -102,16 +102,23 @@ dev: ## Run the web dev server; MOCK_MODE=server|worker|off
 dev-mock: ## Run the standalone mock API + web dev server together
 	$(MAKE) API_TARGET=$(MOCK_API) MOCK_MODE=server -j2 mock dev
 
-.PHONY: dev-worker
-dev-worker: ## Run the web dev server with the in-browser mock worker (no server needed)
+.PHONY: dev-browser-mock
+dev-browser-mock: ## Run the web dev server against the in-browser MSW mock (no API, no worker)
 	$(MAKE) MOCK_MODE=worker dev
 
 .PHONY: dev-api
-dev-api: ## Run the real API + web dev server together
+dev-api: ## Run the real API + web dev server (no ARQ worker: queued sessions stay queued)
+	@echo "dev-api: the API and web app only — nothing consumes the queue."
+	@echo "         Use 'make dev-all' (or run 'make worker' in another shell) to run reviews."
 	$(MAKE) API_TARGET=$(REAL_API) MOCK_MODE=off -j2 api dev
 
-.PHONY: preview-worker
-preview-worker: ## Build + preview the web app with the in-browser mock worker (no server)
+.PHONY: dev-all
+dev-all: ## Run the whole local stack: API + ARQ worker + web dev server
+	@echo "dev-all: API :8400, worker on Redis, web :8000 — queued sessions run and publish."
+	$(MAKE) API_TARGET=$(REAL_API) MOCK_MODE=off -j3 api worker dev
+
+.PHONY: preview-browser-mock
+preview-browser-mock: ## Build + preview the web app against the in-browser MSW mock (no server)
 	cd apps/web && VITE_MOCK=worker bun run build && bun run preview
 
 ##@ Help

@@ -1,0 +1,16 @@
+# Project config — https://worktrunk.dev/hook
+#
+# Project hooks require approval on first run; approvals are stored in
+# ~/.config/worktrunk/approvals.toml.
+
+# Bootstrap a freshly created worktree: copy .env* from the primary checkout and
+# install apps/web dependencies. pre-start runs once, after the worktree
+# directory exists, and blocks until it finishes — so anything that follows in
+# the new worktree (post-start hooks, `wt switch -c <branch> -x <command>`, a
+# dev server you start by hand) sees an installed tree.
+#
+# Tracked in the repository on purpose: a worktree only finds this file if it is
+# in the worktree itself, and without it `wt switch` run from inside a worktree
+# silently skips the bootstrap (no `.env*`, no `bun install`).
+[pre-start]
+config = "make wt-config"

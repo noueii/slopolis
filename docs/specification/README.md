@@ -7,6 +7,8 @@ Versioned, feature-per-file specification for slopolis. Each version lives in it
 | Version | Status | Overview | Features |
 |---|---|---|---|
 | v1 | MVP approved; later phases scoped | [v1/overview.md](./v1/overview.md) | [01 account + GitHub App](./v1/features/01-account-github-app.md) · [02 provider & model config](./v1/features/02-provider-model-config.md) · [03 pre-flight](./v1/features/03-preflight-validation.md) · [04 session form](./v1/features/04-session-creation.md) · [05 queue + worker](./v1/features/05-queue-worker.md) · [06 review harness](./v1/features/06-review-harness.md) · [07 publish](./v1/features/07-publish-github.md) · [08 history + live status](./v1/features/08-session-history.md) · [09 usage + cost](./v1/features/09-usage.md) |
+| v2 | DRAFT for review — the agent harness, in two versions | [v2/overview.md](./v2/overview.md) | [11.1 supervisor + sub-agents](./v2/features/01-supervisor-subagents.md) · [11.2 Magentic orchestration (parked)](./v2/features/02-magentic-orchestration.md) |
+| v3 | DRAFT for review — repository documentation agent; sequenced after Phase 2 webhooks | [v3/overview.md](./v3/overview.md) | [12.1 docs state, coverage + drift](./v3/features/01-repo-docs-state.md) · [12.2 docs agent run + publish](./v3/features/02-docs-agent-runs.md) |
 
 ## v1 features
 

@@ -117,7 +117,13 @@ CurrentUserDep = Annotated[User, Depends(get_current_user)]
 
 
 async def get_workspace_id(user: CurrentUserDep) -> uuid.UUID:
-    """Return the workspace id this user belongs to."""
+    """Return the workspace id this user belongs to, or 409 when they have none.
+
+    Every workspace-scoped route depends on this, so a signed-in user who has not
+    created or joined a workspace gets one actionable error instead of empty data.
+    """
+    if user.workspace_id is None:
+        raise ApiError(409, "no_workspace", "Create or join a workspace to continue.")
     return user.workspace_id
 
 

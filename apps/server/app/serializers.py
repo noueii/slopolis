@@ -15,6 +15,7 @@ from app.schemas import (
     DashboardSession,
     RepositoryRef,
     UserRef,
+    WorkspaceRef,
 )
 from app.schemas import (
     ReviewSession as ReviewSessionSchema,
@@ -23,7 +24,7 @@ from app.schemas import (
     SessionTarget as SessionTargetSchema,
 )
 from slopolis_core.domain import SessionStatus, TargetStatus
-from slopolis_db.models import Repository, ReviewSession, SessionTarget, User
+from slopolis_db.models import Repository, ReviewSession, SessionTarget, User, Workspace
 
 __all__ = [
     "build_name",
@@ -33,7 +34,15 @@ __all__ = [
     "serialize_session",
     "serialize_target",
     "user_ref",
+    "workspace_ref",
 ]
+
+
+def workspace_ref(workspace: Workspace | None) -> WorkspaceRef | None:
+    """Map a workspace row onto the wire reference (``None`` stays ``None``)."""
+    if workspace is None:
+        return None
+    return WorkspaceRef(id=str(workspace.id), name=workspace.name, slug=workspace.slug)
 
 
 def user_ref(user: User) -> UserRef:

@@ -28,6 +28,7 @@ from app.routers import (
     reviews,
     sessions,
     usage,
+    workspaces,
 )
 
 __all__ = ["app", "create_app"]
@@ -126,6 +127,7 @@ def _routers() -> list[APIRouter]:
     return [
         auth_router,
         me_router,
+        workspaces.router,
         catalog.router,
         repositories.router,
         dashboard.router,

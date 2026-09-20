@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from slopolis_db.models import ModelAssignment, ModelCatalog, ProviderCredential
 
-__all__ = ["WorkspaceConfigAdapter", "resolve_default_workspace_id"]
+__all__ = ["WorkspaceConfigAdapter"]
 
 _REVIEW_ROLE = "review"
 
@@ -90,14 +90,3 @@ class WorkspaceConfigAdapter:
         if catalog is None:
             return None
         return catalog.model_id, catalog.provider
-
-
-async def resolve_default_workspace_id(db: AsyncSession) -> uuid.UUID | None:
-    """Return the first workspace id, or ``None`` when the DB is empty.
-
-    v1 is self-hosted and single-tenant, so the earliest workspace is the
-    default tenant every request operates against.
-    """
-    from slopolis_db.models import Workspace
-
-    return await db.scalar(select(Workspace.id).order_by(Workspace.created_at).limit(1))

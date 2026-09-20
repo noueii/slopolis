@@ -71,6 +71,26 @@ class RepositoryRef(WireModel):
     default_branch: str | None = None
 
 
+class WorkspaceRef(WireModel):
+    """A workspace a user can act in."""
+
+    id: str
+    name: str
+    slug: str
+
+
+class WorkspaceListResponse(WireModel):
+    """The workspaces the caller belongs to (v1: at most one)."""
+
+    items: list[WorkspaceRef] = Field(default_factory=list)
+
+
+class CreateWorkspaceRequest(WireModel):
+    """Body of ``POST /api/workspaces``."""
+
+    name: str
+
+
 class UserRef(WireModel):
     """A GitHub user referenced by a session."""
 
@@ -79,6 +99,17 @@ class UserRef(WireModel):
     name: str
     avatar_url: str | None = None
     is_admin: bool = False
+
+
+class MeResponse(UserRef):
+    """Identity for the signed-in caller (``GET /api/me``).
+
+    ``workspace`` is ``None`` until the account creates or joins one — the signal
+    the onboarding gate keys off. It lives here rather than on :class:`UserRef`
+    so session and PR author references do not pretend to carry a workspace.
+    """
+
+    workspace: WorkspaceRef | None = None
 
 
 # --- sessions ---------------------------------------------------------------

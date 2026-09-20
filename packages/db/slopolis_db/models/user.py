@@ -1,4 +1,4 @@
-"""User model — an authenticated GitHub user belonging to a workspace."""
+"""User model — an authenticated GitHub user, optionally belonging to a workspace."""
 
 from __future__ import annotations
 
@@ -15,13 +15,18 @@ if TYPE_CHECKING:
 
 
 class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """A workspace member identified by their GitHub account."""
+    """A GitHub account that signed in; a workspace member once one is joined.
+
+    ``workspace_id`` is nullable on purpose: sign-in creates the account, and the
+    user then either creates a workspace (becoming its admin) or waits for an
+    invitation (spec 10.1, onboarding).
+    """
 
     __tablename__ = "users"
 
-    workspace_id: Mapped[uuid.UUID] = mapped_column(
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("workspaces.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
     github_id: Mapped[int] = mapped_column(BigInteger, nullable=False, unique=True)
@@ -30,4 +35,4 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     avatar_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
-    workspace: Mapped[Workspace] = relationship(back_populates="users")
+    workspace: Mapped[Workspace | None] = relationship(back_populates="users")

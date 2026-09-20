@@ -203,6 +203,32 @@ async def seeded(
         )
 
 
+async def seed_solo_user(
+    session: AsyncSession, *, github_id: int = 2002, handle: str = "newcomer"
+) -> User:
+    """Create an authenticated user who belongs to no workspace yet."""
+    user = User(
+        workspace_id=None,
+        github_id=github_id,
+        handle=handle,
+        name="New Comer",
+        avatar_url=None,
+        is_admin=False,
+    )
+    session.add(user)
+    await session.commit()
+    return user
+
+
+@pytest_asyncio.fixture
+async def solo_user_id(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> uuid.UUID:
+    """Id of a signed-in user with no workspace (the onboarding case)."""
+    async with session_factory() as session:
+        return (await seed_solo_user(session)).id
+
+
 async def seed_workspace(session: AsyncSession) -> tuple[Workspace, User, Repository]:
     """Create a workspace, a user, and one connected repository."""
     workspace = Workspace(name="Acme", slug="acme")

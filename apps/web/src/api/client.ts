@@ -10,9 +10,11 @@
 import type {
   ApiErrorBody,
   CreateReviewRequest,
+  CreateWorkspaceRequest,
   CreatedSession,
   DashboardData,
   DashboardParams,
+  MeResponse,
   ModelCatalog,
   Paginated,
   PreflightRequest,
@@ -27,7 +29,8 @@ import type {
   SessionFilterOptions,
   SessionListParams,
   SessionStats,
-  UserRef,
+  WorkspaceListResponse,
+  WorkspaceRef,
 } from "./contract"
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "/api"
@@ -127,8 +130,20 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  getMe(): Promise<UserRef> {
-    return request<UserRef>("/me")
+  getMe(): Promise<MeResponse> {
+    return request<MeResponse>("/me")
+  },
+
+  listWorkspaces(): Promise<WorkspaceListResponse> {
+    return request<WorkspaceListResponse>("/workspaces")
+  },
+
+  createWorkspace(name: string): Promise<WorkspaceRef> {
+    const body: CreateWorkspaceRequest = { name }
+    return request<WorkspaceRef>("/workspaces", {
+      method: "POST",
+      body: JSON.stringify(body),
+    })
   },
 
   listSessions(params: SessionListParams = {}): Promise<Paginated<ReviewSession>> {

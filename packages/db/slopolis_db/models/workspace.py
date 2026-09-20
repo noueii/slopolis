@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 
 class Workspace(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """A single tenant; v1 self-hosting creates exactly one default workspace."""
+    """A single tenant: v1 self-hosting serves one workspace per deployment."""
 
     __tablename__ = "workspaces"
 

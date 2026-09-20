@@ -28,7 +28,8 @@ from app.deps import (
     encode_user_id,
 )
 from app.errors import ApiError
-from app.schemas import UserRef
+from app.schemas import MeResponse
+from app.serializers import workspace_ref
 from slopolis_db.models import User, Workspace
 
 __all__ = ["GitHubOAuthClient", "me_router", "router"]
@@ -187,13 +188,23 @@ async def logout(settings: AppSettingsDep) -> JSONResponse:
 
 
 @me_router.get("/me")
-async def me(user: CurrentUserDep) -> UserRef:
-    """Return the currently authenticated user."""
-    return _to_user_ref(user)
+async def me(user: CurrentUserDep, db: DbSessionDep) -> MeResponse:
+    """Return the authenticated user plus the workspace they act in, if any.
+
+    The workspace is read here rather than through a lazy relationship: the wire
+    mapper stays a pure function, and a workspace-less account simply gets
+    ``workspace: null`` — the signal the onboarding gate keys off.
+    """
+    workspace = await db.get(Workspace, user.workspace_id) if user.workspace_id else None
+    return _to_user_ref(user, workspace)
 
 
 async def _upsert_user(db: AsyncSession, profile: GitHubProfile) -> User:
-    """Find or create the user, attaching a default workspace on first login."""
+    """Find or create the user; a new account starts with no workspace.
+
+    Signing in is not the same as belonging somewhere: the account is created
+    here, and ``POST /api/workspaces`` (or an invitation) decides the tenant.
+    """
     existing = await db.scalar(select(User).where(User.github_id == profile.id))
     if existing is not None:
         existing.handle = profile.login
@@ -201,31 +212,26 @@ async def _upsert_user(db: AsyncSession, profile: GitHubProfile) -> User:
         existing.avatar_url = profile.avatar_url
         return existing
 
-    workspace = await db.scalar(select(Workspace).order_by(Workspace.created_at).limit(1))
-    if workspace is None:
-        workspace = Workspace(name="Default Workspace", slug="default")
-        db.add(workspace)
-        await db.flush()
-
     user = User(
-        workspace_id=workspace.id,
+        workspace_id=None,
         github_id=profile.id,
         handle=profile.login,
         name=profile.name,
         avatar_url=profile.avatar_url,
-        is_admin=True,
+        is_admin=False,
     )
     db.add(user)
     await db.flush()
     return user
 
 
-def _to_user_ref(user: User) -> UserRef:
-    """Map an ORM user onto the wire reference."""
-    return UserRef(
+def _to_user_ref(user: User, workspace: Workspace | None = None) -> MeResponse:
+    """Map an ORM user (and its workspace) onto the identity response."""
+    return MeResponse(
         id=str(user.id),
         handle=user.handle,
         name=user.name,
         avatar_url=user.avatar_url,
         is_admin=user.is_admin,
+        workspace=workspace_ref(workspace),
     )

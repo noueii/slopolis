@@ -1,29 +1,25 @@
-import { Check, ChevronDown, GitPullRequest, Plus } from "lucide-react"
+import { GitPullRequest } from "lucide-react"
 
 import { cn } from "@/lib/utils"
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+import type { WorkspaceRef } from "@/api/contract"
 import { NAV_GROUPS, visibleNavItems, type NavId } from "./nav"
 
 export interface SidebarProps {
   active: NavId
   onNavigate: (id: NavId) => void
   isAdmin: boolean
+  /** The account's workspace; `null` while it has none. */
+  workspace: WorkspaceRef | null
   className?: string
 }
 
-const WORKSPACES = [
-  { id: "acme-labs", name: "acme-labs", hint: "self-hosted" },
-  { id: "orbit-labs", name: "orbit-labs", hint: "connected" },
-]
-
-export function Sidebar({ active, onNavigate, isAdmin, className }: SidebarProps) {
+export function Sidebar({
+  active,
+  onNavigate,
+  isAdmin,
+  workspace,
+  className,
+}: SidebarProps) {
   const items = visibleNavItems(isAdmin)
 
   return (
@@ -38,53 +34,21 @@ export function Sidebar({ active, onNavigate, isAdmin, className }: SidebarProps
           </span>
         </div>
 
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button
-              type="button"
-              className="flex h-10 w-full items-center gap-2.5 rounded-md border border-sidebar-border bg-background/70 px-2.5 text-left transition-colors hover:bg-background"
-            >
-              <span className="grid size-6 shrink-0 place-items-center rounded bg-accent/15 font-mono text-2xs font-semibold uppercase text-accent">
-                ac
+        {workspace ? (
+          <div className="flex h-10 w-full items-center gap-2.5 rounded-md border border-sidebar-border bg-background/70 px-2.5">
+            <span className="grid size-6 shrink-0 place-items-center rounded bg-accent/15 font-mono text-2xs font-semibold uppercase text-accent">
+              {workspace.name.slice(0, 2)}
+            </span>
+            <span className="flex min-w-0 flex-col">
+              <span className="truncate text-[13px] font-medium text-sidebar-foreground">
+                {workspace.name}
               </span>
-              <span className="flex min-w-0 flex-col">
-                <span className="truncate text-[13px] font-medium text-sidebar-foreground">
-                  acme-labs
-                </span>
-                <span className="truncate font-mono text-[10px] uppercase tracking-wider text-sidebar-muted">
-                  self-hosted
-                </span>
+              <span className="truncate font-mono text-[10px] uppercase tracking-wider text-sidebar-muted">
+                {workspace.slug}
               </span>
-              <ChevronDown className="ml-auto size-3.5 shrink-0 text-sidebar-muted" />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="w-[224px]">
-            <DropdownMenuLabel className="text-2xs uppercase tracking-widest text-muted-foreground">
-              Workspaces
-            </DropdownMenuLabel>
-            {WORKSPACES.map((workspace) => (
-              <DropdownMenuItem key={workspace.id} className="gap-2">
-                <span className="grid size-5 place-items-center rounded bg-muted font-mono text-[9px] font-semibold uppercase text-muted-foreground">
-                  {workspace.name.slice(0, 2)}
-                </span>
-                <span className="flex flex-col">
-                  <span className="text-[13px] font-medium">{workspace.name}</span>
-                  <span className="text-2xs text-muted-foreground">
-                    {workspace.hint}
-                  </span>
-                </span>
-                {workspace.id === "acme-labs" ? (
-                  <Check className="ml-auto size-3.5 text-accent" />
-                ) : null}
-              </DropdownMenuItem>
-            ))}
-            <DropdownMenuSeparator />
-            <DropdownMenuItem className="gap-2 text-muted-foreground">
-              <Plus className="size-3.5" />
-              <span className="text-[13px]">Connect a workspace</span>
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+            </span>
+          </div>
+        ) : null}
       </div>
 
       <nav className="flex flex-1 flex-col gap-5 overflow-y-auto scrollbar-thin px-2 pb-4">

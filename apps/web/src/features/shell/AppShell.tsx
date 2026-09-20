@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react"
 
 import type { MockScenario } from "@/api/client"
-import type { UserRef } from "@/api/contract"
+import type { UserRef, WorkspaceRef } from "@/api/contract"
 import {
   Sheet,
   SheetContent,
@@ -16,6 +16,8 @@ export interface AppShellProps {
   active: NavId
   isAdmin: boolean
   user: UserRef | null
+  /** The workspace the account belongs to, shown as the sidebar identity. */
+  workspace: WorkspaceRef | null
   onNavigate: (id: NavId) => void
   onNewReview: () => void
   scenario: MockScenario
@@ -27,6 +29,7 @@ export function AppShell({
   active,
   isAdmin,
   user,
+  workspace,
   onNavigate,
   onNewReview,
   scenario,
@@ -44,7 +47,12 @@ export function AppShell({
     <TooltipProvider delayDuration={200}>
       <div className="relative grid h-screen grid-cols-1 overflow-hidden bg-background lg:grid-cols-[248px_1fr]">
         <aside className="hidden border-r border-sidebar-border lg:block">
-          <Sidebar active={active} onNavigate={handleNavigate} isAdmin={isAdmin} />
+          <Sidebar
+            active={active}
+            onNavigate={handleNavigate}
+            isAdmin={isAdmin}
+            workspace={workspace}
+          />
         </aside>
 
         <Sheet open={navOpen} onOpenChange={setNavOpen}>
@@ -53,7 +61,12 @@ export function AppShell({
             className="w-[264px] border-sidebar-border bg-sidebar p-0 sm:max-w-[264px]"
           >
             <SheetTitle className="sr-only">Navigation</SheetTitle>
-            <Sidebar active={active} onNavigate={handleNavigate} isAdmin={isAdmin} />
+            <Sidebar
+              active={active}
+              onNavigate={handleNavigate}
+              isAdmin={isAdmin}
+              workspace={workspace}
+            />
           </SheetContent>
         </Sheet>
 

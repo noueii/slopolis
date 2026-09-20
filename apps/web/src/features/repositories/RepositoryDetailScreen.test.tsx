@@ -32,6 +32,7 @@ const repository: RepositorySummary = {
   defaultBranch: "main",
   openPrCount: 3,
   lastActivityAt: "2026-01-01T00:00:00.000Z",
+  requiredAccess: "default",
   connected: true,
   enabled: true,
 }
@@ -176,6 +177,57 @@ describe("RepositoryDetailScreen", () => {
     await waitFor(() =>
       expect(api.updateRepository).toHaveBeenCalledWith("repo_1", {
         enabled: true,
+      }),
+    )
+  })
+
+  it("shows the repository's review access rule and saves a change to it", async () => {
+    vi.mocked(api.listRepositories).mockResolvedValue({
+      items: [{ ...repository, requiredAccess: "read" }],
+    })
+    vi.mocked(api.listSessions).mockResolvedValue({
+      items: [],
+      page: 1,
+      pageSize: 50,
+      total: 0,
+      totalPages: 0,
+    })
+    vi.mocked(api.updateRepository).mockResolvedValue({
+      ...repository,
+      requiredAccess: "write",
+    })
+
+    render(
+      <RepositoryDetailScreen
+        fullName="acme/api-gateway"
+        onBack={vi.fn()}
+        onOpenSession={vi.fn()}
+      />,
+    )
+
+    // The stored rule is the one selected, and the refusal it produces is named
+    const read = await screen.findByRole("radio", { name: /^Read / })
+    expect((read as HTMLInputElement).checked).toBe(true)
+    expect(
+      screen.getByText(/^read access is required on acme\/api-gateway$/, {
+        selector: "code",
+      }),
+    ).toBeDefined()
+
+    // Choosing the tightening rule previews the refusal it would produce
+    fireEvent.click(screen.getByRole("radio", { name: /^Write / }))
+    expect(
+      screen.getByText(/^write access is required on acme\/api-gateway$/, {
+        selector: "code",
+      }),
+    ).toBeDefined()
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    // Only the rule travels: the parked state is not resent by this control
+    await waitFor(() =>
+      expect(api.updateRepository).toHaveBeenCalledWith("repo_1", {
+        requiredAccess: "write",
       }),
     )
   })

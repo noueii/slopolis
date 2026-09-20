@@ -35,6 +35,7 @@ import type {
   RepositoryListResponse,
   RepositoryPullRequestsResponse,
   RepositorySummary,
+  RepositoryUpdate,
   ReviewPresetCatalog,
   ReviewSession,
   ReviewTemplate,
@@ -47,6 +48,8 @@ import type {
   UsageResponse,
   WorkspaceListResponse,
   WorkspaceRef,
+  WorkspaceSettings,
+  WorkspaceSettingsUpdate,
 } from "./contract"
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "/api"
@@ -237,6 +240,21 @@ export const api = {
     })
   },
 
+  /** The workspace's caps and queue limits (spec 10.10); admin-only. */
+  getWorkspaceSettings(): Promise<WorkspaceSettings> {
+    return request<WorkspaceSettings>("/workspaces/settings")
+  },
+
+  /** Patch the workspace's caps; omitted fields keep their current value. */
+  updateWorkspaceSettings(
+    patch: WorkspaceSettingsUpdate,
+  ): Promise<WorkspaceSettings> {
+    return request<WorkspaceSettings>("/workspaces/settings", {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    })
+  },
+
   listSessions(params: SessionListParams = {}): Promise<Paginated<ReviewSession>> {
     const query = buildQuery({
       q: params.q?.trim() || undefined,
@@ -268,12 +286,13 @@ export const api = {
   },
 
   /**
-   * Park or re-enable a repository (spec 10.1). A parked repository keeps its
-   * sessions and findings and is refused at pre-flight.
+   * Update a repository's workspace switches (spec 10.1 / 10.10): park or
+   * re-enable it, set its access policy override, or both at once. A parked
+   * repository keeps its sessions and findings and is refused at pre-flight.
    */
   updateRepository(
     repositoryId: string,
-    body: { enabled: boolean },
+    body: RepositoryUpdate,
   ): Promise<RepositorySummary> {
     return request<RepositorySummary>(
       `/repositories/${encodeURIComponent(repositoryId)}`,

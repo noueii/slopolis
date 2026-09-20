@@ -22,6 +22,7 @@ import { RepositoriesScreen } from "@/features/repositories/RepositoriesScreen"
 import { RepositoryDetailScreen } from "@/features/repositories/RepositoryDetailScreen"
 import { SessionDetail } from "@/features/sessions/SessionDetail"
 import { SessionsScreen } from "@/features/sessions/SessionsScreen"
+import { SettingsScreen } from "@/features/settings/SettingsScreen"
 import { TemplatesScreen } from "@/features/templates/TemplatesScreen"
 import { UsageScreen } from "@/features/usage/UsageScreen"
 
@@ -108,9 +109,18 @@ export default function App() {
     content = <UsageScreen onNewReview={handleNewReview} />
   } else if (route.id === "providers") {
     content = <ProvidersScreen />
+  } else if (route.id === "settings") {
+    content = (
+      <SettingsScreen
+        onOpenRepositories={() => navigate({ kind: "nav", id: "repositories" })}
+      />
+    )
   } else if (route.id === "templates") {
     content = <TemplatesScreen />
   } else {
+    // Every current destination has a screen; this stays so that a nav entry
+    // added ahead of its screen announces itself instead of rendering the wrong
+    // page.
     content = <ComingSoonScreen item={navItemById(route.id)} />
   }
 

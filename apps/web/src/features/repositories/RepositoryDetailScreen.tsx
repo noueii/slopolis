@@ -2,7 +2,7 @@ import { useMemo, useState } from "react"
 import { ArrowLeft, Globe, Inbox, Info, Lock, RefreshCw } from "lucide-react"
 
 import { cn } from "@/lib/utils"
-import type { SessionSort } from "@/api/contract"
+import type { RequiredAccess, SessionSort } from "@/api/contract"
 import { Button } from "@/components/ui/button"
 import { useRepositories } from "@/features/dashboard/lib/useDashboard"
 import { SessionsError } from "@/features/sessions/SessionsError"
@@ -12,6 +12,7 @@ import { SessionsTableCard } from "@/features/sessions/components/SessionsTableC
 import { useSessions } from "@/features/sessions/lib/useSessions"
 import { AccessBadge, ConnectionBadge } from "./RepositoriesScreen"
 import { RepositoryAccessDialog } from "./components/RepositoryAccessDialog"
+import { ReviewAccessCard } from "./components/ReviewAccessCard"
 import { useRepositoryAccess } from "./lib/useRepositoryAccess"
 
 export interface RepositoryDetailScreenProps {
@@ -45,7 +46,7 @@ export function RepositoryDetailScreen({
   async function toggle() {
     if (repository === null) return
     if (!repository.enabled) {
-      const updated = await access.run(repository, true)
+      const updated = await access.run(repository, { enabled: true })
       if (updated !== null) refetchRepositories()
       return
     }
@@ -54,10 +55,16 @@ export function RepositoryDetailScreen({
 
   async function confirmDisable() {
     if (repository === null) return
-    const updated = await access.run(repository, false)
+    const updated = await access.run(repository, { enabled: false })
     if (updated === null) return
     setConfirming(false)
     refetchRepositories()
+  }
+
+  async function saveReviewAccess(requiredAccess: RequiredAccess) {
+    if (repository === null) return
+    const updated = await access.run(repository, { requiredAccess })
+    if (updated !== null) refetchRepositories()
   }
 
   const sessions = data?.items ?? []
@@ -138,6 +145,14 @@ export function RepositoryDetailScreen({
             again.
           </p>
         </div>
+      ) : null}
+
+      {repository !== null ? (
+        <ReviewAccessCard
+          repository={repository}
+          pending={access.pending}
+          onSave={(requiredAccess) => void saveReviewAccess(requiredAccess)}
+        />
       ) : null}
 
       {access.error !== null && !confirming ? (

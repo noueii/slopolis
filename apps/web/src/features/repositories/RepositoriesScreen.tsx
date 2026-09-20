@@ -11,12 +11,13 @@ import {
 
 import { cn } from "@/lib/utils"
 import { githubAppInstallUrl } from "@/api/client"
-import type { RepositorySummary } from "@/api/contract"
+import type { RepositorySummary, RequiredAccess } from "@/api/contract"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { useRepositories } from "@/features/dashboard/lib/useDashboard"
 import { formatRelativeTime } from "@/features/sessions/lib/format"
 import { RepositoryAccessDialog } from "./components/RepositoryAccessDialog"
+import { REQUIRED_ACCESS_BY_VALUE } from "./lib/reviewAccess"
 import { useRepositoryAccess } from "./lib/useRepositoryAccess"
 
 export interface RepositoriesScreenProps {
@@ -34,7 +35,7 @@ export function RepositoriesScreen({ onOpenRepository }: RepositoriesScreenProps
   /** Enabling needs no confirmation; it reopens something the workspace chose. */
   async function toggle(repository: RepositorySummary) {
     if (!repository.enabled) {
-      const updated = await access.run(repository, true)
+      const updated = await access.run(repository, { enabled: true })
       if (updated !== null) refetch()
       return
     }
@@ -43,7 +44,7 @@ export function RepositoriesScreen({ onOpenRepository }: RepositoriesScreenProps
 
   async function confirmDisable() {
     if (confirming === null) return
-    const updated = await access.run(confirming, false)
+    const updated = await access.run(confirming, { enabled: false })
     if (updated === null) return
     setConfirming(null)
     refetch()
@@ -219,6 +220,7 @@ function RepositoryCard({ repository, onOpen, onToggle }: RepositoryCardProps) {
         <span className="flex items-center gap-1.5">
           <ConnectionBadge connected={repository.connected} />
           {repository.enabled ? null : <AccessBadge />}
+          <AccessPolicyBadge requiredAccess={repository.requiredAccess} />
         </span>
         <Button
           type="button"
@@ -242,6 +244,28 @@ export function AccessBadge() {
   return (
     <span className="rounded-full border border-warning/30 bg-warning/10 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-warning">
       Disabled
+    </span>
+  )
+}
+
+/**
+ * The repository's own triggering rule (spec 10.10), shown only when it departs
+ * from the spec rule: `default` is the norm, so badging it would be noise. The
+ * tooltip carries the meaning the two-word badge cannot.
+ */
+export function AccessPolicyBadge({
+  requiredAccess,
+}: {
+  requiredAccess: RequiredAccess
+}) {
+  if (requiredAccess === "default") return null
+  const option = REQUIRED_ACCESS_BY_VALUE[requiredAccess]
+  return (
+    <span
+      title={option.effect}
+      className="rounded-full border border-info/30 bg-info/10 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-info"
+    >
+      {option.label} access
     </span>
   )
 }

@@ -67,6 +67,28 @@ export interface CreateWorkspaceRequest {
   name: string
 }
 
+/**
+ * Workspace caps and queue limits (spec 10.10). Every field is `null` when
+ * unset, which means "unlimited": a cap is opt-in, so an existing deployment
+ * behaves exactly as it did. A set value is an integer >= 1.
+ */
+export interface WorkspaceSettings {
+  /** Sessions in `queued`/`running` for the workspace. */
+  maxConcurrentSessions: number | null
+  /** Sessions the caller created since 00:00 UTC. */
+  maxSessionsPerUserPerDay: number | null
+  /** Targets of one repository running at the same time. */
+  maxTargetsPerRepo: number | null
+  /** Targets of one installation running at the same time. */
+  maxTargetsPerInstallation: number | null
+}
+
+/**
+ * `PATCH /api/workspaces/settings` body. Omitted fields stay as they are; a
+ * `null` clears a cap back to unlimited.
+ */
+export type WorkspaceSettingsUpdate = Partial<WorkspaceSettings>
+
 /** One pull request within a session. */
 export interface SessionTarget {
   id: string
@@ -162,6 +184,14 @@ export interface SessionStats {
   costUsd: number
 }
 
+/**
+ * Per-repository override of the triggering access rule (spec 10.10):
+ * `default` = the spec rule (private repos need read, public repos need write);
+ * `read` = loosened (any read access is enough); `write` = tightened (write
+ * access is required).
+ */
+export type RequiredAccess = "default" | "read" | "write"
+
 /** A repository connected through the GitHub App installation (spec 10.1). */
 export interface RepositorySummary {
   id: string
@@ -179,10 +209,21 @@ export interface RepositorySummary {
    * with its history, but pre-flight refuses its pull requests.
    */
   enabled: boolean
+  /** Access policy pre-flight applies to this repository (spec 10.10). */
+  requiredAccess: RequiredAccess
 }
 
 export interface RepositoryListResponse {
   items: RepositorySummary[]
+}
+
+/**
+ * `PATCH /api/repositories/{id}` body. Omitted fields stay as they are; the
+ * two switches are audited independently of one another (spec 10.1 / 10.10).
+ */
+export interface RepositoryUpdate {
+  enabled?: boolean
+  requiredAccess?: RequiredAccess
 }
 
 /** Rolled-up CI status for an open pull request. */

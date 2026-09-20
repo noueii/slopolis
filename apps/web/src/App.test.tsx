@@ -8,7 +8,12 @@ import {
 } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { api, ApiError } from "@/api/client"
+import {
+  api,
+  ApiError,
+  beginSignIn,
+  signInAttempted,
+} from "@/api/client"
 import type { DashboardData, MeResponse, WorkspaceRef } from "@/api/contract"
 import App from "./App"
 
@@ -47,6 +52,9 @@ vi.mock("@/api/client", () => ({
   isMockModeEnabled: () => false,
   getMockScenario: () => "default",
   setMockScenario: vi.fn(),
+  beginSignIn: vi.fn(),
+  signInAttempted: vi.fn(),
+  clearSignInAttempt: vi.fn(),
 }))
 
 const workspace: WorkspaceRef = {
@@ -79,6 +87,8 @@ const emptyDashboard: DashboardData = {
 }
 
 beforeEach(() => {
+  vi.mocked(signInAttempted).mockReturnValue(false)
+  vi.mocked(beginSignIn).mockResolvedValue({ started: true })
   vi.mocked(api.getMe).mockResolvedValue(adminUser)
   vi.mocked(api.getDashboard).mockResolvedValue(emptyDashboard)
   vi.mocked(api.listRepositories).mockResolvedValue({ items: [] })
@@ -119,15 +129,6 @@ describe("App navigation and focus intent", () => {
     expect(sidebar.getByText("Review templates")).toBeDefined()
   })
 
-  it("falls back to a guest menu when /api/me fails", async () => {
-    vi.mocked(api.getMe).mockRejectedValue(new Error("unauthorized"))
-    render(<App />)
-    await screen.findByLabelText("Review focus")
-
-    expect(within(screen.getByRole("complementary")).queryByText("Review templates")).toBeNull()
-    expect(screen.getByRole("button", { name: "Account menu" })).toBeDefined()
-  })
-
   it("focuses the dashboard composer when New review is triggered", async () => {
     render(<App />)
     const composer = await screen.findByLabelText("Review focus")
@@ -141,6 +142,45 @@ describe("App navigation and focus intent", () => {
       },
       { timeout: 2000 },
     )
+  })
+})
+
+describe("Sign-in gate", () => {
+  beforeEach(() => {
+    vi.mocked(api.getMe).mockRejectedValue(
+      new ApiError(401, "unauthorized", "Sign in with GitHub to continue."),
+    )
+  })
+
+  it("sends an account-less visitor to GitHub sign-in", async () => {
+    render(<App />)
+
+    await waitFor(() => expect(beginSignIn).toHaveBeenCalledTimes(1))
+    expect(screen.queryByRole("complementary")).toBeNull()
+    expect(screen.queryByLabelText("Review focus")).toBeNull()
+  })
+
+  it("leaves a tab that already came back unsigned on the gate", async () => {
+    vi.mocked(signInAttempted).mockReturnValue(true)
+    render(<App />)
+
+    expect(await screen.findByText(/did not sign this browser in/i)).toBeDefined()
+    expect(beginSignIn).not.toHaveBeenCalled()
+  })
+
+  it("reports why the flow could not start, and retries on demand", async () => {
+    vi.mocked(beginSignIn).mockResolvedValue({
+      started: false,
+      message: "GitHub OAuth credentials are not configured.",
+    })
+    render(<App />)
+
+    expect(
+      await screen.findByText("GitHub OAuth credentials are not configured."),
+    ).toBeDefined()
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }))
+    await waitFor(() => expect(beginSignIn).toHaveBeenCalledTimes(2))
   })
 })
 

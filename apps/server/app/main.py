@@ -16,7 +16,6 @@ from contextlib import asynccontextmanager
 from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.adapters.github import GitHubGatewayAdapter
 from app.auth import GitHubOAuthClient, me_router
 from app.auth import router as auth_router
 from app.config import AppSettings, get_app_settings
@@ -56,36 +55,51 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
 
 async def _open_github(app: FastAPI, settings: AppSettings) -> None:
-    """Create the GitHub client + pre-flight gateway when the App is configured."""
+    """Wire the App-JWT surface and the per-request GitHub client factory."""
     core = settings.core
     if not core.github_app_id or not core.github_app_private_key:
-        app.state.github_client = None
-        app.state.github_gateway = None
+        app.state.github_client_factory = None
         app.state.app_installations = None
         return
 
     from slopolis_core.github.app_installations import AppInstallations
+    from slopolis_core.github.auth import TokenCache
     from slopolis_core.github.client import GitHubClient
 
+    app_id = int(core.github_app_id)
+    private_key = core.github_app_private_key
     # The App-JWT surface needs no network at construction, so the install flow
     # works even when the installation-token client below cannot be built yet.
-    app.state.app_installations = AppInstallations(
-        int(core.github_app_id), core.github_app_private_key
-    )
+    app.state.app_installations = AppInstallations(app_id, private_key)
+    token_cache = TokenCache()
     try:
-        client = await GitHubClient.from_app(
-            int(core.github_app_id), core.github_app_private_key
-        )
+        client = await GitHubClient.from_app(app_id, private_key, cache=token_cache)
     except Exception as exc:
-        # Never fail silently here: a missing client disables every GitHub route,
+        # Never fail silently here: a missing client disables every GitHub read,
         # and the reason (bad key, no installation) is exactly what an operator
         # needs to see.
         _logger.warning("GitHub client unavailable at startup: %s", exc)
-        app.state.github_client = None
-        app.state.github_gateway = None
+        app.state.github_client_factory = None
         return
-    app.state.github_client = client
-    app.state.github_gateway = GitHubGatewayAdapter(client)
+
+    installation_id = client.installation_id
+
+    async def build_client() -> GitHubClient:
+        """Build one client per request over the shared installation token.
+
+        The read cache and tool budget are per-job memos, so a process-wide
+        client would answer a fresh listing out of another request's memo (and
+        spend the review budget across requests). Reusing the token cache keeps
+        the mint off the hot path until the token nears expiry.
+        """
+        return await GitHubClient.from_app(
+            app_id,
+            private_key,
+            installation_id=installation_id,
+            cache=token_cache,
+        )
+
+    app.state.github_client_factory = build_client
 
 
 async def _open_arq(app: FastAPI, settings: AppSettings) -> None:

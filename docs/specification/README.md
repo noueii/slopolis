@@ -15,7 +15,7 @@ from an implementation. Update the column when a feature lands.
 
 | # | Feature | File | Implemented |
 |---|---|---|---|
-| 10.1 | Account + GitHub App connection | [01-account-github-app.md](./v1/features/01-account-github-app.md) | yes — OAuth sign-in, install redirect + setup callback, installation and repository sync, workspace membership |
+| 10.1 | Account + GitHub App connection | [01-account-github-app.md](./v1/features/01-account-github-app.md) | yes — OAuth sign-in (the SPA sends an account-less visitor to it), install redirect + setup callback, installation and repository sync, workspace membership |
 | 10.2 | Provider & model configuration (BYOK) | [02-provider-model-config.md](./v1/features/02-provider-model-config.md) | **read-only** — the model catalog and assignment are read from the database, but nothing can create a credential, import models, or assign one (no API, no screen). See the gaps below |
 | 10.3 | Pre-flight validation | [03-preflight-validation.md](./v1/features/03-preflight-validation.md) | yes — link parsing and dedup, coverage, access policy, `.codereview.yml`, workspace readiness, live model check |
 | 10.4 | Session creation form | [04-session-creation.md](./v1/features/04-session-creation.md) | yes — submit, auto-naming, per-target enqueue |
@@ -34,12 +34,19 @@ against the code on `main` rather than planned:
    provider credential and an assigned model, and nothing can create either: there is no
    credential vault, no model import, no assignment endpoint, and the Providers & Models screen
    is a placeholder. Everything else in the review path is in place.
-2. **No sign-in UI.** The web app renders the shell for a guest with a null user; sign-in is
-   reached by visiting `/api/auth/github/login`. There is no install affordance either.
-3. **The server's GitHub client is bound to one installation.** `main.py` builds it once at
-   startup from the first installation (`from_app` takes `items[0]`), so with two installations
-   `/api/repositories` and pre-flight only ever see one — and with none the client is disabled
-   entirely. The worker already mints a token per installation per job.
+2. **Repository access is managed on GitHub.** The Repositories screen's *Connect repository* button
+   starts the install flow (`/api/github/install` → GitHub's install page), and which accounts and
+   repositories the App covers is chosen there, not in the app: there is no in-app repository picker
+   or removal, and without webhooks (gap 5) the list only refreshes when GitHub sends the browser
+   back to the setup URL.
+3. **Reads go through one installation, one pull request at a time.** `main.py` resolves the first
+   installation at startup (`from_app` takes `items[0]`) and every request's client mints its token
+   for it, so with two installations `/api/repositories` and pre-flight only ever see one — and with
+   none the client stays disabled until the process restarts, because the installation id is
+   captured at boot. Separately, GitHub reports diff size and check state per pull request only, so
+   a listing reads each PR (bounded concurrency) and the repository list reads each repository to
+   count its open PRs: a busy repository makes the picker slow and spends rate limit. The worker is
+   unaffected — it resolves an installation per job.
 4. **No OAuth `state`.** The callback accepts any `code`, so it is not bound to the browser that
    started the flow (login-CSRF).
 5. **No webhooks.** Installations and repositories are recorded by the setup callback and

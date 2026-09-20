@@ -10,9 +10,10 @@ import re
 from dataclasses import dataclass, field
 
 from slopolis_core.github.errors import GitHubError
-from slopolis_core.github.models import ChangedFile, GitHubIssue, GitHubPullRequest
+from slopolis_core.github.models import ChangedFile, CheckRun, GitHubIssue, GitHubPullRequest
 
 __all__ = [
+    "CHECK_RUNS_PER_PAGE",
     "MAX_DIFF_LINES",
     "MAX_FILES",
     "MAX_FILE_BYTES",
@@ -23,6 +24,8 @@ __all__ = [
     "ToolBudget",
 ]
 
+#: Page size for a check-run read; one page covers a commit's checks.
+CHECK_RUNS_PER_PAGE = 100
 #: Hard cap on bytes returned by ``GitHubClient.read_file``.
 MAX_FILE_BYTES = 200_000
 #: Hard cap on unified-diff lines embedded in a :class:`PrContext`.
@@ -70,6 +73,7 @@ class ReadCache:
     dirs: dict[tuple[str, str, str], list[str]] = field(default_factory=dict)
     issues: dict[tuple[str, int], GitHubIssue] = field(default_factory=dict)
     open_pulls: dict[str, list[GitHubPullRequest]] = field(default_factory=dict)
+    checks: dict[tuple[str, str], list[CheckRun]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

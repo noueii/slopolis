@@ -35,6 +35,13 @@ import type {
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "/api"
 
+/**
+ * Where the GitHub App install flow starts. `/github/install` is a browser
+ * navigation, not a JSON route: the API redirects on to GitHub's install page
+ * for the App, which is also where repositories are added or removed.
+ */
+export const githubAppInstallUrl = `${API_BASE}/github/install`
+
 /** Mock-only request modes, toggled from the app's mock-data control. */
 export type MockScenario = "default" | "empty" | "error" | "slow"
 
@@ -78,6 +85,74 @@ export function isMockModeEnabled(): boolean {
   if (mode === "off") return false
   if (mode === "server" || mode === "worker") return true
   return import.meta.env.DEV
+}
+
+/** Remembers that this tab has already been sent to GitHub once. */
+const SIGN_IN_ATTEMPT_KEY = "slopolis:signin-attempted"
+
+/** Whether this tab came back from GitHub without a session. */
+export function signInAttempted(): boolean {
+  try {
+    return window.sessionStorage.getItem(SIGN_IN_ATTEMPT_KEY) === "1"
+  } catch {
+    // Storage can be unavailable (private mode); the gate just loses its guard.
+    return false
+  }
+}
+
+/** Forgets the attempt, so a later signed-out visit can redirect again. */
+export function clearSignInAttempt(): void {
+  try {
+    window.sessionStorage.removeItem(SIGN_IN_ATTEMPT_KEY)
+  } catch {
+    return
+  }
+}
+
+export type SignInStart =
+  | { started: true }
+  | { started: false; message: string }
+
+/**
+ * Send the browser to GitHub's consent screen.
+ *
+ * The flow is probed before navigating: a deployment without OAuth credentials
+ * answers the login route with a 503 body, and navigating into that would strand
+ * the visitor on raw JSON with no way back to the app.
+ */
+export async function beginSignIn(): Promise<SignInStart> {
+  // `/auth/github/login` is a browser navigation, not a JSON route: the API
+  // redirects on to GitHub's consent screen, and the callback returns the
+  // browser to `APP_URL` with the session cookie set.
+  const url = `${API_BASE}/auth/github/login`
+  try {
+    const response = await fetch(url, { redirect: "manual" })
+    // A startable flow answers with a redirect the script cannot read into
+    // (`opaqueredirect`); any readable non-ok status is a refusal.
+    if (response.type !== "opaqueredirect" && !response.ok) {
+      let body: ApiErrorBody | undefined
+      try {
+        body = (await response.json()) as ApiErrorBody
+      } catch {
+        body = undefined
+      }
+      return {
+        started: false,
+        message:
+          body?.error.message ?? "GitHub sign-in is unavailable right now.",
+      }
+    }
+  } catch {
+    // Unreadable response (cross-origin or offline): let the navigation report it.
+  }
+
+  try {
+    window.sessionStorage.setItem(SIGN_IN_ATTEMPT_KEY, "1")
+  } catch {
+    // See `signInAttempted`: the guard is best-effort.
+  }
+  window.location.replace(url)
+  return { started: true }
 }
 
 export class ApiError extends Error {

@@ -2,26 +2,31 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { api } from "@/api/client"
+import type * as client from "@/api/client"
 import type { RepositorySummary } from "@/api/contract"
 import { RepositoriesScreen } from "./RepositoriesScreen"
 
-vi.mock("@/api/client", () => ({
-  api: {
-    listRepositories: vi.fn(),
-  },
-  ApiError: class ApiError extends Error {
-    readonly status: number
-    readonly code: string
+vi.mock("@/api/client", async (importOriginal) => {
+  const actual = await importOriginal<typeof client>()
+  return {
+    githubAppInstallUrl: actual.githubAppInstallUrl,
+    api: {
+      listRepositories: vi.fn(),
+    },
+    ApiError: class ApiError extends Error {
+      readonly status: number
+      readonly code: string
 
-    constructor(status: number, code: string, message: string) {
-      super(message)
-      this.name = "ApiError"
-      this.status = status
-      this.code = code
-    }
-  },
-  isMockModeEnabled: () => false,
-}))
+      constructor(status: number, code: string, message: string) {
+        super(message)
+        this.name = "ApiError"
+        this.status = status
+        this.code = code
+      }
+    },
+    isMockModeEnabled: () => false,
+  }
+})
 
 const repository: RepositorySummary = {
   id: "repo_1",
@@ -62,5 +67,18 @@ describe("RepositoriesScreen", () => {
     expect(screen.getByText("main")).toBeDefined()
     expect(screen.getByText("3 open PRs")).toBeDefined()
     expect(screen.getByText("Connected")).toBeDefined()
+  })
+
+  it("sends Connect repository into the GitHub App install flow", async () => {
+    vi.mocked(api.listRepositories).mockResolvedValue({ items: [] })
+    render(<RepositoriesScreen onOpenRepository={vi.fn()} />)
+
+    const connect = await screen.findByRole("link", {
+      name: "Connect repository",
+    })
+
+    // The install route redirects on to GitHub; the login route would just
+    // re-authenticate the visitor and drop them back on the dashboard.
+    expect(connect.getAttribute("href")).toBe("/api/github/install")
   })
 })

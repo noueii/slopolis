@@ -61,11 +61,32 @@ class FakeArqPool:
 class FakeGitHubClient:
     """In-memory GitHub read surface used by the repositories router."""
 
-    def __init__(self, pulls: dict[str, list[Any]] | None = None) -> None:
+    def __init__(
+        self,
+        pulls: dict[str, list[Any]] | None = None,
+        *,
+        details: dict[tuple[str, int], Any] | None = None,
+        checks: dict[tuple[str, str], list[Any]] | None = None,
+    ) -> None:
         self._pulls = pulls or {}
+        self._details = details or {}
+        self._checks = checks or {}
 
     async def list_open_pull_requests(self, full_name: str) -> list[Any]:
         return self._pulls.get(full_name, [])
+
+    async def get_pull_request(self, full_name: str, number: int) -> Any:
+        """The single-pull-request read the route uses for diff size."""
+        detail = self._details.get((full_name, number))
+        if detail is not None:
+            return detail
+        for pull in self._pulls.get(full_name, []):
+            if pull.number == number:
+                return pull
+        raise AssertionError(f"fake has no pull request {full_name}#{number}")
+
+    async def list_check_runs(self, full_name: str, ref: str) -> list[Any]:
+        return self._checks.get((full_name, ref), [])
 
 
 class FakeGateway:
@@ -404,7 +425,16 @@ async def build_harness(
         app.dependency_overrides[get_optional_user] = override_optional_user
         app.dependency_overrides[get_preflight_service] = lambda: service
         app.dependency_overrides[get_arq_pool] = lambda: pool
-        app.state.github_client = github_client
+
+        async def build_github_client() -> FakeGitHubClient:
+            assert github_client is not None
+            return github_client
+
+        # Routes build their GitHub client per request; the harness pins the fake
+        # (or leaves the factory unset, which is the unconfigured-App path).
+        app.state.github_client_factory = (
+            build_github_client if github_client is not None else None
+        )
         app.state.app_installations = app_installations
         app.state.arq_pool = pool
 

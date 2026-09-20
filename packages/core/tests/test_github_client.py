@@ -15,11 +15,13 @@ import pytest
 import respx
 from githubkit import GitHub, TokenAuthStrategy
 from githubkit_schemas.latest.models import (  # pyright: ignore[reportMissingTypeStubs]
+    CheckRun,
     ContentFile,
     DiffEntry,
     FullRepository,
     PullRequest,
     RepositoryCollaboratorPermission,
+    ReposOwnerRepoCommitsRefCheckRunsGetResponse200,
 )
 from test_github_helpers import fixture
 
@@ -176,6 +178,43 @@ async def test_list_changed_paths_returns_ordered_paths(respx_mock: respx.Router
     paths = await _client().list_changed_paths(_REPO, 7)
 
     assert paths == ["a.py", "b.py", "c.py"]
+
+
+@respx.mock(base_url=_BASE)
+async def test_list_check_runs_returns_the_head_commits_runs(
+    respx_mock: respx.Router,
+) -> None:
+    """Given a commit with two check runs, both are returned with their conclusion."""
+    respx_mock.get(f"/repos/{_OWNER}/{_NAME}/commits/headsha/check-runs").mock(
+        return_value=httpx.Response(
+            200,
+            json=fixture(
+                ReposOwnerRepoCommitsRefCheckRunsGetResponse200,
+                total_count=2,
+                check_runs=[
+                    fixture(
+                        CheckRun,
+                        name="ci",
+                        status="completed",
+                        conclusion="failure",
+                    ),
+                    fixture(
+                        CheckRun,
+                        name="lint",
+                        status="completed",
+                        conclusion="success",
+                    ),
+                ],
+            ),
+        )
+    )
+
+    runs = await _client().list_check_runs(_REPO, "headsha")
+
+    assert [(run.name, run.status, run.conclusion) for run in runs] == [
+        ("ci", "completed", "failure"),
+        ("lint", "completed", "success"),
+    ]
 
 
 @pytest.mark.parametrize(

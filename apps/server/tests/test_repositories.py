@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from slopolis_core.github.models import GitHubPullRequest
+from slopolis_core.github.models import CheckRun, GitHubPullRequest
 
 from .conftest import ApiHarness, FakeGitHubClient
 
@@ -31,29 +31,46 @@ def _pull(repo: str, number: int, title: str) -> GitHubPullRequest:
     )
 
 
-async def test_list_repositories_returns_seeded_repo(
+async def test_list_repositories_reports_open_pull_counts(
     seeded: Any, build_harness: Any
 ) -> None:
-    # Given a seeded workspace with one connected repository
-    harness: ApiHarness = await build_harness(user_id=seeded.user_id)
+    # Given a seeded workspace with one connected repository holding one open PR
+    client = FakeGitHubClient({"acme/api": [_pull("acme/api", 42, "Add guard")]})
+    harness: ApiHarness = await build_harness(
+        user_id=seeded.user_id, github_client=client
+    )
 
     # When repositories are listed
     response = await harness.client.get("/api/repositories")
 
-    # Then the repository summary is returned in camelCase
+    # Then the summary is returned in camelCase with the live open count
     assert response.status_code == 200
     items = response.json()["items"]
     assert len(items) == 1
     assert items[0]["fullName"] == "acme/api"
     assert items[0]["defaultBranch"] == "main"
     assert items[0]["connected"] is True
+    assert items[0]["openPrCount"] == 1
 
 
 async def test_list_repository_pulls_returns_open_prs(
     seeded: Any, build_harness: Any
 ) -> None:
-    # Given a connected repo whose fake client reports one open PR
-    client = FakeGitHubClient({"acme/api": [_pull("acme/api", 42, "Add guard")]})
+    # Given a repository whose listing omits the numbers, as GitHub's does
+    listed = _pull("acme/api", 42, "Add guard")
+    detail = listed.model_copy(
+        update={"changed_files": 5, "additions": 76, "deletions": 0}
+    )
+    client = FakeGitHubClient(
+        {"acme/api": [listed]},
+        details={("acme/api", 42): detail},
+        checks={
+            ("acme/api", "abc123"): [
+                CheckRun(name="ci", status="completed", conclusion="failure"),
+                CheckRun(name="lint", status="completed", conclusion="success"),
+            ]
+        },
+    )
     harness: ApiHarness = await build_harness(
         user_id=seeded.user_id, github_client=client
     )
@@ -61,14 +78,15 @@ async def test_list_repository_pulls_returns_open_prs(
     # When the repo's pull requests are listed
     response = await harness.client.get("/api/repositories/acme/api/pulls")
 
-    # Then the repository and its open PR are returned
+    # Then the PR carries the single-PR read's numbers and its CI rollup
     assert response.status_code == 200
     body = response.json()
     assert body["repository"]["fullName"] == "acme/api"
     assert body["repository"]["openPrCount"] == 1
-    assert len(body["pullRequests"]) == 1
-    assert body["pullRequests"][0]["number"] == 42
-    assert body["pullRequests"][0]["checks"]["state"] == "none"
+    pull = body["pullRequests"][0]
+    assert pull["number"] == 42
+    assert (pull["changedFiles"], pull["additions"], pull["deletions"]) == (5, 76, 0)
+    assert pull["checks"] == {"state": "failing", "total": 2, "passing": 1}
 
 
 async def test_list_repository_pulls_unknown_repo_is_404(

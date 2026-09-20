@@ -15,7 +15,8 @@ import type { NavId } from "./nav"
 export interface AppShellProps {
   active: NavId
   isAdmin: boolean
-  user: UserRef | null
+  /** The signed-in account; the shell is only rendered with one. */
+  user: UserRef
   /** The workspace the account belongs to, shown as the sidebar identity. */
   workspace: WorkspaceRef | null
   onNavigate: (id: NavId) => void

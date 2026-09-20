@@ -9,13 +9,12 @@ import {
 } from "lucide-react"
 
 import { cn } from "@/lib/utils"
+import { githubAppInstallUrl } from "@/api/client"
 import type { RepositorySummary } from "@/api/contract"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { useRepositories } from "@/features/dashboard/lib/useDashboard"
 import { formatRelativeTime } from "@/features/sessions/lib/format"
-
-const GITHUB_APP_INSTALL_URL = "/api/auth/github/login"
 
 export interface RepositoriesScreenProps {
   onOpenRepository: (fullName: string) => void
@@ -49,7 +48,7 @@ export function RepositoriesScreen({ onOpenRepository }: RepositoriesScreenProps
             Refresh
           </Button>
           <Button size="sm" asChild>
-            <a href={GITHUB_APP_INSTALL_URL}>
+            <a href={githubAppInstallUrl}>
               <Plus data-icon="inline-start" />
               Connect repository
             </a>
@@ -99,7 +98,7 @@ export function RepositoriesScreen({ onOpenRepository }: RepositoriesScreenProps
             </p>
           </div>
           <Button size="sm" asChild>
-            <a href={GITHUB_APP_INSTALL_URL}>
+            <a href={githubAppInstallUrl}>
               <Plus data-icon="inline-start" />
               Connect repository
             </a>

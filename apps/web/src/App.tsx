@@ -5,6 +5,7 @@ import {
   setMockScenario,
   type MockScenario,
 } from "@/api/client"
+import { SignInGate } from "@/features/auth/SignInGate"
 import { AppShell } from "@/features/shell/AppShell"
 import { navItemById, type NavId } from "@/features/shell/nav"
 import { useCurrentUser } from "@/features/shell/useCurrentUser"
@@ -49,10 +50,12 @@ export default function App() {
     setScenario(next)
   }
 
-  // A signed-in account without a workspace never sees the shell: the gate is
-  // the only screen it can act from. Guests keep the pre-existing shell.
+  // The shell is for accounts only: without one there is nothing to act on (every
+  // screen behind it is workspace-scoped), so the sign-in gate takes over first,
+  // and a signed-in account without a workspace gets the onboarding gate.
   if (isLoading) return <WorkspaceGateLoading />
-  if (user && !workspace) {
+  if (!user) return <SignInGate />
+  if (!workspace) {
     return <WorkspaceOnboarding account={user} onboarding={onboarding} />
   }
 

@@ -65,4 +65,16 @@ docs/specification/  # versioned specs
 - Web tooling: the web app uses **Bun** as its package manager and dev/build runner (`bun install`, `bun run dev`, `bun run build`).
 - Web tests: use **Vitest**, run through Bun (e.g. `bunx vitest`). Do not use `bun test`.
 - Mock vs real: `MOCK_MODE=server` proxies `/api` to the mock API (`:8300`), `off` proxies to the real API (`:8400`), and `worker` serves mocks in-browser with no server. The web dev server runs on `:8000`.
-- Backend and worker commands are added in later phases.
+- Database: `make migrate` applies `packages/db` migrations to the dev database. Nothing migrates at
+  boot (`RUN_MIGRATIONS` is set in some `.env` files but read by no code).
+- The dev database is **shared by every worktree** (one `slopolis-postgres-1` container, one
+  `slopolis` database), so a worktree whose `packages/db/slopolis_db/migrations` diverged from
+  `main` can leave it stamped with a revision this checkout cannot resolve: `alembic current` fails
+  with `Can't locate revision identified by …`, and the server dies on missing columns such as
+  `column users.workspace_id does not exist`. Back up, reset the schema, and migrate:
+
+  ```bash
+  docker exec slopolis-postgres-1 pg_dump -U slopolis -d slopolis --no-owner > /tmp/slopolis-dev.sql
+  docker exec slopolis-postgres-1 psql -U slopolis -d slopolis -c 'drop schema public cascade; create schema public;'
+  make migrate
+  ```

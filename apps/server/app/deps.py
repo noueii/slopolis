@@ -33,7 +33,9 @@ __all__ = [
     "ArqPoolDep",
     "CurrentUserDep",
     "DbSessionDep",
+    "GitHubClientDep",
     "GitHubGatewayDep",
+    "OptionalGitHubClientDep",
     "OptionalUserDep",
     "PreflightServiceDep",
     "WorkspaceIdDep",
@@ -42,7 +44,9 @@ __all__ = [
     "get_arq_pool",
     "get_current_user",
     "get_db",
+    "get_github_client",
     "get_github_gateway",
+    "get_optional_github_client",
     "get_optional_user",
     "get_preflight_service",
     "get_settings_dep",
@@ -153,54 +157,60 @@ async def get_workspace_id(user: CurrentUserDep) -> uuid.UUID:
 WorkspaceIdDep = Annotated[uuid.UUID, Depends(get_workspace_id)]
 
 
-async def get_github_gateway(
-    request: Request, db: DbSessionDep, workspace_id: WorkspaceIdDep
-) -> GitHubGatewayAdapter:
-    """Build the pre-flight GitHub gateway from the app-owned core client."""
-    client = _client_from_app(request)
-    if client is None:
+async def get_github_client(request: Request) -> GitHubClient:
+    """Build this request's GitHub client, or fail when the App is unconfigured."""
+    factory = getattr(request.app.state, "github_client_factory", None)
+    if factory is None:
         raise ApiError(
             503,
             "github_not_configured",
             "The GitHub App is not configured for this workspace.",
         )
+    return await factory()
+
+
+GitHubClientDep = Annotated[GitHubClient, Depends(get_github_client)]
+
+
+async def get_optional_github_client(request: Request) -> GitHubClient | None:
+    """The same client, or ``None`` when the App is unconfigured.
+
+    Routes that still have something to show without GitHub (the repository list)
+    take this instead of :func:`get_github_client`.
+    """
+    factory = getattr(request.app.state, "github_client_factory", None)
+    if factory is None:
+        return None
+    return await factory()
+
+
+OptionalGitHubClientDep = Annotated[
+    GitHubClient | None, Depends(get_optional_github_client)
+]
+
+
+async def get_github_gateway(client: GitHubClientDep) -> GitHubGatewayAdapter:
+    """Wrap this request's GitHub client in the pre-flight gateway."""
     return GitHubGatewayAdapter(client)
 
 
 GitHubGatewayDep = Annotated[GitHubGatewayAdapter, Depends(get_github_gateway)]
 
 
-def _client_from_app(request: Request) -> GitHubClient | None:
-    """Return the app-owned ``GitHubClient``, or ``None`` when unconfigured."""
-    client: GitHubClient | None = getattr(request.app.state, "github_client", None)
-    return client
-
-
 async def get_preflight_service(
-    request: Request, db: DbSessionDep, workspace_id: WorkspaceIdDep
+    request: Request,
+    db: DbSessionDep,
+    workspace_id: WorkspaceIdDep,
+    client: GitHubClientDep,
 ) -> PreflightService:
     """Assemble a :class:`PreflightService` from the app's wired adapters."""
-    gateway = _gateway_from_app(request)
+    gateway = GitHubGatewayAdapter(client)
     workspace = WorkspaceConfigAdapter(db, workspace_id)
     live_check = _live_check_from_app(request)
     return PreflightService(gateway, workspace, live_check)
 
 
 PreflightServiceDep = Annotated[PreflightService, Depends(get_preflight_service)]
-
-
-def _gateway_from_app(request: Request) -> GitHubGatewayAdapter:
-    """Return the app-owned gateway, or fail with a clear configuration error."""
-    gateway: GitHubGatewayAdapter | None = getattr(
-        request.app.state, "github_gateway", None
-    )
-    if gateway is None:
-        raise ApiError(
-            503,
-            "github_not_configured",
-            "The GitHub App is not configured for this workspace.",
-        )
-    return gateway
 
 
 def _live_check_from_app(request: Request) -> LlmLiveModelCheck:

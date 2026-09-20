@@ -18,6 +18,7 @@ from slopolis_core.github.errors import (
 from slopolis_core.github.models import (
     AppInstallation,
     ChangedFile,
+    CheckRun,
     GitHubIssue,
     GitHubPullRequest,
     GitHubRepository,
@@ -34,6 +35,7 @@ __all__ = [
     "AppInstallation",
     "AppInstallations",
     "ChangedFile",
+    "CheckRun",
     "GitHubAuthError",
     "GitHubClient",
     "GitHubError",

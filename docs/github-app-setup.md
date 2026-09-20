@@ -159,9 +159,10 @@ curl -s -D - -o /dev/null localhost:8400/api/auth/github/login | grep -i '^locat
 # → https://github.com/login/oauth/authorize?client_id=…&scope=read:user user:email repo&redirect_uri=…
 ```
 
-Then in the browser open **<http://localhost:8000/api/auth/github/login>**, approve the App, and
-you land back on the app signed in (`GET /api/me` returns your handle). `make dev-api` runs the API and
-the web app together if you prefer one command.
+Then in the browser open **<http://localhost:8000>**: with no session the app sends you straight to
+GitHub, and approving the App lands you back on it signed in (`GET /api/me` returns your handle).
+<http://localhost:8000/api/auth/github/login> starts the same flow directly. `make dev-api` runs the
+API and the web app together if you prefer one command.
 
 Install the App to give slopolis something to review:
 
@@ -183,8 +184,9 @@ selection, with "Redirect on update" on) refreshes the same rows instead of dupl
 |---|---|
 | `503 oauth_not_configured` on login | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` are unset in `.env`. |
 | `422` on the callback | The callback requires `code`; visiting `/api/auth/github/callback` directly (or a stale bookmark) has none. Start from the login URL. |
-| GitHub says the redirect URI is not associated with the App | The Callback URL in the App settings and `APP_URL + /api/auth/github/callback` disagree. |
+| `The redirect_uri is not associated with this application` (GitHub's own error page, after sign-in) | The App's **Callback URL** does not match what the server sends: `{APP_URL}/api/auth/github/callback`, e.g. `http://localhost:8000/api/auth/github/callback`. Check it with `curl -s -D - -o /dev/null localhost:8400/api/auth/github/login \| grep -i '^location'` (§5) and add the URL it shows to the App's Callback URLs (up to 10). A blank Callback URL field produces the same error. |
 | Sign-in lands on the API root, not the app | `APP_URL` is `http://localhost:8400`. Set it to the web origin (`:8000`) in dev. |
+| The app lands back on the sign-in gate | The round trip did not set a session: check the Callback URL, `APP_URL`, and the client secret. The gate stops redirecting after one attempt, so the second visit offers a retry instead of bouncing to GitHub again. |
 | `NotImplementedError: Algorithm 'RS256' could not be found` | PyJWT's `crypto` extra is missing (`pyjwt[crypto]`), so no App JWT can be signed. Fixed by declaring it in `packages/core/pyproject.toml`; run `uv sync --all-packages`. |
 | `InvalidKeyError: Could not parse the provided public key` | The private key is not the quoted multi-line form (§4), or belongs to a different App. |
 | GitHub calls fail with 403 after the first request | A permission from §1 is missing. Update the App's permissions, then have an installation admin approve the change (Installations → **Review request**). |
@@ -202,13 +204,14 @@ Verified against the code on `main` today; each is a candidate follow-up:
    callback (§2) and refreshed only when the user installs again or changes the selection. A
    repository renamed or removed on GitHub keeps its old row until then (it is marked
    `connected: false` only when a later sync reports it missing).
-2. **One installation at a time.** The server builds its GitHub client once at startup from the
-   first installation, so `/api/repositories` and pre-flight only see that installation's
-   repositories; with no installation at all the client stays disabled (the startup log says so).
-   The worker is unaffected — it mints a token per installation per job.
-3. **No sign-in UI.** The web app renders the shell with a null user for guests; sign-in is reached
-   by visiting `/api/auth/github/login` directly. A sign-in screen with a 401 fallback is a
-   follow-up.
+2. **One installation at a time.** The server resolves the first installation at startup and every
+   request mints its token for it, so `/api/repositories` and pre-flight only see that
+   installation's repositories; with no installation at all the client stays disabled until the
+   process restarts (the startup log says so). The worker is unaffected — it mints a token per
+   installation per job.
+3. **Repository access is managed on GitHub.** The Repositories screen's *Connect repository* button
+   starts the install flow (`/api/github/install` → GitHub's install page); which accounts and
+   repositories the App covers is chosen there, and there is no in-app picker or removal.
 4. **No OAuth `state`.** The callback accepts any `code`, so it is not bound to the browser that
    started the flow (login-CSRF). Adding a signed, single-use, browser-bound state is a follow-up.
 5. **`GITHUB_WEBHOOK_SECRET` is unused** until webhooks land (Phase 2), and `CORS_ORIGINS` still

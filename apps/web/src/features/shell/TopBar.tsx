@@ -9,7 +9,7 @@ import { navItemById, type NavId } from "./nav"
 
 export interface TopBarProps {
   active: NavId
-  user: UserRef | null
+  user: UserRef
   onOpenNav: () => void
   onNavigate: (id: NavId) => void
   onNewReview: () => void

@@ -6,6 +6,22 @@
 - The app tracks users, installations, and repositories.
 - Triggering requires GitHub repo access: **write access on public repos, read access on private repos** (see 10.2).
 
+## Sign-in
+
+`GET /api/auth/github/login` is the only sign-in entry point: it redirects the browser to
+GitHub's consent screen, and `GET /api/auth/github/callback` sets the signed httpOnly session
+cookie and returns the browser to `APP_URL`. There is no password, no local account, and no
+sign-in form in the app.
+
+- A visitor without a session never sees the shell: when `GET /api/me` reports no account, the
+  SPA sends the browser to `/api/auth/github/login` instead of rendering the app.
+- **One attempt per tab.** A browser that has already been to GitHub and came back without a
+  session is not redirected again — it gets an explicit retry — so a failing callback cannot
+  bounce the visitor between the app and GitHub.
+- The login route is a browser navigation, so a deployment without OAuth credentials answers it
+  with **503 `oauth_not_configured`**; the gate reports that message instead of navigating into
+  the raw error body.
+
 ## Onboarding and workspace membership
 
 Signing in is not the same as belonging somewhere. The OAuth callback creates the **account**;

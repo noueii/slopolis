@@ -74,7 +74,7 @@ from worker.jobs import persistence
 from worker.jobs.agent_runs import RunRecorder, RunRef
 from worker.jobs.loading import LoadOutcome, TargetJob, load_target
 from worker.jobs.model_selection import ResolvedModel, resolve_model
-from worker.jobs.publish import PublishPlan, publish
+from worker.jobs.publish import InlinePost, PublishPlan, publish
 from worker.jobs.publishing import InlineTarget, inline_targets
 from worker.jobs.repo_config_load import load_repo_config
 from worker.jobs.slots import SLOT_WAIT_FOREVER, SlotGate, SlotUnavailable
@@ -471,7 +471,9 @@ async def _publish_attempt(
     # Everything above is this attempt's own writing and must be durable before
     # GitHub is asked to change the pull request (spec 10.7).
     await db.commit()
-    check_note = await _publish_review(job=job, ids=ids, plan=plan, inline=inline, rows=rows)
+    check_note = await _publish_review(
+        db=db, job=job, ids=ids, plan=plan, inline=inline, rows=rows
+    )
     return plan, check_note
 
 
@@ -850,11 +852,12 @@ async def _persist_and_publish(
     )
     persistence.record_run_usage(job.target, run, plan.result)
     await db.commit()
-    return await _publish_review(job=job, ids=ids, plan=plan, inline=inline, rows=rows)
+    return await _publish_review(db=db, job=job, ids=ids, plan=plan, inline=inline, rows=rows)
 
 
 async def _publish_review(
     *,
+    db: AsyncSession,
     job: TargetJob,
     ids: _Ids,
     plan: _AttemptPlan,
@@ -867,6 +870,20 @@ async def _publish_review(
     first tried to publish would have sent — same repo config toggles, same
     payloads, same best-effort check run.
     """
+
+    async def stamp(post: InlinePost) -> None:
+        """Record one finding's comment the moment that comment exists (spec 10.7).
+
+        The commit is the point of it: the failure path begins with a rollback,
+        so an uncommitted link would be rolled back too and the app would show a
+        finding as unposted while its comment sat on the pull request — which is
+        how a retry came to post the same review twice.
+        """
+        row = rows[post.source_index]
+        row.posted = True
+        row.github_comment_id = post.comment_id
+        await db.commit()
+
     outcome = await publish(
         plan.clients.publisher,
         PublishPlan(
@@ -879,21 +896,11 @@ async def _publish_review(
             session_url=_session_url(ids.session),
             status=str(TargetStatus.DONE),
         ),
+        stamp=stamp,
     )
-    _stamp_posted(rows=rows, inline=inline, comment_ids=outcome.inline_comment_ids)
     if outcome.check_run_skipped is None:
         return None
     return f"the review posted without a check run: {outcome.check_run_skipped}"
-
-
-def _stamp_posted(
-    *, rows: list[Finding], inline: list[InlineTarget], comment_ids: list[int]
-) -> None:
-    """Mark each inline-published finding row with its GitHub comment id."""
-    for target, comment_id in zip(inline, comment_ids, strict=False):
-        row = rows[target.source_index]
-        row.posted = True
-        row.github_comment_id = comment_id
 
 
 def _error_text(exc: Exception) -> str:

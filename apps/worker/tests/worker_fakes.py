@@ -219,6 +219,17 @@ class FakePublisher:
     checks: list[tuple[str, str, str, str, str]] = field(default_factory=list)
     #: Every summary-comment lookup, in order, so a test can see the job asked.
     summary_lookups: list[tuple[str, int]] = field(default_factory=list)
+    #: The comments this pull request already holds, keyed by the path and line
+    #: they are anchored to and listed in the order they were posted — what the
+    #: real publisher's reconciliation would adopt for that location.
+    existing_inline: dict[tuple[str, int], list[int]] = field(default_factory=dict)
+    #: Every reconciliation, in order: the comments the job asked about.
+    reconciliations: list[tuple[str, int, list[InlineComment]]] = field(
+        default_factory=list
+    )
+    #: When set, only reconciliation raises it — a listing GitHub refused, which
+    #: the publish has to survive by posting every comment anyway (spec 10.7).
+    reconcile_fail_with: Exception | None = None
     #: The summary comment an earlier publish left on the pull request. ``None``
     #: means there is none, which is what makes the publish create one.
     existing_summary_id: int | None = None
@@ -227,9 +238,16 @@ class FakePublisher:
     lookup_fail_with: Exception | None = None
     #: When set, every publish method raises it instead of recording a call.
     fail_with: Exception | None = None
+    #: When set, inline posting raises the error from the given post on — GitHub
+    #: taking one comment of several and refusing the next, which is when the ids
+    #: of the comments it already accepted must not be lost (spec 10.7).
+    fail_inline_after: tuple[int, Exception] | None = None
     #: When set, only the check run raises it — the advisory surface an
     #: installation without ``checks: write`` cannot post (spec 10.7).
     check_fail_with: Exception | None = None
+    #: The next id a posted comment is given, so one publish that posts several
+    #: comments stamps each finding with its own id, the way GitHub would.
+    next_inline_id: int = 201
 
     def _refuse(self) -> None:
         if self.fail_with is not None:
@@ -252,8 +270,30 @@ class FakePublisher:
         self, repo_full_name: str, number: int, comments: list[InlineComment], commit_id: str
     ) -> list[int]:
         self._refuse()
+        if self.fail_inline_after is not None:
+            threshold, error = self.fail_inline_after
+            already_posted = sum(len(posted) for _, _, posted, _ in self.inlines)
+            if already_posted >= threshold:
+                raise error
         self.inlines.append((repo_full_name, number, comments, commit_id))
-        return [201 + index for index in range(len(comments))]
+        created = [self.next_inline_id + index for index in range(len(comments))]
+        self.next_inline_id += len(comments)
+        return created
+
+    async def reconcile_inline_comments(
+        self, repo_full_name: str, number: int, comments: list[InlineComment]
+    ) -> list[int | None]:
+        """Adopt a seeded comment per path and line, in the order each was posted."""
+        self.reconciliations.append((repo_full_name, number, comments))
+        if self.reconcile_fail_with is not None:
+            raise self.reconcile_fail_with
+        self._refuse()
+        available = {key: list(ids) for key, ids in self.existing_inline.items()}
+        adopted: list[int | None] = []
+        for comment in comments:
+            listed = available.setdefault((comment.path, comment.line), [])
+            adopted.append(listed.pop(0) if listed else None)
+        return adopted
 
     async def upsert_check_run(
         self,

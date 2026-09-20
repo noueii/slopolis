@@ -23,6 +23,7 @@ from worker.jobs.review_target import review_target
 from worker.jobs.slots import SLOT_WAIT_FOREVER, SlotGate
 from worker_fakes import (
     CATALOG_MODEL,
+    FINDING_PATH,
     HEAD_BRANCH,
     HEAD_SHA,
     PR_NUMBER,
@@ -1005,3 +1006,182 @@ async def test_the_last_try_waits_for_a_slot_instead_of_deferring(
     # queue that has no tries left for it
     await asyncio.wait_for(pending, timeout=10)
     assert (await _target(h)).status == "done"
+
+
+#: Two findings on two lines of one file: the shapes reconciliation has to tell
+#: apart by location rather than by what the comments say.
+_TWO_LINE_JSON = (
+    '{"findings": ['
+    '{"path": "src/a.py", "line": 3, "severity": "error", "category": "correctness", '
+    '"message": "boom", "suggestion": "fix it", "confidence": 0.9}, '
+    '{"path": "src/a.py", "line": 5, "severity": "warning", "category": "style", '
+    '"message": "nit", "suggestion": null, "confidence": 0.5}'
+    "]}"
+)
+
+#: Two findings the model anchored to the same line — the case GitHub cannot
+#: resolve, where the pairing has to keep one comment per finding.
+_SAME_LINE_JSON = (
+    '{"findings": ['
+    '{"path": "src/a.py", "line": 3, "severity": "error", "category": "correctness", '
+    '"message": "boom", "suggestion": null, "confidence": 0.9}, '
+    '{"path": "src/a.py", "line": 3, "severity": "warning", "category": "style", '
+    '"message": "also here", "suggestion": null, "confidence": 0.5}'
+    "]}"
+)
+
+#: What the publisher raises when the pull request's comments cannot be read —
+#: a throttled listing, which must not cost the review it was reconciling for.
+_REFUSED_LISTING = GitHubRateLimitError("GitHub rate limit hit during _list_own_review_comments")
+
+
+async def test_publish_adopts_the_comment_that_is_already_there(
+    session_factory: SessionFactory,
+) -> None:
+    # Given a pull request that already carries this App's comment for the first
+    # finding, and a review whose second finding is new
+    publisher = FakePublisher(existing_inline={(FINDING_PATH, 3): [777]})
+    h = await seed_and_build(
+        session_factory, publisher=publisher, llm=FakeLlm([_TWO_LINE_JSON])
+    )
+
+    # When the target runs
+    await _run(h)
+
+    # Then only the finding without a comment posts, and it posts once
+    assert len(publisher.inlines) == 1
+    _, _, posted, _ = publisher.inlines[0]
+    assert len(posted) == 1
+    assert posted[0].line == 5
+
+    # ... and both findings are stamped: the adopted one with the comment that was
+    # already on the pull request, the posted one with its own new id
+    findings = {row.line: row for row in await _findings(h)}
+    assert findings[3].posted is True
+    assert findings[3].github_comment_id == 777
+    assert findings[5].posted is True
+    assert findings[5].github_comment_id == 201
+    assert (await _target(h)).status == "done"
+
+
+async def test_publish_posts_a_second_finding_on_a_line_that_already_has_one(
+    session_factory: SessionFactory,
+) -> None:
+    # Given one comment on a line and a review that found two things there
+    publisher = FakePublisher(existing_inline={(FINDING_PATH, 3): [777]})
+    h = await seed_and_build(
+        session_factory, publisher=publisher, llm=FakeLlm([_SAME_LINE_JSON])
+    )
+
+    # When the target runs
+    await _run(h)
+
+    # Then the first finding takes the comment that is there and the second posts
+    # its own, because GitHub cannot say which of two same-line comments is which
+    assert len(publisher.inlines) == 1
+    assert len(publisher.inlines[0][2]) == 1
+    assert [row.github_comment_id for row in await _findings(h)] == [777, 201]
+
+
+async def test_a_refused_reconciliation_still_publishes_every_comment(
+    session_factory: SessionFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Given a pull request whose comments GitHub refuses to list
+    publisher = FakePublisher(reconcile_fail_with=_REFUSED_LISTING)
+    h = await seed_and_build(
+        session_factory, publisher=publisher, llm=FakeLlm([_TWO_LINE_JSON])
+    )
+
+    # When the target runs
+    with caplog.at_level(logging.WARNING, logger="worker.jobs.publish"):
+        await _run(h)
+
+    # Then the review still reaches the pull request: every comment posts
+    posted = [comment for _, _, comments, _ in publisher.inlines for comment in comments]
+    assert [comment.line for comment in posted] == [3, 5]
+    findings = {row.line: row for row in await _findings(h)}
+    assert findings[3].posted is True
+    assert findings[5].posted is True
+    assert (await _target(h)).status == "done"
+
+    # ... and the reason is logged, so a duplicated comment is not mistaken for a
+    # reconciliation that worked
+    assert any(
+        "reconciliation failed" in record.getMessage()
+        for record in caplog.records
+        if record.name == "worker.jobs.publish"
+    )
+
+
+async def test_a_publish_retry_over_posts_nothing_when_the_comments_are_there(
+    session_factory: SessionFactory,
+) -> None:
+    # Given a review whose publish was throttled after GitHub had already taken
+    # its comments, so the app never recorded them
+    h = await _throttled_publish(session_factory, findings=_TWO_LINE_JSON)
+    assert all(row.posted is False for row in await _findings(h))
+    h.seed.publisher.fail_with = None
+    h.seed.publisher.existing_inline = {(FINDING_PATH, 3): [777], (FINDING_PATH, 5): [778]}
+
+    # When the target is retried in publish mode
+    await _requeue_target(h)
+    await _run(h, mode="publish")
+
+    # Then nothing is posted a second time, and every finding catches up with the
+    # comment it already has on the pull request
+    assert h.seed.publisher.inlines == []
+    findings = {row.line: row for row in await _findings(h)}
+    assert findings[3].posted is True
+    assert findings[3].github_comment_id == 777
+    assert findings[5].posted is True
+    assert findings[5].github_comment_id == 778
+    assert (await _target(h)).status == "done"
+    assert (await _session(h)).status == "done"
+
+
+async def test_a_comment_refused_mid_publish_keeps_the_links_already_written(
+    session_factory: SessionFactory,
+) -> None:
+    # Given a publish whose first comment GitHub accepts and whose second it refuses
+    publisher = FakePublisher(fail_inline_after=(1, _THROTTLED))
+    h = await seed_and_build(
+        session_factory,
+        publisher=publisher,
+        llm=FakeLlm([_TWO_LINE_JSON]),
+        config=WorkerConfig(WORKER_MAX_TRIES=1, WORKER_RETRY_BACKOFF_S=1),
+        job_try=1,
+    )
+
+    # When the last permitted try runs
+    await _run(h)
+
+    # Then the attempt failed on the refused write
+    assert (await _target(h)).status == "failed"
+    assert [run.status for run in await _runs(h)] == ["failed"]
+
+    # ... but the finding whose comment GitHub did take is already recorded as
+    # posted, with its id: the link was committed before the next comment could
+    # fail, so the app is not left believing that comment does not exist — the
+    # state that made a retry post the same review all over again
+    findings = {row.line: row for row in await _findings(h)}
+    assert findings[3].posted is True
+    assert findings[3].github_comment_id == 201
+    assert findings[5].posted is False
+    assert findings[5].github_comment_id is None
+
+    # When the target is retried in publish mode, over the comment the failed
+    # attempt left on the pull request
+    h.seed.publisher.existing_inline = {(FINDING_PATH, 5): [778]}
+    await _requeue_target(h)
+    await _run(h, mode="publish")
+
+    # Then nothing is posted, not even the comment that was refused last time:
+    # the only finding left to publish already has its comment, and the refusal
+    # knob is still armed, so a second post would have failed the retry
+    assert len(h.seed.publisher.inlines) == 1
+    findings = {row.line: row for row in await _findings(h)}
+    assert findings[3].github_comment_id == 201
+    assert findings[5].posted is True
+    assert findings[5].github_comment_id == 778
+    assert (await _target(h)).status == "done"
+    assert (await _session(h)).status == "done"

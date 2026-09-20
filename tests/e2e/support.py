@@ -265,6 +265,9 @@ class FakePublisher:
     #: A test sets this to the summary comment an earlier publish left on the
     #: pull request; ``None`` — the default — is a pull request with none yet.
     existing_summary_id: int | None = None
+    #: The line comments the pull request already holds, keyed by path and line in
+    #: the order they were posted — what reconciliation adopts (spec 10.7).
+    existing_inline: dict[tuple[str, int], list[int]] = field(default_factory=dict)
 
     async def find_summary_comment(self, repo_full_name: str, number: int) -> int | None:
         """Answer with the seeded existing comment, or ``None`` on a first publish."""
@@ -283,6 +286,17 @@ class FakePublisher:
         """Record the inline comments and return one id per comment."""
         self.inlines.append((repo_full_name, number, comments, commit_id))
         return [201 + index for index in range(len(comments))]
+
+    async def reconcile_inline_comments(
+        self, repo_full_name: str, number: int, comments: list[InlineComment]
+    ) -> list[int | None]:
+        """Adopt a seeded comment per path and line, in the order each was posted."""
+        available = {key: list(ids) for key, ids in self.existing_inline.items()}
+        adopted: list[int | None] = []
+        for comment in comments:
+            listed = available.setdefault((comment.path, comment.line), [])
+            adopted.append(listed.pop(0) if listed else None)
+        return adopted
 
     async def upsert_check_run(
         self,

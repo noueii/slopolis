@@ -8,6 +8,7 @@ factories, and the ARQ ``on_startup`` hook assembles one context per worker.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from typing import Protocol, runtime_checkable
@@ -18,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from slopolis_core.context import PrContext
 from slopolis_core.github._mapping import parse_expiry, raise_for_status
+from slopolis_core.github.app_installations import AppInstallations
 from slopolis_core.github.auth import TokenCache
 from slopolis_core.github.client import GitHubClient
 from slopolis_core.github.errors import GitHubAuthError
@@ -25,7 +27,7 @@ from slopolis_core.github.models import GitHubPullRequest, InlineComment
 from slopolis_core.github.publisher import GitHubPublisher
 from slopolis_core.llm.client import LiteLlmClient, LlmClient
 from slopolis_core.review.harness import ReviewHarness
-from slopolis_core.settings import get_settings
+from slopolis_core.settings import Settings, get_settings
 from slopolis_db.session import get_session
 from worker.config import WorkerConfig
 from worker.credentials import (
@@ -49,6 +51,8 @@ __all__ = [
     "build_publisher",
     "db_session_factory",
 ]
+
+_LOG = logging.getLogger("worker.deps")
 
 #: A callable returning an async-context-managed database session.
 SessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
@@ -88,6 +92,10 @@ class Publisher(Protocol):
         comments: list[InlineComment],
         commit_id: str,
     ) -> Awaitable[list[int]]: ...
+
+    def reconcile_inline_comments(
+        self, repo_full_name: str, number: int, comments: list[InlineComment]
+    ) -> Awaitable[list[int | None]]: ...
 
     def upsert_check_run(
         self,
@@ -239,7 +247,7 @@ async def build_publisher(
 ) -> GitHubPublisher:
     """Mint (or reuse) a token and build a GitHub publisher."""
     token = await _installation_token(installation, cache)
-    return _publisher(token)
+    return await _publisher(token)
 
 
 async def build_installation_clients(
@@ -249,17 +257,51 @@ async def build_installation_clients(
     token = await _installation_token(installation, cache)
     return InstallationClients(
         reader=GitHubClient.from_installation_token(token),
-        publisher=_publisher(token),
+        publisher=await _publisher(token),
     )
 
 
-def _publisher(token: str) -> GitHubPublisher:
+async def _publisher(token: str) -> GitHubPublisher:
     """Build a publisher that knows which App's comments are its own (§10.7)."""
-    app_id = get_settings().github_app_id
+    settings = get_settings()
+    app_id = settings.github_app_id
     return GitHubPublisher(
         GitHub(TokenAuthStrategy(token)),
         app_id=int(app_id) if app_id else None,
+        app_login=await _app_login(settings),
     )
+
+
+async def _app_login(settings: Settings) -> str | None:
+    """The login this App's comments carry, or ``None`` when it cannot be known.
+
+    ``<slug>[bot]``, because a review comment — unlike an issue comment — has no
+    ``performed_via_github_app`` field: the author login is the only fact on the
+    wire that ties one to this App, and reconciliation must not adopt a human's
+    or another App's comment. ``GITHUB_APP_SLUG`` answers without a call;
+    otherwise the App's own JWT reads the slug from GitHub, the same fallback the
+    install URL uses (spec 01). Without either, reconciliation adopts nothing and
+    publishing posts every comment, which is the pre-reconciliation behaviour.
+    """
+    if settings.github_app_slug:
+        return f"{settings.github_app_slug}[bot]"
+    app_id = settings.github_app_id
+    private_key = settings.github_app_private_key
+    if not app_id or not private_key:
+        return None
+    try:
+        slug = await AppInstallations(int(app_id), private_key).app_slug()
+    except Exception as exc:
+        # Caught broadly on purpose, like the check run: this lookup is an
+        # optimisation that prevents duplicates, not a surface the user asked for,
+        # so a signature, transport, or parsing failure has to leave the publish
+        # working — with the login unknown, which is the state documented above.
+        _LOG.warning(
+            "could not resolve the App's slug; line comments will not be reconciled",
+            extra={"reason": f"{type(exc).__name__}: {exc}"},
+        )
+        return None
+    return f"{slug}[bot]"
 
 
 async def _installation_token(installation: InstallationRef, cache: TokenCache) -> str:

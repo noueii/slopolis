@@ -1,5 +1,6 @@
 """GitHub integration: typed client, publisher, models, and errors."""
 
+from slopolis_core.github.app_installations import AppInstallations
 from slopolis_core.github.client import (
     MAX_DIFF_LINES,
     MAX_FILE_BYTES,
@@ -15,11 +16,13 @@ from slopolis_core.github.errors import (
     GitHubRateLimitError,
 )
 from slopolis_core.github.models import (
+    AppInstallation,
     ChangedFile,
     GitHubIssue,
     GitHubPullRequest,
     GitHubRepository,
     InlineComment,
+    InstallationRepository,
 )
 from slopolis_core.github.publisher import GitHubPublisher
 
@@ -28,6 +31,8 @@ __all__ = [
     "MAX_FILES",
     "MAX_FILE_BYTES",
     "MAX_TOOL_CALLS",
+    "AppInstallation",
+    "AppInstallations",
     "ChangedFile",
     "GitHubAuthError",
     "GitHubClient",
@@ -39,5 +44,6 @@ __all__ = [
     "GitHubRateLimitError",
     "GitHubRepository",
     "InlineComment",
+    "InstallationRepository",
     "ToolBudget",
 ]

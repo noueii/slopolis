@@ -9,11 +9,13 @@ boundary once; interior code receives typed values.
 from pydantic import BaseModel, ConfigDict
 
 __all__ = [
+    "AppInstallation",
     "ChangedFile",
     "GitHubIssue",
     "GitHubPullRequest",
     "GitHubRepository",
     "InlineComment",
+    "InstallationRepository",
 ]
 
 _STRICT = ConfigDict(extra="forbid")
@@ -85,3 +87,26 @@ class InlineComment(BaseModel):
     path: str
     line: int
     body: str
+
+
+class AppInstallation(BaseModel):
+    """A GitHub App installation on a user, organization, or enterprise account."""
+
+    model_config = _STRICT
+
+    installation_id: int
+    account_login: str
+    account_type: str
+    repository_selection: str
+    suspended: bool
+
+
+class InstallationRepository(BaseModel):
+    """A repository an installation granted the App access to."""
+
+    model_config = _STRICT
+
+    github_id: int
+    full_name: str
+    private: bool
+    default_branch: str

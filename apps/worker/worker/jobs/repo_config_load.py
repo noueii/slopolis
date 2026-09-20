@@ -17,14 +17,11 @@ from slopolis_core.domain import Severity
 from slopolis_core.github.errors import GitHubNotFoundError
 from worker.config import WorkerConfig
 from worker.deps import ContextReader
+from worker.errors import PermanentTargetError
 
-__all__ = ["CONFIG_PATH", "PermanentTargetError", "default_repo_config", "load_repo_config"]
+__all__ = ["CONFIG_PATH", "default_repo_config", "load_repo_config"]
 
 CONFIG_PATH = ".codereview.yml"
-
-
-class PermanentTargetError(RuntimeError):
-    """A failure that cannot succeed on retry (e.g. invalid `.codereview.yml`)."""
 
 
 async def load_repo_config(

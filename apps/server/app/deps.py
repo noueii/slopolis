@@ -31,9 +31,10 @@ from app.services.github_clients import (
     InstallationClientSource,
     WorkspaceRepositories,
 )
+from app.services.live_check import CredentialClientPool, WorkspaceLiveModelCheck
 from app.services.repo_access import GitHubRepoProbe, RepoAccessChecker
-from slopolis_core.llm.client import LlmClient, LlmError
-from slopolis_core.preflight.ports import LiveModelCheck, LlmLiveModelCheck
+from slopolis_core.llm.client import LlmClient
+from slopolis_core.preflight.ports import LiveModelCheck
 from slopolis_core.preflight.service import PreflightService
 from slopolis_core.vault import SecretVault, VaultDecryptError, VaultNotConfigured
 from slopolis_db.models import User
@@ -52,7 +53,6 @@ __all__ = [
     "OptionalVaultDep",
     "PreflightServiceDep",
     "RepoAccessCheckerDep",
-    "UnconfiguredGatewayCheck",
     "VaultDep",
     "WorkspaceIdDep",
     "WorkspaceRepositoriesDep",
@@ -226,48 +226,68 @@ async def get_preflight_service(
     db: DbSessionDep,
     workspace_id: WorkspaceIdDep,
     repositories: WorkspaceRepositoriesDep,
+    settings: AppSettingsDep,
+    vault: OptionalVaultDep,
 ) -> PreflightService:
-    """Assemble a :class:`PreflightService` from the app's wired adapters."""
+    """Assemble a :class:`PreflightService` from the app's wired adapters.
+
+    The vault is optional, not required: a deployment that never configured
+    ``ENCRYPTION_KEY`` cannot open a stored key, but it still runs on its
+    process gateway, so pre-flight must keep working there (spec 10.2).
+    """
     gateway = GitHubGatewayAdapter(repositories)
-    workspace = WorkspaceConfigAdapter(db, workspace_id)
-    live_check = _live_check_from_app(request)
+    workspace = WorkspaceConfigAdapter(
+        db,
+        workspace_id,
+        vault=vault,
+        default_base_url=settings.core.litellm_base_url,
+    )
+    live_check = _live_check_from_app(request, workspace)
     return PreflightService(gateway, workspace, live_check)
 
 
 PreflightServiceDep = Annotated[PreflightService, Depends(get_preflight_service)]
 
 
-class UnconfiguredGatewayCheck:
-    """The live check a deployment without a model gateway gets.
+def _live_check_from_app(
+    request: Request, workspace: WorkspaceConfigAdapter
+) -> LiveModelCheck:
+    """Return the live check for this request's workspace.
 
-    Raised as a transport error this would hide everything else pre-flight
-    found — every submission would answer 503 before the service ever ran, and
-    the user would see one line instead of the list of things to fix (spec 10.3
-    reports validation failures as notices). Failing the port's own way puts it
-    in that list, where it belongs: it is a workspace/deployment problem, not a
-    broken request.
+    ``app.state.live_model_check`` stays the override a test or an embedder sets;
+    otherwise the check runs on the workspace's own credential, with the client
+    the app opened at boot as the fallback — and with neither, it fails naming the
+    model and both ways out, so the submission keeps whatever else pre-flight
+    found instead of losing it to a 503.
     """
+    override: LiveModelCheck | None = getattr(
+        request.app.state, "live_model_check", None
+    )
+    if override is not None:
+        return override
+    fallback: LlmClient | None = getattr(request.app.state, "llm_client", None)
+    return WorkspaceLiveModelCheck(
+        workspace,
+        clients=_live_check_clients(request),
+        fallback=fallback,
+    )
 
-    def __init__(self, reason: str) -> None:
-        self._reason = reason
 
-    async def check(self, model: str) -> None:
-        """Always fail, naming what the deployment has to configure."""
-        raise LlmError(self._reason)
+def _live_check_clients(request: Request) -> CredentialClientPool:
+    """Return the app's pool of credential clients, opening one if it has none.
 
-
-def _live_check_from_app(request: Request) -> LiveModelCheck:
-    """Return the app-owned live model check, or one that explains its absence."""
-    check: LiveModelCheck | None = getattr(request.app.state, "live_model_check", None)
-    if check is not None:
-        return check
-    llm: LlmClient | None = getattr(request.app.state, "llm_client", None)
-    if llm is None:
-        return UnconfiguredGatewayCheck(
-            "the model gateway is not configured, so no review can call a model; "
-            "set LITELLM_BASE_URL and LITELLM_MASTER_KEY on the server and restart"
-        )
-    return LlmLiveModelCheck(llm)
+    The lifespan opens the pool and closes it on shutdown, so its clients outlive
+    a request and are not re-handshaked on every submission. An app that never ran
+    the lifespan (a test, an embedded server) still gets a working check: the pool
+    is stored on the app and lives as long as the app object does.
+    """
+    clients: CredentialClientPool | None = getattr(
+        request.app.state, "live_check_clients", None
+    )
+    if clients is None:
+        clients = CredentialClientPool()
+        request.app.state.live_check_clients = clients
+    return clients
 
 
 async def get_arq_pool(request: Request) -> ArqPool:

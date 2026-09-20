@@ -62,14 +62,21 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
 def _open_llm(app: FastAPI) -> None:
     """Open the model gateway client the live check and any model call needs.
 
-    Without this the server has no way to reach a provider at all, and every
+    Also opens the pool the live check keeps its **per-credential** clients in
+    (spec 10.2): a workspace whose model is served by its own vault credential is
+    called through a client of its own, and those clients outlive a request, so
+    the pool is opened once here and closed on shutdown.
+
+    Without a gateway the server has no way to reach a provider at all, and every
     submission used to answer 503 from a dependency before pre-flight could say
     what was actually wrong. A deployment that has not configured a gateway
     still boots — reads, the install flow and settings all work — and pre-flight
     reports the missing gateway as a validation notice naming what to set.
     """
+    from app.services.live_check import CredentialClientPool
     from slopolis_core.llm.client import LiteLlmClient, LlmAuthError
 
+    app.state.live_check_clients = CredentialClientPool()
     try:
         app.state.llm_client = LiteLlmClient.from_settings()
     except LlmAuthError as exc:
@@ -80,11 +87,14 @@ def _open_llm(app: FastAPI) -> None:
 
 
 async def _close_llm(app: FastAPI) -> None:
-    """Close the gateway connection pool if one was opened."""
+    """Close the gateway connection pool and every pooled credential client."""
     llm = getattr(app.state, "llm_client", None)
     close = getattr(llm, "aclose", None)
     if close is not None:
         await close()
+    clients = getattr(app.state, "live_check_clients", None)
+    if clients is not None:
+        await clients.aclose()
 
 
 async def _open_github(app: FastAPI, settings: AppSettings) -> None:

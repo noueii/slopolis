@@ -25,6 +25,7 @@ from app.deps import (
     get_repo_access_checker,
 )
 from app.main import create_app
+from app.services.live_check import CredentialClientPool, ManagedLlmClient
 from app.services.repo_access import RepoAccessChecker
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import (
@@ -39,6 +40,7 @@ from slopolis_core.github.models import AppInstallation, InstallationRepository
 from slopolis_core.llm.client import LlmError
 from slopolis_core.preflight.models import PrReference, RepositoryRef
 from slopolis_core.preflight.service import PreflightService
+from slopolis_core.vault import SecretVault
 from slopolis_db.base import Base
 from slopolis_db.models import (
     GitHubInstallation,
@@ -53,6 +55,17 @@ from slopolis_db.models import (
 )
 
 # --- fakes ------------------------------------------------------------------
+
+
+def _refuse_network_factory(base_url: str, api_key: str) -> ManagedLlmClient:
+    """Fail a test that reaches a provider through the real live check.
+
+    The harness pools the clients the deployment's own credentials are called
+    with (spec 10.2); a test that wants that path passes a pool over its own
+    recording factory. Anything arriving here is an unintended HTTP call, so it
+    says which endpoint it would have called — never the key.
+    """
+    raise AssertionError(f"a test tried to call the model provider at {base_url}")
 
 
 class FakeArqPool:
@@ -500,25 +513,39 @@ async def add_installation(
 
 
 async def seed_review_model(
-    session: AsyncSession, workspace_id: uuid.UUID, *, model: str = "claude-sonnet-4"
-) -> None:
-    """Give a workspace an enabled credential and an assigned review model.
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    *,
+    model: str = "claude-sonnet-4",
+    vault: SecretVault | None = None,
+    api_key: str = "",
+    base_url: str | None = None,
+    enabled: bool = True,
+    link: bool = True,
+) -> ProviderCredential:
+    """Give a workspace a credential and an assigned review model.
 
     The real pre-flight assembly reads both from the database, so tests that
-    exercise it end to end need them.
+    exercise it end to end need them. ``vault`` seals a real key, which is what
+    makes the credential usable by a process holding the same master key; without
+    one the blob is a placeholder nothing can open, exactly what a deployment
+    with no ``ENCRYPTION_KEY`` sees. ``link`` is the catalog's credential link:
+    an unlinked model is one no credential serves. Returns the credential row, so
+    a test can switch it off or rotate its key.
     """
     credential = ProviderCredential(
         workspace_id=workspace_id,
         provider="Anthropic",
-        encrypted_api_key=b"\x01test",
-        key_last4="test",
-        enabled=True,
+        base_url=base_url,
+        encrypted_api_key=vault.seal(api_key) if vault is not None else b"\x01test",
+        key_last4=SecretVault.last4(api_key) if api_key else "test",
+        enabled=enabled,
     )
     session.add(credential)
     await session.flush()
     catalog = ModelCatalog(
         workspace_id=workspace_id,
-        credential_id=credential.id,
+        credential_id=credential.id if link else None,
         model_id=model,
         provider="Anthropic",
         source="imported",
@@ -533,6 +560,7 @@ async def seed_review_model(
         )
     )
     await session.commit()
+    return credential
 
 
 # --- app + client -----------------------------------------------------------
@@ -555,6 +583,8 @@ async def build_harness(
         github_clients: FakeInstallationClients[Any] | None = None,
         real_preflight: bool = False,
         unconfigured_gateway: bool = False,
+        llm_client: Any = None,
+        live_check_clients: CredentialClientPool | None = None,
         app_installations: FakeAppInstallations | None = None,
         oauth_client: FakeOAuthClient | None = None,
         repo_access: RepoAccessChecker | None = None,
@@ -609,14 +639,22 @@ async def build_harness(
             registry = FakeInstallationClients(default=github_client)
         app.state.github_clients = registry
         app.state.app_installations = app_installations
-        # The real pre-flight assembly takes its live check from the app. A
-        # deployment with no gateway has neither a check nor a client, which is
-        # the state that must still answer 200 with an explanation rather than
-        # failing the request.
+        # The real pre-flight assembly takes its live check from the app: an
+        # override here stands in for the model call, and leaving it unset is the
+        # deployment's own credential-backed check. ``llm_client`` is the gateway
+        # the app opened at boot — the check's fallback, and ``None`` when the
+        # deployment has no gateway at all, which must still answer 200 with an
+        # explanation rather than failing the request.
         app.state.live_model_check = (
             None if unconfigured_gateway else live_check or FakeLiveCheck()
         )
-        app.state.llm_client = None
+        app.state.llm_client = llm_client
+        # The per-credential clients the live check pools. Tests pass a pool over
+        # a recording factory; the default fails loudly, so a test that reaches a
+        # provider through the real check says so instead of making an HTTP call.
+        app.state.live_check_clients = live_check_clients or CredentialClientPool(
+            _refuse_network_factory
+        )
         app.state.arq_pool = pool
         # The OAuth client is process state, like the GitHub one: the routes read
         # it from the app, and leaving it unset is the unconfigured-deployment path.

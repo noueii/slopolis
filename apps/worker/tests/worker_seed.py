@@ -12,6 +12,7 @@ import datetime as dt
 import uuid
 from dataclasses import dataclass
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from worker.config import WorkerConfig
 from worker.deps import InstallationClients, InstallationRef, ReviewContext, SessionFactory
@@ -20,8 +21,10 @@ from worker.jobs.slots import SlotCounter, SlotGate, WorkspaceLimits
 from worker_fakes import (
     CATALOG_MODEL,
     CATALOG_PROVIDER,
+    CREDENTIAL_BASE_URL,
     PR_NUMBER,
     REPO_FULL_NAME,
+    FakeCredentialClients,
     FakeLlm,
     FakePublisher,
     FakeReader,
@@ -32,6 +35,7 @@ from slopolis_db.models import (
     GitHubInstallation,
     ModelAssignment,
     ModelCatalog,
+    ProviderCredential,
     Repository,
     ReviewSession,
     SessionTarget,
@@ -39,7 +43,14 @@ from slopolis_db.models import (
     Workspace,
 )
 
-__all__ = ["Harness", "Seed", "build_harness", "seed_and_build", "seed_graph"]
+__all__ = [
+    "Harness",
+    "Seed",
+    "build_harness",
+    "link_credential",
+    "seed_and_build",
+    "seed_graph",
+]
 
 
 @dataclass(frozen=True)
@@ -160,12 +171,17 @@ def build_harness(
     config: WorkerConfig | None = None,
     job_try: int = 1,
     redis: SlotCounter | None = None,
+    credentials: FakeCredentialClients | None = None,
+    gateway: bool = True,
 ) -> Harness:
     """Wire a ReviewContext whose client factory returns the seeded fakes.
 
     ``redis`` is what turns the slot gate on: without it the context looks the
     way it did before spec 10.5, which is the shape the caps-are-unset deployment
-    has too.
+    has too. ``gateway=False`` models a worker whose process gateway is
+    unconfigured — what ``on_startup`` stores when no master key is set — so the
+    context has only workspace credentials to run a model on. ``credentials`` is
+    the seam that stands in for the client a credential builds.
     """
     worker_config = (
         config if config is not None else WorkerConfig(WORKER_MAX_TRIES=4, WORKER_RETRY_BACKOFF_S=1)
@@ -177,9 +193,10 @@ def build_harness(
         return InstallationClients(reader=seed.reader, publisher=seed.publisher)
 
     review = ReviewContext(
-        llm=seed.llm,
+        llm=seed.llm if gateway else None,
         config=worker_config,
         client_factory=client_factory,
+        credential_client_factory=credentials,
     )
     ctx: WorkerCtx = {
         "review": review,
@@ -201,6 +218,8 @@ async def seed_and_build(
     redis: SlotCounter | None = None,
     repo_cap: int | None = None,
     installation_cap: int | None = None,
+    credentials: FakeCredentialClients | None = None,
+    gateway: bool = True,
 ) -> Harness:
     """Seed the graph, then return a harness wired to the supplied fakes."""
     async with session_factory() as db:
@@ -221,4 +240,45 @@ async def seed_and_build(
         config=config,
         job_try=job_try,
         redis=redis,
+        credentials=credentials,
+        gateway=gateway,
     )
+
+
+async def link_credential(
+    session_factory: SessionFactory,
+    *,
+    workspace_id: uuid.UUID,
+    encrypted_api_key: bytes,
+    base_url: str | None = CREDENTIAL_BASE_URL,
+    model_id: str = CATALOG_MODEL,
+    enabled: bool = True,
+) -> uuid.UUID:
+    """Store a credential and link ``model_id`` to it; return the credential id.
+
+    The caller supplies the sealed blob — sealed with the vault the process will
+    resolve, or a blob from some other key — so this helper never reads
+    ``ENCRYPTION_KEY`` itself.
+    """
+    async with session_factory() as db:
+        credential = ProviderCredential(
+            workspace_id=workspace_id,
+            provider=CATALOG_PROVIDER,
+            base_url=base_url,
+            encrypted_api_key=encrypted_api_key,
+            key_last4="0000",
+            enabled=enabled,
+        )
+        db.add(credential)
+        await db.flush()
+        catalog = (
+            await db.execute(
+                select(ModelCatalog).where(
+                    ModelCatalog.workspace_id == workspace_id,
+                    ModelCatalog.model_id == model_id,
+                )
+            )
+        ).scalar_one()
+        catalog.credential_id = credential.id
+        await db.commit()
+        return credential.id

@@ -47,6 +47,7 @@ from slopolis_core.harness import (
     ToolSpec,
     agent_spec,
 )
+from slopolis_core.llm.client import LlmClient
 from slopolis_core.review.harness import ReviewHarness, ReviewResult
 from slopolis_core.settings import get_settings
 from slopolis_db.models import Finding, SessionTargetRun
@@ -56,16 +57,17 @@ from worker.deps import (
     ReviewContext,
     SessionFactory,
 )
+from worker.errors import PermanentTargetError
 from worker.jobs import persistence
 from worker.jobs.agent_runs import RunRecorder, RunRef
 from worker.jobs.loading import LoadOutcome, TargetJob, load_target
 from worker.jobs.model_selection import ResolvedModel, resolve_model
 from worker.jobs.publish import PublishPlan, publish
 from worker.jobs.publishing import InlineTarget, inline_targets
-from worker.jobs.repo_config_load import PermanentTargetError, load_repo_config
+from worker.jobs.repo_config_load import load_repo_config
 from worker.jobs.slots import SLOT_WAIT_FOREVER, SlotGate, SlotUnavailable
 
-__all__ = ["PermanentTargetError", "WorkerCtx", "review_target"]
+__all__ = ["WorkerCtx", "review_target"]
 
 _LOG = logging.getLogger("worker.review_target")
 
@@ -291,13 +293,17 @@ async def _run_attempt(
 async def _execute(
     *, db: AsyncSession, review: ReviewContext, job: TargetJob, tree: _AttemptTree
 ) -> _AttemptPlan:
-    """Resolve the model, re-read the PR, load repo config, and run the reviewer."""
+    """Resolve the model client, re-read the PR, load repo config, and review."""
     model = await resolve_model(
         db,
         workspace_id=job.workspace.id,
         fallback_model=job.session.model,
         fallback_provider=job.session.provider,
     )
+    # Before any GitHub work: a model neither a credential nor the gateway can
+    # serve is a configuration failure, and it should not cost a PR read — or a
+    # retry — to discover that (spec 10.2).
+    llm = review.client_for(model_id=model.model_id, credential=model.credential)
     clients = await review.build_clients(InstallationRef(job.installation.installation_id))
     pull = await clients.reader.get_pull_request(job.repo_full_name, job.target.number)
     repo_config = await load_repo_config(
@@ -310,6 +316,7 @@ async def _execute(
         clients=clients,
         tree=tree,
         model=model,
+        llm=llm,
         repo_config=repo_config,
     )
     return _AttemptPlan(clients=clients, result=result, pull=pull, repo_config=repo_config)
@@ -323,6 +330,7 @@ async def _run_reviewer(
     clients: InstallationClients,
     tree: _AttemptTree,
     model: ResolvedModel,
+    llm: LlmClient,
     repo_config: RepoConfig,
 ) -> ReviewResult:
     """Run this attempt's review as one ``sub`` run of the target's PR run (§15).
@@ -335,7 +343,7 @@ async def _run_reviewer(
     outcome = _TurnOutcome()
     runtime = AgentRuntime(
         llm=_ReviewTurn(
-            harness=review.build_harness(clients.reader),
+            harness=review.build_harness(clients.reader, llm),
             model=model,
             job=job,
             repo_config=repo_config,

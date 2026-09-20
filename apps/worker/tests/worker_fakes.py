@@ -11,6 +11,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from worker.credentials import ResolvedCredential
+
 from slopolis_core.context import PrContext
 from slopolis_core.github.errors import GitHubNotFoundError
 from slopolis_core.github.models import GitHubPullRequest, InlineComment
@@ -23,20 +25,47 @@ REPO_FULL_NAME = "acme/api"
 PR_NUMBER = 42
 CATALOG_MODEL = "gpt-4o-mini"
 CATALOG_PROVIDER = "openai"
+#: The workspace credential a test links to the catalog model when it wants one.
+CREDENTIAL_BASE_URL = "https://byok.example"
+CREDENTIAL_KEY = "sk-workspace-credential"
 
 __all__ = [
     "CATALOG_MODEL",
     "CATALOG_PROVIDER",
+    "CREDENTIAL_BASE_URL",
+    "CREDENTIAL_KEY",
     "FINDING_PATH",
     "HEAD_BRANCH",
     "HEAD_SHA",
     "PR_NUMBER",
     "REPO_FULL_NAME",
+    "FakeCredentialClients",
     "FakeLlm",
     "FakePublisher",
     "FakeReader",
     "FakeRedis",
 ]
+
+
+class FakeCredentialClients:
+    """The credential-client seam: records each credential it is handed.
+
+    Returns a fresh :class:`FakeLlm` per credential so a test can tell the
+    credential's client from the fallback gateway by which one was asked to
+    review, and its ``built`` pairs are the base URL and key each client was
+    built from.
+    """
+
+    def __init__(self, *responses: str) -> None:
+        self._responses = list(responses)
+        self.built: list[tuple[str, str]] = []
+        self.llms: list[FakeLlm] = []
+
+    def __call__(self, credential: ResolvedCredential) -> FakeLlm:
+        self.built.append((credential.base_url, credential.api_key))
+        llm = FakeLlm(list(self._responses))
+        self.llms.append(llm)
+        return llm
 
 
 class FakeRedis:
@@ -98,6 +127,12 @@ class FakeLlm:
     def __init__(self, responses: list[str]) -> None:
         self._responses = list(responses)
         self.models: list[str] = []
+        #: Set by :meth:`aclose`, the way a real client records its pool closing.
+        self.closed = False
+
+    async def aclose(self) -> None:
+        """Record that the connection pool this client owns was shut down."""
+        self.closed = True
 
     async def complete(
         self,

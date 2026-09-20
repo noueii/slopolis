@@ -21,6 +21,43 @@ sign-in form in the app.
 - The login route is a browser navigation, so a deployment without OAuth credentials answers it
   with **503 `oauth_not_configured`**; the gate reports that message instead of navigating into
   the raw error body.
+- **Login is bound to the browser that started it.** `GET /api/auth/github/login` mints a
+  single-use `state` (32 random bytes, URL-safe) and sets it in a short-lived signed httpOnly
+  cookie scoped to `/api/auth`; the authorize URL carries the same value. The callback accepts a
+  `code` **only** when the `state` query parameter matches that cookie (constant-time compare) and
+  clears the cookie either way. Missing, mismatched, or replayed state is **400
+  `invalid_oauth_state`** with nothing exchanged — an attacker who obtains a `code` cannot plant
+  it in a victim's browser.
+- The callback also keeps the **user's access token** in the workspace vault
+  (`users.encrypted_github_token`, sealed with spec 10.2's `SecretVault`). It is the only token
+  that can answer "may this member read this repository?". A deployment with no `ENCRYPTION_KEY`
+  still signs in — it stores no token and every repo-access check is then unverifiable
+  (10.8 §Access). The token is never logged, never returned by an endpoint, and never leaves the
+  server except to GitHub.
+
+## Repository selection in the app
+
+Install covers accounts and repositories on GitHub's side (all or selected); which of those
+repositories this workspace actually reviews is the app's decision, not GitHub's.
+
+- `connected` (from the installation sync) means the installation still grants the repository.
+- `enabled` is the workspace's own switch: a connected repository can be **disabled** so it stays
+  listed with its history but is refused at pre-flight, and re-enabled at any time.
+- Both transitions are audited; disabling never deletes sessions or findings.
+
+## Webhooks
+
+The setup callback records an installation once; **`POST /api/github/webhook` keeps it current**
+afterwards, so the app stops depending on the user revisiting the install page.
+
+- The endpoint verifies `X-Hub-Signature-256` (HMAC-SHA256 of the raw body with
+  `GITHUB_WEBHOOK_SECRET`) before parsing. An unset secret or a bad signature is **401** with no
+  body processing; there is no unauthenticated mode.
+- Handled events, each reduced to a row write: `installation` (created/deleted/suspend/unsuspend),
+  `installation_repositories` (added/removed), `repository` (renamed/transferred/deleted).
+- Delivery is idempotent: the same event applied twice leaves the same rows. `ping` answers 202.
+- **Triggering reviews from comments stays Phase 2.** This endpoint only synchronizes
+  installations and repositories; it never creates a session.
 
 ## Onboarding and workspace membership
 

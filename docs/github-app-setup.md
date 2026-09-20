@@ -28,9 +28,11 @@ This guide creates that App and puts its credentials where the server and worker
 Read-only is enough to *browse* (repositories, PR picker, pre-flight), but the review cannot
 publish without the three write scopes — the check run and comments are the deliverable.
 
-**Events:** none. There is no webhook endpoint yet (Phase 2), so leave **Active** deselected and
-the webhook URL and secret empty. `GITHUB_WEBHOOK_SECRET` exists in the settings but nothing
-consumes it today.
+**Events:** subscribe to **Installation**, **Installation repositories**, and **Repository** (see §9);
+slopolis also answers a `ping` delivery. Everything else is accepted and ignored. Set **Active**,
+point the **Webhook URL** at `{APP_URL}/api/github/webhook`, and generate a **Webhook secret** —
+`GITHUB_WEBHOOK_SECRET` must carry the same value or every delivery is refused with
+`401 invalid_signature` (there is no unauthenticated mode).
 
 ---
 
@@ -46,9 +48,10 @@ consumes it today.
    development, and up to 10 callback URLs are allowed, so add the deployed one later.
    The server builds this URL as `APP_URL + /api/auth/github/callback`; if the two disagree,
    GitHub rejects the sign-in.
-5. **Expire user authorization tokens** — **deselect.** The server keeps no user token (only a
-   signed cookie carrying the user id), so expiring tokens would just force a re-login after 8
-   hours with no way to refresh.
+5. **Expire user authorization tokens** — **deselect.** The server keeps the user's token (sealed
+   with `ENCRYPTION_KEY`) because it is the only thing that can answer "may this member read this
+   repository?" (see spec 10.8 §Access). There is no refresh flow, so an expiring token would
+   silently turn every access check into "unverifiable" after eight hours.
 6. **Request user authorization (OAuth) during installation** — optional. Selecting it makes
    GitHub send the browser to the Callback URL with a `code` right after an install, which this
    server accepts (the callback only requires `code`). Leaving it deselected means users sign in
@@ -59,7 +62,8 @@ consumes it today.
    repositories it covers.
 8. **Redirect on update** — **select.** Adding or removing repositories then re-syncs through the
    same URL instead of waiting for a manual reinstall.
-9. **Webhook → Active** — deselect (see §1).
+9. **Webhook → Active** — **select**, with the Webhook URL from §1 and a generated secret
+   (`openssl rand -hex 32`) recorded as `GITHUB_WEBHOOK_SECRET` in §4.
 10. **Permissions** — grant the five repository permissions from §1. Metadata, Contents stay
    Read-only; Pull requests, Checks, Issues are Read & write.
 11. **Where can this GitHub App be installed?** — **Any account** if you review organization
@@ -76,6 +80,7 @@ consumes it today.
 | Client ID | "About" section, e.g. `Iv23liwr…` | `GITHUB_CLIENT_ID` |
 | Client secret | **Generate a new client secret** (shown once — copy it) | `GITHUB_CLIENT_SECRET` |
 | Private key | **Generate a private key** → downloads `<slug>.YYYY-MM-DD.private-key.pem` | `GITHUB_APP_PRIVATE_KEY` |
+| Webhook secret | the value you typed under **Webhook → Secret** in §2 | `GITHUB_WEBHOOK_SECRET` |
 
 App ID and Client ID are different values; both are required. GitHub never shows the private key
 again — the downloaded file is the only copy. You can generate additional keys (and revoke old
@@ -95,6 +100,7 @@ cp .env.example apps/worker/.env   # what `make worker` reads (same values)
 # Docker Compose is the exception: it reads the repo-root .env (infra/.env.example documents it)
 openssl rand -base64 32      # ENCRYPTION_KEY
 openssl rand -hex 32         # COOKIE_SECRET (signs the session cookie)
+openssl rand -hex 32         # GITHUB_WEBHOOK_SECRET (must match the App's Webhook secret)
 ```
 
 A repo-root `.env` alone is **not** enough for `make api`: the server would see no credentials and
@@ -198,24 +204,33 @@ selection, with "Redirect on update" on) refreshes the same rows instead of dupl
 
 ## 7. Current limitations
 
-Verified against the code on `main` today; each is a candidate follow-up:
+Verified against the code on this branch today; each is a candidate follow-up:
 
-1. **No webhooks, so no live sync.** Installations and repositories are recorded by the setup
-   callback (§2) and refreshed only when the user installs again or changes the selection. A
-   repository renamed or removed on GitHub keeps its old row until then (it is marked
-   `connected: false` only when a later sync reports it missing).
-2. **One installation at a time.** The server resolves the first installation at startup and every
-   request mints its token for it, so `/api/repositories` and pre-flight only see that
-   installation's repositories; with no installation at all the client stays disabled until the
-   process restarts (the startup log says so). The worker is unaffected — it mints a token per
-   installation per job.
-3. **Repository access is managed on GitHub.** The Repositories screen's *Connect repository* button
-   starts the install flow (`/api/github/install` → GitHub's install page); which accounts and
-   repositories the App covers is chosen there, and there is no in-app picker or removal.
-4. **No OAuth `state`.** The callback accepts any `code`, so it is not bound to the browser that
-   started the flow (login-CSRF). Adding a signed, single-use, browser-bound state is a follow-up.
-5. **`GITHUB_WEBHOOK_SECRET` is unused** until webhooks land (Phase 2), and `CORS_ORIGINS` still
-   defaults to the old dev port `:5173` while the web dev server runs on `:8000`.
+1. **Webhooks synchronize, they do not trigger.** `POST /api/github/webhook` (§9) keeps
+   installations and repositories current. Comment triggers (`@slopolis review`), auto-triggers and
+   thread replies are Phase 2, and no delivery creates a review session. Live pull-request and CI
+   state is still read on demand, cached for 30 seconds.
+2. **Repository reads follow each repository's own installation.** A workspace can hold several
+   installations, and `/api/repositories` and pre-flight read each repository through the
+   installation that grants it — a second installation (another org or account) is picked up by the
+   next request, with no restart — while an installation that cannot mint a token keeps its rows
+   listed without a live open-PR count. What is still true:
+   - Adding a repository the App does not cover, or removing one, still happens **on GitHub**
+     (item 3): the app can park a connected repository but cannot install or remove one.
+   - Reading a repository whose installation cannot mint a token (a suspended installation, or the
+     placeholder row an unsynced account gets) reports `503 github_not_configured`.
+3. **Repository selection is split.** *Connect repository* starts the install flow
+   (`/api/github/install` → GitHub's install page), and which accounts and repositories the App
+   covers is chosen there. Inside the app, a connected repository can be **parked** (disabled):
+   it stays listed with its history, and pre-flight refuses its pull requests by name.
+4. **Access checks need a stored user token.** Reads are filtered by the viewer's own repository
+   access (spec 10.8 §Access), which is verified with that user's token, sealed at sign-in. Without
+   `ENCRYPTION_KEY` — or after a user revokes the App — nothing can be verified for repositories the
+   viewer did not trigger, and the API answers `403 repo_access_unverified` rather than showing
+   less. Sign-in itself still works without a vault.
+5. **`CORS_ORIGINS` still defaults to `:5173`** while the web dev server runs on `:8000`. The dev
+   proxy makes this invisible locally; a browser calling the API cross-origin would need the value
+   updated.
 6. **Env files are per-process.** The server reads `apps/server/.env` and the worker
    `apps/worker/.env`; only Docker Compose reads the repo-root `.env`. A single root file silently
    leaves `make api` unconfigured.
@@ -229,6 +244,11 @@ Verified against the code on `main` today; each is a candidate follow-up:
 | OAuth sign-in, callback, cookie, `/me`, `POST /auth/logout` | `apps/server/app/auth.py` |
 | Install redirect and the setup callback | `apps/server/app/routers/github_install.py` |
 | Recording an installation and its repositories | `apps/server/app/services/installation_sync.py` |
+| Webhook ingest (signature check) and the sync it applies | `apps/server/app/routers/webhooks.py`, `apps/server/app/services/webhook_sync.py` |
+| Per-viewer repository access (the user's token, cached checks) | `apps/server/app/services/repo_access.py` |
+| Sealing credentials and user tokens (AES-256-GCM envelope) | `packages/core/slopolis_core/vault.py` |
+| Agent run tree and event replay | `apps/server/app/routers/runs.py` |
+| Per-installation GitHub clients on the server (repository reads, pre-flight) | `apps/server/app/services/github_clients.py` |
 | App JWT: slug, installation lookup, repository listing | `packages/core/slopolis_core/github/app_installations.py` |
 | Cookie signing and user decoding | `apps/server/app/deps.py` (`encode_user_id`, `decode_user_id`) |
 | Settings (core + server) | `packages/core/slopolis_core/settings.py`, `apps/server/app/config.py` |
@@ -236,3 +256,38 @@ Verified against the code on `main` today; each is a candidate follow-up:
 | Review reads (files, diffs, `.codereview.yml`) | `packages/core/slopolis_core/github/repo_reads.py` |
 | Publishing (summary comment, inline comments, check run) | `packages/core/slopolis_core/github/publisher.py` |
 | Pre-flight access policy and repo coverage | `packages/core/slopolis_core/preflight/service.py` |
+
+---
+
+## 9. Webhooks
+
+With a webhook secret configured (§1, §4), GitHub keeps the app's view of installations and
+repositories current without anyone revisiting the install page. A delivery whose signature does
+not verify is refused with `401 invalid_signature`; the endpoint never consumes an unauthenticated
+body.
+
+Subscribed events, and what each one writes:
+
+| Event | Applied |
+|---|---|
+| `installation` | `created`/`unsuspend` upserts the installation and reconnects its repositories; `deleted`/`suspend` marks them `connected: false` (rows and history stay). |
+| `installation_repositories` | `repositories_added` upserts and reconnects; `repositories_removed` marks `connected: false`. |
+| `repository` | `renamed`/`transferred` updates the row's full name, visibility and branch — matched on GitHub's numeric repository id, so a rename never creates a second row; `deleted` marks it `connected: false`. |
+| `ping` | Answered `202`; nothing is written. |
+
+Every other event type is accepted and ignored (`202`), and deliveries are idempotent: replaying
+the same one leaves the same rows.
+
+Smoke-test the endpoint locally by signing a `ping` yourself:
+
+```bash
+SECRET=$(grep -m1 '^GITHUB_WEBHOOK_SECRET=' apps/server/.env | cut -d= -f2-)
+BODY='{"zen":"Keep it logically awesome."}'
+SIG=$(python3 -c "import hmac,hashlib,sys;print('sha256='+hmac.new(sys.argv[1].encode(),sys.argv[2].encode(),hashlib.sha256).hexdigest())" "$SECRET" "$BODY")
+curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8400/api/github/webhook \
+  -H "X-GitHub-Event: ping" -H "X-Hub-Signature-256: $SIG" -d "$BODY"
+# → 202 with a secret set, 401 without one
+```
+
+To let GitHub reach a local server, expose it (e.g. `gh webhook forward` or a tunnel) and use that
+public URL as the App's Webhook URL; the secret is the part that matters for verification.

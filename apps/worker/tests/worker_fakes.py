@@ -207,21 +207,34 @@ class FakeReader:
 
 @dataclass
 class FakePublisher:
-    """Records every publish call and returns deterministic ids."""
+    """Records every publish call and returns deterministic ids.
+
+    ``fail_with`` is the failure knob: set it to make every write raise, the way
+    GitHub answers a refused or throttled request, and clear it mid-test to let a
+    later attempt through.
+    """
 
     summaries: list[tuple[str, int, str, int | None]] = field(default_factory=list)
     inlines: list[tuple[str, int, list[InlineComment], str]] = field(default_factory=list)
     checks: list[tuple[str, str, str, str, str]] = field(default_factory=list)
+    #: When set, every publish method raises it instead of recording a call.
+    fail_with: Exception | None = None
+
+    def _refuse(self) -> None:
+        if self.fail_with is not None:
+            raise self.fail_with
 
     async def upsert_summary_comment(
         self, repo_full_name: str, number: int, body: str, existing_comment_id: int | None
     ) -> int:
+        self._refuse()
         self.summaries.append((repo_full_name, number, body, existing_comment_id))
         return 101
 
     async def post_inline_comments(
         self, repo_full_name: str, number: int, comments: list[InlineComment], commit_id: str
     ) -> list[int]:
+        self._refuse()
         self.inlines.append((repo_full_name, number, comments, commit_id))
         return [201 + index for index in range(len(comments))]
 
@@ -234,5 +247,6 @@ class FakePublisher:
         title: str,
         summary: str,
     ) -> int:
+        self._refuse()
         self.checks.append((repo_full_name, head_sha, conclusion, title, summary))
         return 303

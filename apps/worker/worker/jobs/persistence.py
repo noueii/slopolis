@@ -10,8 +10,10 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 from decimal import Decimal
+from typing import Any, cast
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from slopolis_core.domain import SessionStatus, TargetStatus
@@ -22,6 +24,7 @@ from slopolis_db.models import Finding, SessionTarget, SessionTargetRun, UsageRe
 from worker.jobs.agent_runs import finish_session_main_run
 
 __all__ = [
+    "discard_unposted_findings",
     "fail_run",
     "fail_target",
     "finish_run",
@@ -85,6 +88,26 @@ async def persist_findings(
     db.add_all(rows)
     await db.flush()
     return rows
+
+
+async def discard_unposted_findings(db: AsyncSession, target_id: uuid.UUID) -> int:
+    """Delete a target's findings that never reached GitHub; return how many.
+
+    A retried attempt persists its findings *before* it publishes (spec 10.7), so
+    a publish that fails leaves rows behind that the retry would duplicate. Only
+    the unposted ones go: a posted row is the app's only link to a comment that
+    exists on the PR, and deleting it would lose that link, not just a duplicate
+    (spec 10.9).
+    """
+    result = await db.execute(
+        delete(Finding)
+        .where(Finding.target_id == target_id, Finding.posted.is_(False))
+        # The deleted rows belong to an attempt whose session is about to end;
+        # syncing the identity map would only refresh them to say goodbye.
+        .execution_options(synchronize_session=False)
+    )
+    await db.flush()
+    return cast("CursorResult[Any]", result).rowcount
 
 
 async def persist_usage(

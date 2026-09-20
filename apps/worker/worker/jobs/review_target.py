@@ -5,10 +5,12 @@ enqueues once per PR target. It loads the target graph, guards on terminal and
 cancelled state, opens the target's nodes in the Harness V1.1 run tree (the
 session's `main` run and this target's `pr` run, then the reviewer's `sub` run),
 runs the single-pass harness, persists findings and usage, publishes to GitHub,
-and recomputes the parent session. Transient failures retry with bounded
-exponential backoff; permanent failures (invalid repo config) fail the target
-immediately. One target's failure never affects another — they are separate
-jobs.
+and recomputes the parent session. The review's output is committed before
+anything is posted, so a refused or unreachable publish leaves the findings
+visible rather than erasing the run's expensive half. Transient failures retry
+with bounded exponential backoff; permanent failures (invalid repo config, an
+installation GitHub refused to authorize) fail the target immediately. One
+target's failure never affects another — they are separate jobs.
 
 The target's per-repository and per-installation caps are applied here too
 (spec 10.5): before an attempt starts, the job holds a run slot per capped
@@ -33,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from slopolis_core.config.repo_config import RepoConfig
 from slopolis_core.domain import TargetStatus
 from slopolis_core.findings import Finding as CoreFinding
+from slopolis_core.github.errors import GitHubAuthError
 from slopolis_core.github.models import GitHubPullRequest
 from slopolis_core.harness import (
     AgentRuntime,
@@ -84,6 +87,14 @@ _SUB_DEPTH = 2
 #: failed). The review outcome is unchanged — no findings — but the node's message
 #: event still says why, instead of the node looking like it never spoke.
 _NO_OUTPUT_NOTE = "no model output for this review pass"
+
+#: Appended to a 403 refusal. Retrying cannot fix a permission the App was never
+#: granted, and the operator reading the failed target is the only one who can
+#: grant it, so the stored error names the scope and where to apply it (§10.7).
+_PERMISSION_HINT = (
+    "the GitHub App installation cannot write: grant Pull requests, Issues and Checks "
+    "'Read & write' on the App, then approve the update for the installation"
+)
 
 
 class WorkerCtx(TypedDict):
@@ -259,14 +270,26 @@ async def _run_attempt(
         # Each run's row and its events become visible together, and before the
         # attempt's own writes, so no node reports a status without its log (§8).
         await db.commit()
+        # Publishing is inside the guarded region: a refused or throttled write is
+        # an attempt failure like any other, and it must close the attempt row
+        # instead of escaping the job with the target stuck ``running`` (§10.7).
+        await _persist_and_publish(db=db, job=job, run=run, ids=ids, plan=plan)
     except PermanentTargetError as exc:
+        await _fail_permanently(db=db, job=job, run=run, ids=ids, tree=tree, exc=exc)
+        return
+    except GitHubAuthError as exc:
+        # A missing App permission or a revoked token is not a transient state:
+        # waiting cannot grant it, so the target fails now instead of paying for
+        # the same review again and being refused the same way (§10.7). The
+        # attempt's findings are already committed and stay visible.
+        # ``GitHubRateLimitError`` is a sibling of this error rather than a
+        # subclass, so a throttled 403 still reaches the retry handler below.
         await _fail_permanently(db=db, job=job, run=run, ids=ids, tree=tree, exc=exc)
         return
     except Exception as exc:  # classified as retryable or terminal below
         await _fail_retryable(ctx=ctx, db=db, job=job, run=run, ids=ids, tree=tree, exc=exc)
         return
 
-    await _persist_and_publish(db=db, job=job, run=run, ids=ids, plan=plan)
     duration_ms = int((time.monotonic() - started) * 1000)
     await persistence.finish_run(
         db, target=job.target, run=run, now=_now(), duration_ms=duration_ms
@@ -525,7 +548,15 @@ async def _persist_and_publish(
     ids: _Ids,
     plan: _AttemptPlan,
 ) -> None:
-    """Persist findings, publish to GitHub, then stamp findings and usage."""
+    """Commit the review's output, then publish it to GitHub.
+
+    The findings and the usage they cost are the expensive half of an attempt and
+    are committed *before* anything is posted: a publish GitHub refuses or never
+    answers then leaves them visible in the app, and the attempt's failure writes
+    (which begin with a rollback) cannot undo a commit. Posting is the last thing
+    an attempt does, and the comment ids it returns are stamped on the rows that
+    are already durable (spec 10.7).
+    """
     job.target.head_branch = plan.pull.head_branch
     inline = inline_targets(
         plan.result.findings,
@@ -535,6 +566,17 @@ async def _persist_and_publish(
     rows = await persistence.persist_findings(
         db, target_id=ids.target, run_id=ids.run, findings=plan.result.findings
     )
+    await persistence.persist_usage(
+        db,
+        workspace_id=ids.workspace,
+        session_id=ids.session,
+        target_id=ids.target,
+        model_id=plan.result.model,
+        provider=plan.result.provider,
+        result=plan.result,
+    )
+    persistence.record_run_usage(job.target, run, plan.result)
+    await db.commit()
     outcome = await publish(
         plan.clients.publisher,
         PublishPlan(
@@ -549,16 +591,6 @@ async def _persist_and_publish(
         ),
     )
     _stamp_posted(rows=rows, inline=inline, comment_ids=outcome.inline_comment_ids)
-    await persistence.persist_usage(
-        db,
-        workspace_id=ids.workspace,
-        session_id=ids.session,
-        target_id=ids.target,
-        model_id=plan.result.model,
-        provider=plan.result.provider,
-        result=plan.result,
-    )
-    persistence.record_run_usage(job.target, run, plan.result)
 
 
 def _stamp_posted(
@@ -571,6 +603,21 @@ def _stamp_posted(
         row.github_comment_id = comment_id
 
 
+def _error_text(exc: Exception) -> str:
+    """Format one attempt failure for storage, with the advice a 403 needs.
+
+    A 403 is a permission refusal — the installed App lacks the write scope — and
+    a 401 is bad or expired credentials; both arrive as
+    :class:`GitHubAuthError`, discriminated by the status the client recorded in
+    its message. Only the permission case gets instructions, because only it asks
+    the operator to change something (spec 10.7).
+    """
+    text = f"{type(exc).__name__}: {exc}"
+    if isinstance(exc, GitHubAuthError) and "403" in str(exc):
+        return f"{text} — {_PERMISSION_HINT}"
+    return text
+
+
 async def _fail_permanently(
     *,
     db: AsyncSession,
@@ -580,9 +627,9 @@ async def _fail_permanently(
     tree: _AttemptTree,
     exc: Exception,
 ) -> None:
-    """Mark the target failed without retrying (e.g. invalid config)."""
+    """Mark the target failed without retrying (e.g. invalid config, no App permission)."""
     await db.rollback()
-    error = f"{type(exc).__name__}: {exc}"
+    error = _error_text(exc)
     await persistence.fail_target(db, target=job.target, run=run, error=error, now=_now())
     await tree.recorder.finish(tree.pr.id, AgentStatus.FAILED, summary=error, error=error)
     await persistence.recompute_session(db, job.session_id)
@@ -607,11 +654,18 @@ async def _fail_retryable(
     await db.rollback()
     config = ctx["review"].config
     attempt = int(ctx.get("job_try", 1))
-    error = f"{type(exc).__name__}: {exc}"
+    error = _error_text(exc)
     # The PR run follows the target: it stays reusable while the target is still
     # running, and its node records the failed attempt either way (§11).
     await tree.recorder.finish(tree.pr.id, AgentStatus.FAILED, summary=error, error=error)
     if attempt < config.max_tries:
+        # This attempt's findings are already committed (§10.7), and the retry is
+        # about to produce its own copy of them: drop the unposted ones so the
+        # target does not end up showing the same nit twice. A posted finding is
+        # the app's link to a comment that is on the PR, so it is never dropped.
+        # On the final failure below there is no retry to duplicate anything, and
+        # the findings of the attempt that did run are worth keeping visible.
+        discarded = await persistence.discard_unposted_findings(db, ids.target)
         await persistence.fail_run(db, run=run, error=error, now=_now())
         await db.commit()
         _LOG.warning(
@@ -620,6 +674,7 @@ async def _fail_retryable(
                 "session_id": str(ids.session),
                 "target_id": str(ids.target),
                 "attempt": attempt,
+                "discarded_findings": discarded,
                 "error": error,
             },
         )

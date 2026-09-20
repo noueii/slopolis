@@ -3,6 +3,11 @@
 Owns the network sequence: rolling summary comment, inline comments, and the
 check run, honoring the repo config's output toggles. Returns the ids it
 created so the job can stamp the persisted findings.
+
+Callers must have committed the findings and usage this publishes *before*
+calling here: publishing is the one step that can be refused by a permission the
+review cannot control, and a failure afterwards must not cost the run its
+output.
 """
 
 from __future__ import annotations

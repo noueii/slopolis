@@ -26,13 +26,14 @@ from worker_fakes import (
     HEAD_SHA,
     REPO_FULL_NAME,
     FakeLlm,
+    FakePublisher,
     FakeReader,
     FakeRedis,
 )
 from worker_seed import Harness, seed_and_build
 
 from slopolis_core.domain import TargetStatus
-from slopolis_core.github.errors import GitHubError
+from slopolis_core.github.errors import GitHubAuthError, GitHubError, GitHubRateLimitError
 from slopolis_core.llm.models import ChatMessage, CompletionResult
 from slopolis_db.models import (
     Finding,
@@ -52,6 +53,15 @@ _FINDINGS_JSON = (
 )
 
 _INVALID_CONFIG = "review:\n  severity_threshold: [not, a, severity]\n"
+
+#: What the client raises when an installation was never granted write scope —
+#: the live failure this lifecycle guards against.
+_PERMISSION_REFUSAL = GitHubAuthError(
+    "GitHub authorization failed during async_create_issue_comment (HTTP 403)"
+)
+
+#: What it raises when a write is throttled instead; retrying this one is right.
+_THROTTLED = GitHubRateLimitError("GitHub rate limit hit during upsert_summary_comment")
 
 #: Caps being enforced, with a wait no test runs out by accident.
 _GATE_CONFIG = WorkerConfig(
@@ -372,6 +382,98 @@ async def test_final_attempt_failure_marks_target_and_session_failed(
     assert runs[-1].status == "failed"
     assert runs[-1].error is not None and "GitHubError" in runs[-1].error
     assert (await _session(h)).status == "failed"
+
+
+async def test_publish_permission_refusal_fails_target_and_keeps_findings(
+    session_factory: SessionFactory,
+) -> None:
+    # Given a GitHub App installation that refuses every write (403)
+    h = await seed_and_build(
+        session_factory,
+        publisher=FakePublisher(fail_with=_PERMISSION_REFUSAL),
+        llm=FakeLlm([_FINDINGS_JSON]),
+    )
+
+    # When the job runs, it gives up on the target instead of paying for the same
+    # review a second time
+    await _run(h)
+
+    # Then exactly one attempt was made and the target is failed with the advice
+    # the operator needs to fix the permission
+    runs = await _runs(h)
+    assert len(runs) == 1
+    assert runs[0].attempt == 1
+    assert runs[0].status == "failed"
+    assert runs[0].error is not None
+    assert "GitHubAuthError" in runs[0].error
+    assert "(HTTP 403)" in runs[0].error
+    assert "grant Pull requests, Issues and Checks 'Read & write'" in runs[0].error
+    assert (await _target(h)).status == "failed"
+    assert (await _session(h)).status == "failed"
+
+    # ... no attempt is left open, and the failed attempt's spend is recorded
+    assert all(run.status != "running" for run in runs)
+    usage = await _usage(h)
+    assert len(usage) == 1
+    assert usage[0].total_tokens == 15
+
+    # ... and the review the target already paid for is still visible in the app,
+    # unposted because GitHub never accepted it
+    findings = await _findings(h)
+    assert len(findings) == 2
+    assert [row.run_id for row in findings] == [runs[0].id, runs[0].id]
+    assert all(row.posted is False for row in findings)
+    assert all(row.github_comment_id is None for row in findings)
+
+
+async def test_publish_throttled_retries_and_drops_the_failed_attempts_findings(
+    session_factory: SessionFactory,
+) -> None:
+    # Given a publish throttled on the first of two permitted attempts
+    publisher = FakePublisher(fail_with=_THROTTLED)
+    h = await seed_and_build(
+        session_factory,
+        publisher=publisher,
+        llm=FakeLlm([_FINDINGS_JSON, _FINDINGS_JSON]),
+        config=WorkerConfig(WORKER_MAX_TRIES=2, WORKER_RETRY_BACKOFF_S=1),
+        job_try=1,
+    )
+
+    # When the job runs it defers a retry, closing the attempt it failed
+    with pytest.raises(Retry):
+        await _run(h)
+
+    # Then the target is still running for the retry, with no attempt left open
+    runs = await _runs(h)
+    assert len(runs) == 1
+    assert runs[0].status == "failed"
+    assert runs[0].error is not None and "GitHubRateLimitError" in runs[0].error
+    assert (await _target(h)).status == "running"
+    assert all(run.status != "running" for run in runs)
+
+    # ... and the findings it could not post are gone, so the retry cannot leave
+    # the same nit on the target twice
+    assert await _findings(h) == []
+
+    # When GitHub accepts the retry's writes
+    publisher.fail_with = None
+    await _run(h)
+
+    # Then attempt 2 is the only attempt whose findings remain, and the posted one
+    # carries its comment id
+    runs = await _runs(h)
+    assert len(runs) == 2
+    assert runs[1].attempt == 2
+    assert runs[1].status == "done"
+    assert all(run.status != "running" for run in runs)
+    findings = {row.line: row for row in await _findings(h)}
+    assert set(findings) == {3, None}
+    assert all(row.run_id == runs[1].id for row in findings.values())
+    assert findings[3].posted is True
+    assert findings[3].github_comment_id == 201
+    assert findings[None].posted is False
+    assert (await _target(h)).status == "done"
+    assert (await _session(h)).status == "done"
 
 
 async def test_repo_cap_keeps_one_target_running_at_a_time(

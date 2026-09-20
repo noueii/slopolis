@@ -212,6 +212,7 @@ async def seed_and_build(
     session_factory: SessionFactory,
     *,
     reader: FakeReader | None = None,
+    publisher: FakePublisher | None = None,
     llm: FakeLlm | None = None,
     config: WorkerConfig | None = None,
     job_try: int = 1,
@@ -231,7 +232,7 @@ async def seed_and_build(
         session_id=session_id,
         target_id=target_id,
         reader=reader if reader is not None else FakeReader(),
-        publisher=FakePublisher(),
+        publisher=publisher if publisher is not None else FakePublisher(),
         llm=llm if llm is not None else FakeLlm([]),
     )
     return build_harness(

@@ -85,7 +85,10 @@ Key consequences:
 - **Workspace admin** — manages provider credentials, model assignments, policy, and caps.
 - **Repository maintainer** — authors `.codereview.yml`.
 
-v1 is **single-tenant** (one self-hosted deployment = one workspace). A default `Workspace` row exists and all queries are workspace-scoped, so multi-tenancy is a later migration rather than a rewrite.
+v1 is **single-tenant**: one self-hosted deployment serves one workspace, and every query is
+workspace-scoped, so multi-tenancy is a later migration rather than a rewrite. The workspace is
+not auto-created for each account — signing in creates the account, and the user then creates the
+workspace (becoming its admin) or is invited to one (see 10.1).
 
 ---
 

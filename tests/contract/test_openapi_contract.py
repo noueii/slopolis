@@ -19,6 +19,7 @@ from pydantic.alias_generators import to_snake
 REQUIRED_PATHS: tuple[str, ...] = (
     "/api/sessions",
     "/api/sessions/{session_id}",
+    "/api/sessions/{session_id}/retry",
     "/api/sessions/{session_id}/events",
     "/api/reviews/preflight",
     "/api/dashboard",

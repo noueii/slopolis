@@ -451,15 +451,16 @@ async def test_publish_throttled_retries_and_drops_the_failed_attempts_findings(
     assert (await _target(h)).status == "running"
     assert all(run.status != "running" for run in runs)
 
-    # ... and the findings it could not post are gone, so the retry cannot leave
-    # the same nit on the target twice
-    assert await _findings(h) == []
+    # ... and the review it could not post is still readable: the findings were
+    # committed before publishing, so a throttled PR does not erase the work
+    assert len(await _findings(h)) == 2
 
     # When GitHub accepts the retry's writes
     publisher.fail_with = None
     await _run(h)
 
-    # Then attempt 2 is the only attempt whose findings remain, and the posted one
+    # Then attempt 2 is the only attempt whose findings remain — the failed
+    # attempt's unposted rows were superseded when it started — and the posted one
     # carries its comment id
     runs = await _runs(h)
     assert len(runs) == 2

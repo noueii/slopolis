@@ -138,6 +138,28 @@ class DatabaseRunStore(RunStore):
         run.error = None if error is None else error[:_ERROR_LIMIT]
         await self._db.flush()
 
+    async def reopen_run(self, run_id: uuid.UUID) -> bool:
+        """Return a reused node to ``running``; ``True`` when it was not running.
+
+        A retried target reuses its PR run and a retried session reuses its main
+        run, so a node that is running again must not keep the previous attempt's
+        terminal status and error — the tree would show a failed root beside a
+        live attempt, and a terminal root is never finished again (see
+        ``finish_main_run``). Nodes that are already running are left alone: a
+        second target's first attempt shares a live root and must not announce it
+        starting again. Tokens and cost stay as the last attempt reported them:
+        the whole spend across attempts lives on the usage records, which is what
+        the session, dashboard and usage totals read.
+        """
+        run = await self._db.get(AgentRun, run_id)
+        if run is None or run.status == AgentStatus.RUNNING.value:
+            return False
+        run.status = AgentStatus.RUNNING.value
+        run.ended_at = None
+        run.error = None
+        await self._db.flush()
+        return True
+
     async def last_seq(self, run_id: uuid.UUID) -> int:
         """Highest persisted ``seq`` for a run, or 0 when it has no events yet."""
         highest = await self._db.scalar(
@@ -423,7 +445,23 @@ class RunRecorder:
         await self.start_run(ref, model_id=model_id)
 
     async def start_run(self, ref: RunRef, *, model_id: str | None = None) -> None:
-        """Announce that an existing node starts again — a retried attempt (§15)."""
+        """Announce that a node starts: a fresh one, or one starting again."""
+        await self._store.reopen_run(ref.id)
+        await self._announce_start(ref, model_id=model_id)
+
+    async def restart_run(self, ref: RunRef, *, model_id: str | None = None) -> None:
+        """Start a reused node again, unless it is already running (§15).
+
+        A retried attempt reuses its nodes; a node the queue still owns (a second
+        target's first attempt under the same live root) must not announce itself
+        starting a second time.
+        """
+        if not await self._store.reopen_run(ref.id):
+            return
+        await self._announce_start(ref, model_id=model_id)
+
+    async def _announce_start(self, ref: RunRef, *, model_id: str | None = None) -> None:
+        """Emit the ``agent.started`` event for a node."""
         await self.emit(
             ref.id,
             EventType.STARTED,

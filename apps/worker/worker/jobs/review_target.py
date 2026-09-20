@@ -263,6 +263,19 @@ async def _run_attempt(
     # The tree is an artifact of its own: commit it before the attempt does any
     # work, so a failure below cannot erase the nodes a retry will reuse (§15).
     await db.commit()
+    # A new attempt supersedes the previous one's findings, whichever path asked
+    # for it — an automatic retry after a throttled publish, or a manual retry
+    # (spec 10.5). Discarding them here rather than on the failure path keeps
+    # them visible while a retry waits, and keeps one rule in one place: a posted
+    # finding is the app's link to a comment that is on the pull request, so it
+    # is never dropped. The first attempt finds nothing to discard.
+    discarded = await persistence.discard_unposted_findings(db, job.target_id)
+    if discarded:
+        _LOG.info(
+            "superseded unposted findings",
+            extra={"target_id": str(job.target_id), "count": discarded},
+        )
+    await db.commit()
     started = time.monotonic()
     try:
         plan = await _execute(db=db, review=review, job=job, tree=tree)
@@ -490,14 +503,21 @@ async def _open_tree(db: AsyncSession, job: TargetJob, *, restart: bool) -> _Att
     recorder = RunRecorder(db)
     store = recorder.store
     main = await store.find_or_create_main_run(job.session)
-    await recorder.open_run(main, depth=_MAIN_DEPTH)
+    if main.created:
+        await recorder.open_run(main, depth=_MAIN_DEPTH)
+    elif restart:
+        # A retried session reuses its main run: its root starts again, which is
+        # also what clears the terminal status the failed attempt left on it (a
+        # terminal root is never finished again, see ``finish_main_run``). A root
+        # that is still running — another target's attempt — is left alone.
+        await recorder.restart_run(main)
     pr = await store.find_or_create_pr_run(job.session, job.target, main.id)
     if pr.created:
         await recorder.open_run(pr, depth=_PR_DEPTH)
     elif restart:
         # A retried attempt reuses the target's PR run: the node starts again, but
         # it is never spawned twice (spec §15).
-        await recorder.start_run(pr)
+        await recorder.restart_run(pr)
     return _AttemptTree(pr=pr, recorder=recorder)
 
 
@@ -659,13 +679,10 @@ async def _fail_retryable(
     # running, and its node records the failed attempt either way (§11).
     await tree.recorder.finish(tree.pr.id, AgentStatus.FAILED, summary=error, error=error)
     if attempt < config.max_tries:
-        # This attempt's findings are already committed (§10.7), and the retry is
-        # about to produce its own copy of them: drop the unposted ones so the
-        # target does not end up showing the same nit twice. A posted finding is
-        # the app's link to a comment that is on the PR, so it is never dropped.
-        # On the final failure below there is no retry to duplicate anything, and
-        # the findings of the attempt that did run are worth keeping visible.
-        discarded = await persistence.discard_unposted_findings(db, ids.target)
+        # This attempt's findings are already committed (§10.7) and stay visible
+        # until the next attempt starts and supersedes them (see ``_run_attempt``)
+        # — dropping them here would hide a review while its retry waits in
+        # backoff, for no gain: the retry discards them the moment it begins.
         await persistence.fail_run(db, run=run, error=error, now=_now())
         await db.commit()
         _LOG.warning(
@@ -674,7 +691,6 @@ async def _fail_retryable(
                 "session_id": str(ids.session),
                 "target_id": str(ids.target),
                 "attempt": attempt,
-                "discarded_findings": discarded,
                 "error": error,
             },
         )

@@ -1,9 +1,11 @@
-"""Session lifecycle endpoints: list, detail, create, patch, cancel.
+"""Session lifecycle endpoints: list, detail, create, patch, cancel, retry.
 
 Listing honors the full :class:`SessionListParams` filter surface (q, repo,
 user, status, range, page, pageSize, sort). Creation runs pre-flight first and
 only persists a session when at least one target is valid — it never creates a
-session on failure. Each persisted target is enqueued as one ARQ job.
+session on failure. Each persisted target is enqueued as one ARQ job. A manual
+retry puts a finished session's failed or cancelled targets back on that same
+queue, without re-running pre-flight (spec 10.5 §Manual retry).
 """
 
 from __future__ import annotations
@@ -33,11 +35,12 @@ from app.routers._session_data import (
     serialize_targets,
 )
 from app.routers._session_query import filter_sessions, sort_sessions
-from app.routers.session_create import create_session
+from app.routers.session_create import create_session, enqueue_targets
 from app.schemas import (
     CreatedSession,
     CreateReviewRequest,
     Paginated,
+    RetryRequest,
     SessionFilterOptions,
     SessionListParams,
     SessionStats,
@@ -45,12 +48,20 @@ from app.schemas import (
 )
 from app.schemas import ReviewSession as ReviewSessionSchema
 from app.serializers import serialize_session
-from slopolis_core.domain import SessionStatus
-from slopolis_db.models import Repository, ReviewSession, User
+from slopolis_core.domain import SessionStatus, TargetStatus
+from slopolis_db.models import Repository, ReviewSession, SessionTarget, User
 
 __all__ = ["router"]
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
+
+#: Target statuses a manual retry may put back on the queue (spec 10.5 §Manual
+#: retry): the run failed, or the user cancelled it, and either is re-runnable.
+_RETRYABLE_TARGET_STATUSES = (TargetStatus.FAILED.value, TargetStatus.CANCELLED.value)
+
+#: Target statuses the queue already owns. Retrying one would duplicate the job
+#: it is already running, so it is refused instead.
+_ACTIVE_TARGET_STATUSES = (TargetStatus.QUEUED.value, TargetStatus.RUNNING.value)
 
 
 @router.get("")
@@ -218,11 +229,94 @@ async def cancel_session(
     return await _serialize(db, session)
 
 
+@router.post("/{session_id}/retry")
+async def retry_session(
+    session_id: uuid.UUID,
+    db: DbSessionDep,
+    workspace_id: WorkspaceIdDep,
+    viewer: CurrentUserDep,
+    checker: RepoAccessCheckerDep,
+    pool: ArqPoolDep,
+    body: RetryRequest | None = None,
+) -> ReviewSessionSchema:
+    """Put a finished session's retryable targets back on the queue.
+
+    Manual retry is not a second submission: pre-flight already validated the
+    links, coverage, and access, so nothing is re-validated here (spec 10.5
+    §Manual retry). Earlier attempt rows are history and stay untouched — the
+    worker opens the next attempt itself.
+    """
+    session = await _require_session(db, session_id, workspace_id)
+    view = await require_session_access(db, session, viewer=viewer, checker=checker)
+    # The candidates are the targets this viewer may read, and therefore the ones
+    # the detail screen could have offered them.
+    targets = _retry_selection(view.targets, body.target_ids if body else None)
+    for target in targets:
+        target.status = SessionStatus.QUEUED.value
+    # The session as a whole goes back to queued; it is finished again only when
+    # the worker's recompute says every target is.
+    session.status = SessionStatus.QUEUED
+    session.finished_at = None
+    await db.commit()
+    await db.refresh(session)
+    # Enqueue only after the commit, so a worker can never pick up a job whose
+    # session still reads as finished.
+    await enqueue_targets(pool, session.id, targets)
+    return await _serialize(db, session)
+
+
 async def _serialize(db: AsyncSession, session: ReviewSession) -> ReviewSessionSchema:
     """Serialize a session with its triggering user and target aggregates."""
     triggered_by = await _triggered_by(db, session)
     targets = await serialize_targets(db, session.targets)
     return serialize_session(session, triggered_by=triggered_by, targets=targets)
+
+
+def _retry_selection(
+    targets: list[SessionTarget], requested: list[uuid.UUID] | None
+) -> list[SessionTarget]:
+    """Return the targets a retry re-queues, or raise the refusal for it.
+
+    Refusals come before the caller writes anything: a target the queue already
+    owns is named rather than duplicated, and a selection with nothing retryable
+    in it is a conflict, not a silent no-op (spec 10.5 §Manual retry).
+    """
+    if requested:
+        wanted = list(dict.fromkeys(requested))
+        by_id = {target.id: target for target in targets}
+        for target_id in wanted:
+            if target_id not in by_id:
+                raise ApiError(
+                    404,
+                    "target_not_found",
+                    "That review target is not part of this session.",
+                    detail=f"No target with id {target_id}.",
+                )
+        selection = [by_id[target_id] for target_id in wanted]
+    else:
+        selection = [
+            target for target in targets if target.status in _RETRYABLE_TARGET_STATUSES
+        ]
+
+    busy = [target for target in selection if target.status in _ACTIVE_TARGET_STATUSES]
+    if busy:
+        raise ApiError(
+            409,
+            "target_running",
+            "A review target in this selection is already queued or running.",
+            detail=f"Target {busy[0].id} is {busy[0].status}.",
+        )
+
+    retryable = [
+        target for target in selection if target.status in _RETRYABLE_TARGET_STATUSES
+    ]
+    if not retryable:
+        raise ApiError(
+            409,
+            "nothing_to_retry",
+            "This session has no failed or cancelled targets to retry.",
+        )
+    return retryable
 
 
 async def _require_session(

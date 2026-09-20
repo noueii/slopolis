@@ -1,9 +1,11 @@
 """Session creation: pre-flight gate, persistence, and per-target enqueue.
 
-Creation is the one write path in the API. It runs pre-flight first and refuses
-to persist anything unless at least one target resolves — a failed pre-flight
-never leaves a half-built session behind. Each persisted target is enqueued as
-exactly one ARQ job named ``review_target`` with ``(session_id, target_id)``.
+Creation runs pre-flight first and refuses to persist anything unless at least
+one target resolves — a failed pre-flight never leaves a half-built session
+behind. Each persisted target is enqueued as exactly one ARQ job named
+``review_target`` with ``(session_id, target_id)``; :func:`enqueue_targets` is
+that enqueue, shared with the manual-retry path so a retried target gets the
+very job submission would have put on the queue (spec 10.5 §Manual retry).
 """
 
 from __future__ import annotations
@@ -42,7 +44,7 @@ from slopolis_db.models import (
     Workspace,
 )
 
-__all__ = ["create_session", "review_title_from_title"]
+__all__ = ["create_session", "enqueue_targets", "review_title_from_title"]
 
 _SUBJECT_RE = re.compile(r"^[a-z]+(?:\([^)]*\))?:\s*(.+)$", re.IGNORECASE)
 _JOB_NAME = "review_target"
@@ -132,10 +134,22 @@ async def create_session(
     await db.flush()
     await db.commit()
 
-    for target in targets:
-        await pool.enqueue_job(_JOB_NAME, str(session.id), str(target.id))
+    await enqueue_targets(pool, session.id, targets)
 
     return serialize_created_session(session, target_count=len(targets))
+
+
+async def enqueue_targets(
+    pool: ArqPool, session_id: uuid.UUID, targets: Sequence[SessionTarget]
+) -> None:
+    """Put one ``review_target`` job per target on the queue.
+
+    The single place that names the job and fixes its argument order: a manual
+    retry must enqueue literally the work submission does (spec 10.5 §Manual
+    retry), so both paths call this instead of each spelling the job out.
+    """
+    for target in targets:
+        await pool.enqueue_job(_JOB_NAME, str(session_id), str(target.id))
 
 
 async def _enforce_caps(

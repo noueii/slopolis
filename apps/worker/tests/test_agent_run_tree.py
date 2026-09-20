@@ -29,8 +29,8 @@ from worker_fakes import (
 from worker_seed import Harness, Seed, build_harness, seed_and_build
 
 from slopolis_core.context import PrContext
-from slopolis_core.domain import TargetStatus
-from slopolis_core.github.errors import GitHubError
+from slopolis_core.domain import SessionStatus, TargetStatus
+from slopolis_core.github.errors import GitHubAuthError, GitHubError
 from slopolis_core.harness import HarnessLevel
 from slopolis_db.models import AgentEventRow, AgentRun, ReviewSession, SessionTarget
 
@@ -69,6 +69,7 @@ def _harness_for(
     *,
     target_id: uuid.UUID,
     reader: FakeReader | None = None,
+    publisher: FakePublisher | None = None,
     llm: FakeLlm | None = None,
     job_try: int = 1,
 ) -> Harness:
@@ -78,7 +79,7 @@ def _harness_for(
         session_id=h.seed.session_id,
         target_id=target_id,
         reader=reader if reader is not None else FakeReader(),
-        publisher=FakePublisher(),
+        publisher=publisher if publisher is not None else FakePublisher(),
         llm=llm if llm is not None else FakeLlm([_FINDINGS_JSON]),
     )
     return build_harness(session_factory=h.session_factory, seed=seed, job_try=job_try)
@@ -450,3 +451,70 @@ async def test_one_failing_target_leaves_the_other_runs_intact(
         "agent.started",
         "agent.failed",
     ]
+
+
+async def _requeue(h: Harness, target_id: uuid.UUID) -> None:
+    """Put a target and its session back to ``queued``, as the retry API does.
+
+    A terminal target is skipped by the job's own guard, so a retry that did not
+    reset the statuses first would enqueue work the worker would ignore.
+    """
+    async with h.session_factory() as db:
+        target = await db.get(SessionTarget, target_id)
+        session = await db.get(ReviewSession, h.seed.session_id)
+        assert target is not None and session is not None
+        target.status = TargetStatus.QUEUED
+        session.status = SessionStatus.QUEUED
+        session.finished_at = None
+        await db.commit()
+
+
+async def test_a_retried_attempt_reopens_the_nodes_it_reuses(
+    session_factory: SessionFactory,
+) -> None:
+    """A reused node must not keep the failed attempt's status (spec §15).
+
+    The tree is the run's visible state, and a terminal root is never finished
+    again (`finish_main_run`) — so a retry that left the main run `failed` would
+    let the session complete underneath a failed root.
+    """
+    # Given a target whose publish GitHub refused, which closed every node
+    h = await seed_and_build(
+        session_factory, llm=FakeLlm([_FINDINGS_JSON, _FINDINGS_JSON])
+    )
+    refused = _harness_for(
+        h,
+        target_id=h.seed.target_id,
+        publisher=FakePublisher(fail_with=GitHubAuthError("publish refused (HTTP 403)")),
+        llm=FakeLlm([_FINDINGS_JSON, _FINDINGS_JSON]),
+    )
+    await _run(refused, h.seed.target_id)
+
+    runs = await _runs(h)
+    assert {run.level for run in runs} == {"main", "pr", "sub"}
+    # The review itself succeeded; publishing is what failed, and the failure
+    # closed the nodes that owned it (the reviewer sub run is done)
+    by_level = {run.level: run for run in runs}
+    assert by_level["main"].status == "failed"
+    assert by_level["pr"].status == "failed"
+    assert by_level["sub"].status == "done"
+
+    # When the same target runs again — what `POST /api/sessions/{id}/retry`
+    # queues after it puts the target and session back to `queued` (a terminal
+    # target is skipped by the job's own guard, spec 10.5)
+    await _requeue(h, h.seed.target_id)
+    retried = _harness_for(h, target_id=h.seed.target_id)
+    await _run(retried, h.seed.target_id)
+
+    # Then the reused nodes are running again and finish done under one PR
+    # orchestrator, and the retry is a second sub run rather than a rewritten one
+    runs = await _runs(h)
+    main = next(run for run in runs if run.level == "main")
+    pr_runs = [run for run in runs if run.level == "pr"]
+    sub_runs = [run for run in runs if run.level == "sub"]
+    assert len(pr_runs) == 1
+    assert len(sub_runs) == 2
+    assert main.status == "done" and main.error is None
+    assert pr_runs[0].status == "done" and pr_runs[0].error is None
+    # The root was reopened and announced starting again, exactly once per attempt
+    assert _types(await _events(h, main.id)).count("agent.started") == 2

@@ -57,6 +57,7 @@ __all__ = [
     "RepositoryRef",
     "RepositorySummary",
     "RequiredAccess",
+    "RetryRequest",
     "ReviewPreset",
     "ReviewPresetCatalog",
     "ReviewSession",
@@ -514,6 +515,22 @@ class SessionUpdateRequest(WireModel):
 
     title: str | None = None
     name: str | None = None
+
+
+class RetryRequest(WireModel):
+    """Body of ``POST /api/sessions/{id}/retry`` (spec 10.5 §Manual retry).
+
+    An absent or empty ``targetIds`` means every target in a retryable state,
+    which is what the detail screen's plain "Retry" sends.
+    """
+
+    model_config = ConfigDict(
+        alias_generator=CAMEL,
+        populate_by_name=True,
+        extra="forbid",
+    )
+
+    target_ids: list[uuid.UUID] | None = None
 
 
 # --- usage ------------------------------------------------------------------

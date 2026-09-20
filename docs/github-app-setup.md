@@ -53,14 +53,18 @@ consumes it today.
    GitHub send the browser to the Callback URL with a `code` right after an install, which this
    server accepts (the callback only requires `code`). Leaving it deselected means users sign in
    through the app first; either is fine.
-7. **Setup URL** — leave empty. The server has no install/setup handler yet, so it would be
-   ignored (see §7).
-8. **Webhook → Active** — deselect (see §1).
-9. **Permissions** — grant the five repository permissions from §1. Metadata, Contents stay
+7. **Setup URL** — **`{APP_URL}/api/github/setup`**, e.g.
+   `http://localhost:8000/api/github/setup`. GitHub sends the browser here after an install, and
+   this is where slopolis learns the `installation_id` and records the installation plus the
+   repositories it covers.
+8. **Redirect on update** — **select.** Adding or removing repositories then re-syncs through the
+   same URL instead of waiting for a manual reinstall.
+9. **Webhook → Active** — deselect (see §1).
+10. **Permissions** — grant the five repository permissions from §1. Metadata, Contents stay
    Read-only; Pull requests, Checks, Issues are Read & write.
-10. **Where can this GitHub App be installed?** — **Any account** if you review organization
+11. **Where can this GitHub App be installed?** — **Any account** if you review organization
     repositories, otherwise **Only on this account**.
-11. **Create GitHub App.**
+12. **Create GitHub App.**
 
 ---
 
@@ -159,6 +163,18 @@ Then in the browser open **<http://localhost:8000/api/auth/github/login>**, appr
 you land back on the app signed in (`GET /api/me` returns your handle). `make dev-api` runs the API and
 the web app together if you prefer one command.
 
+Install the App to give slopolis something to review:
+
+```bash
+curl -s -D - -o /dev/null localhost:8400/api/github/install | grep -i '^location'
+# → https://github.com/apps/<slug>/installations/new
+```
+
+Pick the repositories on GitHub's install page; the browser returns to the Setup URL, and the
+installation plus its repositories are recorded for your workspace — they show up in
+`GET /api/repositories` and in the app's repository picker. Re-running the install (or changing the
+selection, with "Redirect on update" on) refreshes the same rows instead of duplicating them.
+
 ---
 
 ## 6. Troubleshooting
@@ -173,7 +189,8 @@ the web app together if you prefer one command.
 | `InvalidKeyError: Could not parse the provided public key` | The private key is not the quoted multi-line form (§4), or belongs to a different App. |
 | GitHub calls fail with 403 after the first request | A permission from §1 is missing. Update the App's permissions, then have an installation admin approve the change (Installations → **Review request**). |
 | Review finishes but nothing appears on the PR | The publisher needs Pull requests/Checks/Issues **write**; the harness needs the App installed on that repository. |
-| Worker logs a failed installation-token mint | No `github_installations` row for the PR's repository — see §7. |
+| Worker logs a failed installation-token mint | No `github_installations` row for the PR's repository: open the app and install the App again, or hit `/api/github/setup` through the install button. |
+| Setup redirect lands on the app with nothing recorded | The account is not signed in (the browser is sent to sign in first) or has no workspace yet (onboarding shows first); the installation is recorded on the next attempt. |
 
 ---
 
@@ -181,11 +198,10 @@ the web app together if you prefer one command.
 
 Verified against the code on `main` today; each is a candidate follow-up:
 
-1. **No install/setup callback.** The server never records GitHub's `installation_id`, so a fresh
-   install leaves no `github_installations` row. Session creation synthesises a placeholder row for
-   unknown accounts, and the worker mints tokens from whatever id that row carries — which fails
-   for a real install until the row holds GitHub's real id. Installing the App and seeding the row
-   (or landing a setup handler) is required before a review can run against a real repository.
+1. **No webhooks, so no live sync.** Installations and repositories are recorded by the setup
+   callback (§2) and refreshed only when the user installs again or changes the selection. A
+   repository renamed or removed on GitHub keeps its old row until then (it is marked
+   `connected: false` only when a later sync reports it missing).
 2. **No sign-in UI.** The web app renders the shell with a null user for guests; sign-in is reached
    by visiting `/api/auth/github/login` directly. A sign-in screen with a 401 fallback is a
    follow-up.
@@ -204,6 +220,9 @@ Verified against the code on `main` today; each is a candidate follow-up:
 | Concern | File |
 |---|---|
 | OAuth sign-in, callback, cookie, `/me`, `POST /auth/logout` | `apps/server/app/auth.py` |
+| Install redirect and the setup callback | `apps/server/app/routers/github_install.py` |
+| Recording an installation and its repositories | `apps/server/app/services/installation_sync.py` |
+| App JWT: slug, installation lookup, repository listing | `packages/core/slopolis_core/github/app_installations.py` |
 | Cookie signing and user decoding | `apps/server/app/deps.py` (`encode_user_id`, `decode_user_id`) |
 | Settings (core + server) | `packages/core/slopolis_core/settings.py`, `apps/server/app/config.py` |
 | App JWT and installation-token minting | `packages/core/slopolis_core/github/client.py`, `packages/core/slopolis_core/github/auth.py`, `apps/worker/worker/deps.py` |

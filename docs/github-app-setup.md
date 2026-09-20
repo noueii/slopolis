@@ -202,14 +202,18 @@ Verified against the code on `main` today; each is a candidate follow-up:
    callback (§2) and refreshed only when the user installs again or changes the selection. A
    repository renamed or removed on GitHub keeps its old row until then (it is marked
    `connected: false` only when a later sync reports it missing).
-2. **No sign-in UI.** The web app renders the shell with a null user for guests; sign-in is reached
+2. **One installation at a time.** The server builds its GitHub client once at startup from the
+   first installation, so `/api/repositories` and pre-flight only see that installation's
+   repositories; with no installation at all the client stays disabled (the startup log says so).
+   The worker is unaffected — it mints a token per installation per job.
+3. **No sign-in UI.** The web app renders the shell with a null user for guests; sign-in is reached
    by visiting `/api/auth/github/login` directly. A sign-in screen with a 401 fallback is a
    follow-up.
-3. **No OAuth `state`.** The callback accepts any `code`, so it is not bound to the browser that
+4. **No OAuth `state`.** The callback accepts any `code`, so it is not bound to the browser that
    started the flow (login-CSRF). Adding a signed, single-use, browser-bound state is a follow-up.
-4. **`GITHUB_WEBHOOK_SECRET` is unused** until webhooks land (Phase 2), and `CORS_ORIGINS` still
+5. **`GITHUB_WEBHOOK_SECRET` is unused** until webhooks land (Phase 2), and `CORS_ORIGINS` still
    defaults to the old dev port `:5173` while the web dev server runs on `:8000`.
-5. **Env files are per-process.** The server reads `apps/server/.env` and the worker
+6. **Env files are per-process.** The server reads `apps/server/.env` and the worker
    `apps/worker/.env`; only Docker Compose reads the repo-root `.env`. A single root file silently
    leaves `make api` unconfigured.
 

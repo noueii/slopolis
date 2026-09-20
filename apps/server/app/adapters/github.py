@@ -22,7 +22,7 @@ from slopolis_core.github.errors import (
 )
 from slopolis_core.preflight.models import PrReference, RepositoryRef
 
-__all__ = ["GitHubGatewayAdapter"]
+__all__ = ["GitHubGatewayAdapter", "as_api_error"]
 
 
 class GitHubGatewayAdapter:
@@ -43,7 +43,7 @@ class GitHubGatewayAdapter:
         except GitHubNotFoundError as exc:
             raise LookupError(str(exc)) from exc
         except GitHubError as exc:
-            raise _as_api_error(exc) from exc
+            raise as_api_error(exc) from exc
 
         self._default_branches[pull.repo_full_name] = pull.default_branch
         return PrReference(
@@ -63,7 +63,7 @@ class GitHubGatewayAdapter:
         try:
             repositories = await self._client.list_installation_repositories()
         except GitHubError as exc:
-            raise _as_api_error(exc) from exc
+            raise as_api_error(exc) from exc
         for repo in repositories:
             self._default_branches[repo.full_name] = repo.default_branch
         return [repo.full_name for repo in repositories]
@@ -84,7 +84,7 @@ class GitHubGatewayAdapter:
         except GitHubNotFoundError:
             return None
         except GitHubError as exc:
-            raise _as_api_error(exc) from exc
+            raise as_api_error(exc) from exc
 
 
 def _repo_id(full_name: str) -> str:
@@ -92,7 +92,7 @@ def _repo_id(full_name: str) -> str:
     return f"repo_{full_name.lower().replace('/', '_')}"
 
 
-def _as_api_error(exc: GitHubError) -> ApiError:
+def as_api_error(exc: GitHubError) -> ApiError:
     """Translate a typed GitHub failure into the matching API error."""
     if isinstance(exc, GitHubNotFoundError):
         return ApiError(

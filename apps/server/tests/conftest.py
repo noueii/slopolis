@@ -14,7 +14,13 @@ from decimal import Decimal
 from typing import Any
 
 import pytest_asyncio
-from app.deps import get_arq_pool, get_current_user, get_db, get_preflight_service
+from app.deps import (
+    get_arq_pool,
+    get_current_user,
+    get_db,
+    get_optional_user,
+    get_preflight_service,
+)
 from app.main import create_app
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import (
@@ -24,6 +30,8 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from slopolis_core.github.errors import GitHubNotFoundError
+from slopolis_core.github.models import AppInstallation, InstallationRepository
 from slopolis_core.llm.client import LlmError
 from slopolis_core.preflight.models import PrReference, RepositoryRef
 from slopolis_core.preflight.service import PreflightService
@@ -115,6 +123,44 @@ class FakeWorkspace:
 
     async def model_assigned(self, role: str) -> tuple[str, str] | None:
         return self.assigned if self.assigned is not None else self.model
+
+
+class FakeAppInstallations:
+    """In-memory App-JWT surface for the install flow.
+
+    Records every call so tests can assert what the server asked GitHub for, and
+    which installations it considers missing.
+    """
+
+    def __init__(
+        self,
+        *,
+        slug: str = "slopolis-test",
+        installations: dict[int, AppInstallation] | None = None,
+        repositories: dict[int, list[InstallationRepository]] | None = None,
+        missing: set[int] | None = None,
+    ) -> None:
+        self.slug = slug
+        self.installations = installations or {}
+        self.repositories = repositories or {}
+        self.missing = missing or set()
+        self.calls: list[tuple[str, int | None]] = []
+
+    async def app_slug(self) -> str:
+        self.calls.append(("app_slug", None))
+        return self.slug
+
+    async def get_installation(self, installation_id: int) -> AppInstallation:
+        self.calls.append(("get_installation", installation_id))
+        if installation_id in self.missing:
+            raise GitHubNotFoundError(f"No installation {installation_id}")
+        return self.installations[installation_id]
+
+    async def list_repositories(
+        self, installation_id: int
+    ) -> list[InstallationRepository]:
+        self.calls.append(("list_repositories", installation_id))
+        return list(self.repositories.get(installation_id, []))
 
 
 class FakeLiveCheck:
@@ -322,6 +368,7 @@ async def build_harness(
         workspace: FakeWorkspace | None = None,
         live_check: FakeLiveCheck | None = None,
         github_client: FakeGitHubClient | None = None,
+        app_installations: FakeAppInstallations | None = None,
     ) -> ApiHarness:
         app = create_app()
 
@@ -340,6 +387,11 @@ async def build_harness(
                 assert user is not None
                 return user
 
+        async def override_optional_user() -> User | None:
+            """Same identity, but `None`-able for browser-navigation routes."""
+            async with session_factory() as session:
+                return await session.get(User, user_id)
+
         pool = FakeArqPool()
         service = PreflightService(
             gateway or FakeGateway(),
@@ -349,9 +401,11 @@ async def build_harness(
 
         app.dependency_overrides[get_db] = override_db
         app.dependency_overrides[get_current_user] = override_user
+        app.dependency_overrides[get_optional_user] = override_optional_user
         app.dependency_overrides[get_preflight_service] = lambda: service
         app.dependency_overrides[get_arq_pool] = lambda: pool
         app.state.github_client = github_client
+        app.state.app_installations = app_installations
         app.state.arq_pool = pool
 
         client = AsyncClient(

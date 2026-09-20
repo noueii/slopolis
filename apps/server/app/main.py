@@ -9,6 +9,7 @@ configured still boots and serves ``/healthz`` and ``/openapi.json``.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -24,6 +25,7 @@ from app.routers import (
     catalog,
     dashboard,
     events,
+    github_install,
     repositories,
     reviews,
     sessions,
@@ -32,6 +34,8 @@ from app.routers import (
 )
 
 __all__ = ["app", "create_app"]
+
+_logger = logging.getLogger(__name__)
 
 _API_PREFIX = "/api"
 
@@ -57,14 +61,26 @@ async def _open_github(app: FastAPI, settings: AppSettings) -> None:
     if not core.github_app_id or not core.github_app_private_key:
         app.state.github_client = None
         app.state.github_gateway = None
+        app.state.app_installations = None
         return
+
+    from slopolis_core.github.app_installations import AppInstallations
     from slopolis_core.github.client import GitHubClient
 
+    # The App-JWT surface needs no network at construction, so the install flow
+    # works even when the installation-token client below cannot be built yet.
+    app.state.app_installations = AppInstallations(
+        int(core.github_app_id), core.github_app_private_key
+    )
     try:
         client = await GitHubClient.from_app(
             int(core.github_app_id), core.github_app_private_key
         )
-    except Exception:
+    except Exception as exc:
+        # Never fail silently here: a missing client disables every GitHub route,
+        # and the reason (bad key, no installation) is exactly what an operator
+        # needs to see.
+        _logger.warning("GitHub client unavailable at startup: %s", exc)
         app.state.github_client = None
         app.state.github_gateway = None
         return
@@ -128,6 +144,7 @@ def _routers() -> list[APIRouter]:
         auth_router,
         me_router,
         workspaces.router,
+        github_install.router,
         catalog.router,
         repositories.router,
         dashboard.router,

@@ -15,3 +15,9 @@ __pycache__/
 .ruff_cache/
 *.egg-info/
 .basedpyright/
+
+# Secrets: the GitHub App private key, client secret, and cookie secret live here
+.env
+.env.*
+!.env.example
+

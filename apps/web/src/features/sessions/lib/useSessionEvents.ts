@@ -39,6 +39,12 @@ export interface UseSessionEventsOptions {
   onAgentEvent?: (event: AgentEventItem) => void
   /** Set false to stay idle and open no connection. */
   enabled?: boolean
+  /**
+   * Bump to reopen the stream. A terminal status closes it for good, so when
+   * the session is put back in flight (a manual retry) only the caller knows
+   * there is another attempt to follow.
+   */
+  epoch?: number
 }
 
 const POLL_INTERVAL_MS = 2500
@@ -55,7 +61,7 @@ function toUpdate(payload: SessionEventPayload): SessionEventUpdate {
 
 export function useSessionEvents(
   id: string | null,
-  { onUpdate, onAgentEvent, enabled = true }: UseSessionEventsOptions,
+  { onUpdate, onAgentEvent, enabled = true, epoch = 0 }: UseSessionEventsOptions,
 ): SessionEventsMode {
   const [mode, setMode] = useState<SessionEventsMode>("idle")
   const onUpdateRef = useRef(onUpdate)
@@ -136,7 +142,7 @@ export function useSessionEvents(
       stopPolling()
       teardown?.()
     }
-  }, [id, enabled])
+  }, [id, enabled, epoch])
 
   return mode
 }

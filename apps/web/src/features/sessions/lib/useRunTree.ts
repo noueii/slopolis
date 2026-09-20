@@ -82,11 +82,16 @@ export function useRunTree(
     }
   }, [sessionId, nonce])
 
-  // One re-read per session, on the transition into a terminal status: the
-  // worker is done writing, so the stored tree wins over the folded stream.
+  // One re-read per attempt, on the transition into a terminal status: the
+  // worker is done writing, so the stored tree wins over the folded stream. A
+  // manual retry puts the session back in flight, which arms the next attempt's
+  // re-read — otherwise the tree would keep the superseded attempt forever.
   useEffect(() => {
     if (!sessionId || !sessionStatus) return
-    if (!TERMINAL_SESSION_STATUSES.has(sessionStatus)) return
+    if (!TERMINAL_SESSION_STATUSES.has(sessionStatus)) {
+      settled.current = { sessionId, done: false }
+      return
+    }
     if (settled.current.sessionId !== sessionId || settled.current.done) return
     settled.current = { sessionId, done: true }
     setNonce((value) => value + 1)

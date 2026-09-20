@@ -132,6 +132,15 @@ export interface ReviewSession {
   prompt?: string
 }
 
+/**
+ * `POST /api/sessions/{id}/retry` body (spec 10.5 §Manual retry). An absent or
+ * empty `targetIds` retries every target in a retryable state (`failed`,
+ * `cancelled`); a target the queue already owns is refused, never duplicated.
+ */
+export interface RetrySessionRequest {
+  targetIds?: string[]
+}
+
 export type SessionSort =
   | "created_desc"
   | "created_asc"

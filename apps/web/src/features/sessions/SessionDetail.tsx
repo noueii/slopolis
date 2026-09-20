@@ -1,6 +1,13 @@
-import { useEffect, useMemo, useState } from "react"
-import { ArrowLeft, ExternalLink, ShieldCheck } from "lucide-react"
+import { useCallback, useEffect, useMemo, useState } from "react"
+import {
+  ArrowLeft,
+  ExternalLink,
+  Loader2,
+  RotateCcw,
+  ShieldCheck,
+} from "lucide-react"
 
+import { ApiError, api } from "@/api/client"
 import type {
   ReviewSession,
   SessionStatus,
@@ -40,6 +47,12 @@ const TERMINAL_TARGET_STATUSES: ReadonlySet<TargetStatus> = new Set([
   "cancelled",
   "skipped",
 ])
+
+/** Target statuses a manual retry puts back on the queue (spec 10.5). */
+const RETRYABLE_TARGET_STATUS: Partial<Record<TargetStatus, true>> = {
+  failed: true,
+  cancelled: true,
+}
 
 const MODE_META: Record<
   SessionEventsMode,
@@ -238,10 +251,15 @@ export function SessionDetail({ sessionId, onBack }: SessionDetailProps) {
   const { data, status, error, refetch } = useSession(sessionId)
   const [live, setLive] = useState<SessionEventUpdate | null>(null)
   const [tab, setTab] = useState<"summary" | "runs" | null>(null)
+  const [retryEpoch, setRetryEpoch] = useState(0)
+  const [retrying, setRetrying] = useState(false)
+  const [retryError, setRetryError] = useState<string | null>(null)
   const runTree = useRunTree(sessionId, live?.status)
+  const { refetch: refetchRunTree } = runTree
   const mode = useSessionEvents(sessionId, {
     onUpdate: setLive,
     onAgentEvent: runTree.applyEvent,
+    epoch: retryEpoch,
   })
 
   const liveStatus = live?.status
@@ -252,6 +270,38 @@ export function SessionDetail({ sessionId, onBack }: SessionDetailProps) {
   // The run tree is the session's delegation surface, so it leads once it has
   // something to show; a session with no runs keeps the summary it always had.
   const activeTab = tab ?? (runTree.runs.length > 0 ? "runs" : "summary")
+
+  const retryableCount = data
+    ? data.targets.filter((target) =>
+        RETRYABLE_TARGET_STATUS[
+          liveTargetStatus(live, target.id) ?? target.status
+        ],
+      ).length
+    : 0
+
+  const handleRetry = useCallback(async () => {
+    if (!data) return
+    setRetrying(true)
+    setRetryError(null)
+    try {
+      await api.retrySession(data.id)
+      // The response is the requeued session, but the hook owns `data`: re-read
+      // it, drop the superseded attempt's projection, and reopen the stream so
+      // the new attempt reports its own status.
+      setLive(null)
+      setRetryEpoch((epoch) => epoch + 1)
+      refetch()
+      refetchRunTree()
+    } catch (cause) {
+      // The server names the refusal (`target_running`, `nothing_to_retry`, the
+      // access rules); its message is the one the user can act on.
+      setRetryError(
+        cause instanceof ApiError ? cause.message : "The retry request failed.",
+      )
+    } finally {
+      setRetrying(false)
+    }
+  }, [data, refetch, refetchRunTree])
 
   return (
     <div className="mx-auto flex w-full max-w-[1100px] animate-fade-up flex-col gap-5 p-6">
@@ -293,6 +343,31 @@ export function SessionDetail({ sessionId, onBack }: SessionDetailProps) {
             <span className="font-mono text-xs text-muted-foreground">
               {data.id}
             </span>
+            {retryableCount > 0 ? (
+              <div className="ml-auto flex flex-col items-end gap-1.5">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={retrying}
+                  onClick={() => void handleRetry()}
+                >
+                  {retrying ? (
+                    <Loader2 data-icon="inline-start" className="animate-spin" />
+                  ) : (
+                    <RotateCcw data-icon="inline-start" />
+                  )}
+                  {retrying ? "Retrying…" : "Retry failed targets"}
+                </Button>
+                {retryError ? (
+                  <p
+                    role="alert"
+                    className="max-w-xs text-right text-2xs leading-relaxed text-destructive"
+                  >
+                    {retryError}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
           </header>
           <p className="text-sm text-muted-foreground">{data.title}</p>
           <Tabs

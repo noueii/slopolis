@@ -16,10 +16,13 @@ import type {
   ApiErrorBody,
   DateRangePreset,
   Paginated,
+  RetrySessionRequest,
   ReviewSession,
   SessionFilterOptions,
   SessionStats,
   SessionStatus,
+  SessionTarget,
+  TargetStatus,
 } from "@/api/contract"
 import { dataset } from "./dataset"
 import {
@@ -125,6 +128,16 @@ const EMPTY_STATS: SessionStats = {
   failed: 0,
   tokens: 0,
   costUsd: 0,
+}
+
+/** The statuses a manual retry may re-queue, and the ones it refuses. */
+const RETRYABLE_TARGET_STATUS: Partial<Record<TargetStatus, true>> = {
+  failed: true,
+  cancelled: true,
+}
+const ACTIVE_TARGET_STATUS: Partial<Record<TargetStatus, true>> = {
+  queued: true,
+  running: true,
 }
 
 export const sessionsHandlers = [
@@ -321,6 +334,88 @@ export const sessionsHandlers = [
         `No session with id "${String(params.id)}".`,
       )
     }
+    return HttpResponse.json(withLiveTargets(found))
+  }),
+
+  /**
+   * Manual retry (spec 10.5 §Manual retry). The selection rules mirror the
+   * server's, so the refusals the detail view has to surface (`target_running`,
+   * `nothing_to_retry`) are reachable here too. No worker runs in the mock
+   * stack, so a requeued session stays queued until it is submitted again.
+   */
+  http.post(`${API_BASE}/sessions/:id/retry`, async ({ request, params }) => {
+    await latency(request)
+    if (isErrorScenario(request)) {
+      return errorResponse(
+        500,
+        "retry_unavailable",
+        "Could not retry the session.",
+      )
+    }
+    const found = dataset.sessions.find((s) => s.id === params.id)
+    if (!found) {
+      return errorResponse(
+        404,
+        "session_not_found",
+        "That review session does not exist.",
+        `No session with id "${String(params.id)}".`,
+      )
+    }
+
+    let body: RetrySessionRequest = {}
+    try {
+      body = (await request.json()) as RetrySessionRequest
+    } catch {
+      body = {}
+    }
+
+    const selection: SessionTarget[] = []
+    for (const targetId of new Set(body.targetIds ?? [])) {
+      const target = found.targets.find((row) => row.id === targetId)
+      if (!target) {
+        return errorResponse(
+          404,
+          "target_not_found",
+          "That review target is not part of this session.",
+          `No target with id ${targetId}.`,
+        )
+      }
+      selection.push(target)
+    }
+    if (selection.length === 0) {
+      selection.push(
+        ...found.targets.filter(
+          (target) => RETRYABLE_TARGET_STATUS[target.status],
+        ),
+      )
+    }
+
+    const busy = selection.find((target) => ACTIVE_TARGET_STATUS[target.status])
+    if (busy) {
+      return errorResponse(
+        409,
+        "target_running",
+        "A review target in this selection is already queued or running.",
+        `Target ${busy.id} is ${busy.status}.`,
+      )
+    }
+    const retryable = selection.filter(
+      (target) => RETRYABLE_TARGET_STATUS[target.status],
+    )
+    if (retryable.length === 0) {
+      return errorResponse(
+        409,
+        "nothing_to_retry",
+        "This session has no failed or cancelled targets to retry.",
+      )
+    }
+
+    for (const target of retryable) target.status = "queued"
+    found.status = "queued"
+    // The session is in flight again, so the fields that only describe a
+    // finished one go with it.
+    found.finishedAt = undefined
+    found.durationMs = undefined
     return HttpResponse.json(withLiveTargets(found))
   }),
 ]

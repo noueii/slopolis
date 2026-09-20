@@ -36,6 +36,7 @@ import type {
   RepositoryPullRequestsResponse,
   RepositorySummary,
   RepositoryUpdate,
+  RetrySessionRequest,
   ReviewPresetCatalog,
   ReviewSession,
   ReviewTemplate,
@@ -271,6 +272,24 @@ export const api = {
 
   getSession(id: string): Promise<ReviewSession> {
     return request<ReviewSession>(`/sessions/${encodeURIComponent(id)}`)
+  },
+
+  /**
+   * Put a finished session's failed or cancelled targets back on the queue
+   * (spec 10.5 §Manual retry). Omitting `targetIds` retries every retryable
+   * target; the API refuses `409 target_running` for one the queue already
+   * owns and `409 nothing_to_retry` when the selection holds none.
+   */
+  retrySession(
+    id: string,
+    targetIds?: string[],
+  ): Promise<ReviewSession> {
+    const body: RetrySessionRequest =
+      targetIds && targetIds.length > 0 ? { targetIds } : {}
+    return request<ReviewSession>(`/sessions/${encodeURIComponent(id)}/retry`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    })
   },
 
   getFilterOptions(): Promise<SessionFilterOptions> {

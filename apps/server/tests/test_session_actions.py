@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from app.routers.sessions import QUEUE_STALE_AFTER_S
 from app.services.repo_access import RepoAccessChecker, RepoAccessUnavailable
 from sqlalchemy import select
 
@@ -113,6 +115,11 @@ async def test_cancel_session_then_conflict(
 #: ``ClassName: message``, the format the retry rule classifies from. The
 #: throttled publish is what a target that only failed to publish usually hit.
 _GITHUB_FAILURE = "GitHubRateLimitError: GitHub rate limit hit during upsert_summary_comment"
+
+#: How long a test leaves a target queued when it wants that target's job read as
+#: lost: comfortably past the server's threshold, expressed against it so the test
+#: follows the rule rather than a copy of its number.
+_LOST_QUEUE_AGE = dt.timedelta(seconds=QUEUE_STALE_AFTER_S * 3)
 
 
 class FakeRepoProbe:
@@ -248,23 +255,41 @@ async def add_attempt(
     *,
     error: str = "provider timed out",
     tokens: int = 0,
+    status: str = "failed",
 ) -> uuid.UUID:
-    """Record a finished attempt for a target; return the run's id.
+    """Record one attempt for a target; return the run's id.
 
     ``error`` and ``tokens`` are the two things the retry rule reads (spec 10.5):
     a GitHub failure that recorded usage is a review the target already owns.
+    ``status`` is the third a *queue* rule reads: an attempt still ``running`` is a
+    worker on the target, so a retry has to leave it alone.
     """
     async with session_factory() as session:
         run = SessionTargetRun(
             target_id=target_id_,
             attempt=1,
-            status="failed",
+            status=status,
             error=error,
             tokens=tokens,
         )
         session.add(run)
         await session.commit()
         return run.id
+
+
+async def age_target(
+    session_factory: Any, target_id_: uuid.UUID, *, age: dt.timedelta
+) -> None:
+    """Backdate a target's last write by ``age``, as if it had waited that long.
+
+    ``updated_at`` is what a retry measures a queued target's staleness from, and
+    only a direct write can put it in the past — which is the point of testing it.
+    """
+    async with session_factory() as session:
+        row = await session.get(SessionTarget, target_id_)
+        assert row is not None
+        row.updated_at = dt.datetime.now(dt.UTC) - age
+        await session.commit()
 
 
 async def queue_session_and_targets(
@@ -572,6 +597,135 @@ async def test_retry_refuses_a_target_the_queue_already_owns(
         row = await session.get(SessionTarget, running)
         assert row is not None
         assert row.status == "running"
+
+
+async def test_retry_recovers_a_queued_target_the_queue_lost(
+    seeded: Any, session_factory: Any, build_harness: Any
+) -> None:
+    # Given a session whose only target has sat queued far longer than a job takes
+    # to start it, with no attempt opened for it — what a job the queue refused
+    # outright leaves behind, because it never touches the target
+    target = await target_id(session_factory, seeded.session_id, 7)
+    await set_state(
+        session_factory, seeded.session_id, status="queued", target_status="queued"
+    )
+    await age_target(session_factory, target, age=_LOST_QUEUE_AGE)
+    harness: ApiHarness = await build_harness(user_id=seeded.user_id)
+
+    # When the session is retried
+    response = await harness.client.post(f"/api/sessions/{seeded.session_id}/retry")
+
+    # Then the target goes back on the queue instead of being refused: nothing else
+    # can run it, and the response says so rather than reporting a conflict
+    assert response.status_code == 200
+    assert [item["status"] for item in response.json()["targets"]] == ["queued"]
+    assert harness.pool.jobs == [
+        ("review_target", (str(seeded.session_id), str(target), "review"))
+    ]
+
+    # And the recovery hands the queue back its claim on the target: an immediate
+    # second retry is refused instead of enqueuing a second job for it
+    again = await harness.client.post(
+        f"/api/sessions/{seeded.session_id}/retry", json={"targetIds": [str(target)]}
+    )
+    assert again.status_code == 409
+    assert again.json()["error"]["code"] == "target_running"
+    assert len(harness.pool.jobs) == 1
+
+
+async def test_retry_recovers_a_lost_publish_as_a_publish_retry(
+    seeded: Any, session_factory: Any, build_harness: Any
+) -> None:
+    # Given a queued target whose job is gone, and whose last attempt failed to
+    # post a review it had already paid for
+    target = await target_id(session_factory, seeded.session_id, 7)
+    await set_state(
+        session_factory, seeded.session_id, status="queued", target_status="queued"
+    )
+    await add_attempt(session_factory, target, error=_GITHUB_FAILURE, tokens=120)
+    await age_target(session_factory, target, age=_LOST_QUEUE_AGE)
+    harness: ApiHarness = await build_harness(user_id=seeded.user_id)
+
+    # When the session is retried
+    response = await harness.client.post(f"/api/sessions/{seeded.session_id}/retry")
+
+    # Then the recovered job re-posts that review instead of buying it again, so
+    # recovering the target does not silently turn a publish retry into a re-review
+    assert response.status_code == 200
+    assert harness.pool.jobs == [
+        ("review_target", (str(seeded.session_id), str(target), "publish"))
+    ]
+
+
+async def test_retry_still_refuses_a_queued_target_that_is_only_fresh(
+    seeded: Any, session_factory: Any, build_harness: Any
+) -> None:
+    # Given a session whose target was queued a moment ago, so its job is the
+    # queue's to run, and which has no attempt of its own
+    fresh = await target_id(session_factory, seeded.session_id, 7)
+    await set_state(
+        session_factory, seeded.session_id, status="queued", target_status="queued"
+    )
+    harness: ApiHarness = await build_harness(user_id=seeded.user_id)
+
+    # When that target is retried
+    response = await harness.client.post(
+        f"/api/sessions/{seeded.session_id}/retry", json={"targetIds": [str(fresh)]}
+    )
+
+    # Then staleness is what decides it, and a fresh target is still refused rather
+    # than duplicated onto the queue
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "target_running"
+    assert harness.pool.jobs == []
+
+
+async def test_retry_never_requeues_a_running_target_however_old(
+    seeded: Any, session_factory: Any, build_harness: Any
+) -> None:
+    # Given a target that has been running for longer than the staleness threshold
+    running = await target_id(session_factory, seeded.session_id, 7)
+    await set_state(
+        session_factory, seeded.session_id, status="running", target_status="running"
+    )
+    await age_target(session_factory, running, age=_LOST_QUEUE_AGE)
+    harness: ApiHarness = await build_harness(user_id=seeded.user_id)
+
+    # When that target is asked for by hand
+    response = await harness.client.post(
+        f"/api/sessions/{seeded.session_id}/retry", json={"targetIds": [str(running)]}
+    )
+
+    # Then age changes nothing: a worker is on it, and the staleness rule only ever
+    # reads a queued target
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "target_running"
+    assert harness.pool.jobs == []
+
+
+async def test_retry_refuses_a_stale_queued_target_with_a_running_attempt(
+    seeded: Any, session_factory: Any, build_harness: Any
+) -> None:
+    # Given a queued target old enough to be read as lost, but with an attempt that
+    # is still running — a worker took the job, whatever the target's status says
+    target = await target_id(session_factory, seeded.session_id, 7)
+    await set_state(
+        session_factory, seeded.session_id, status="running", target_status="queued"
+    )
+    await add_attempt(session_factory, target, status="running", tokens=0)
+    await age_target(session_factory, target, age=_LOST_QUEUE_AGE)
+    harness: ApiHarness = await build_harness(user_id=seeded.user_id)
+
+    # When the session is retried
+    response = await harness.client.post(
+        f"/api/sessions/{seeded.session_id}/retry", json={"targetIds": [str(target)]}
+    )
+
+    # Then the running attempt is the evidence the queue did not lose the target,
+    # so it is refused rather than duplicated
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "target_running"
+    assert harness.pool.jobs == []
 
 
 async def test_retry_with_nothing_retryable_conflicts(

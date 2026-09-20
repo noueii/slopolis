@@ -32,6 +32,7 @@ __all__ = [
     "RETRYABLE_TARGET_STATUSES",
     "REVIEW",
     "RetryAction",
+    "attempt_retry_action",
     "latest_attempts",
     "retry_action",
     "retry_actions",
@@ -44,26 +45,45 @@ RetryAction = Literal["review", "publish"]
 REVIEW: RetryAction = "review"
 PUBLISH: RetryAction = "publish"
 
-#: Target statuses a manual retry may put back on the queue (spec 10.5 §Manual
+#: Target statuses whose retry action a session read can name (spec 10.5 §Manual
 #: retry): the run failed, or the user cancelled it, and either is re-runnable.
-#: A target in any other status is not retryable, so it has no retry action.
+#: A target in any other status reports no action — including a ``queued`` one,
+#: whose retryability depends on whether the queue still holds its job. That is
+#: the endpoint's question (it reads the attempts and the clock to answer it), not
+#: one a read that only labels buttons should ask.
 RETRYABLE_TARGET_STATUSES = (TargetStatus.FAILED.value, TargetStatus.CANCELLED.value)
+
+
+def attempt_retry_action(attempt: SessionTargetRun | None) -> RetryAction:
+    """Return what a retry does with a target whose last attempt is ``attempt``.
+
+    The rule once a target is known to be retryable: a last attempt that was a
+    GitHub failure after the model had run (usage recorded) gets :data:`PUBLISH`,
+    because the review it bought exists and only its posting failed; everything
+    else gets :data:`REVIEW` — including a target that never ran an attempt, where
+    there is nothing to post.
+
+    Split from :func:`retry_action` because its two readers ask at different
+    moments: a session read decides retryability and the mode together, while the
+    retry endpoint has already decided exactly which targets it will re-queue —
+    including a queued one whose job the queue lost, which the status rule alone
+    would call unretryable — and only needs the mode from here.
+    """
+    if attempt is not None and attempt.tokens > 0 and _is_github_failure(attempt.error):
+        return PUBLISH
+    return REVIEW
 
 
 def retry_action(status: str, attempt: SessionTargetRun | None) -> RetryAction | None:
     """Return what retrying ``status``' target would do, or ``None`` when it cannot.
 
-    A retryable target whose last attempt is a GitHub failure that had already
-    recorded usage gets :data:`PUBLISH`: the review exists, so the retry posts it
-    instead of buying it again. Every other retryable target gets :data:`REVIEW`
-    — including one that never ran an attempt, where there is nothing to post. A
-    target that is not retryable gets ``None``, which is the wire's absent action.
+    A target that is not retryable gets ``None``, which is the wire's absent
+    action; a retryable one gets whatever its last attempt calls for, by
+    :func:`attempt_retry_action`.
     """
     if status not in RETRYABLE_TARGET_STATUSES:
         return None
-    if attempt is not None and attempt.tokens > 0 and _is_github_failure(attempt.error):
-        return PUBLISH
-    return REVIEW
+    return attempt_retry_action(attempt)
 
 
 def _is_github_failure(error: str | None) -> bool:

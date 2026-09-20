@@ -18,6 +18,7 @@ from arq import Retry
 from sqlalchemy import select
 from worker.config import WorkerConfig
 from worker.deps import SessionFactory
+from worker.errors import UnknownModeError
 from worker.jobs.loading import TargetJob, load_target
 from worker.jobs.review_target import review_target
 from worker.jobs.slots import SLOT_WAIT_FOREVER, SlotGate
@@ -1185,3 +1186,24 @@ async def test_a_comment_refused_mid_publish_keeps_the_links_already_written(
     assert findings[5].github_comment_id == 778
     assert (await _target(h)).status == "done"
     assert (await _session(h)).status == "done"
+
+
+async def test_an_unknown_mode_fails_naming_the_mode_and_the_target(
+    session_factory: SessionFactory,
+) -> None:
+    # Given a queued target waiting for its job
+    h = await seed_and_build(session_factory)
+
+    # When the queue hands that job a mode this build does not define — the shape a
+    # server newer than this worker produces
+    with pytest.raises(UnknownModeError) as refusal:
+        await _run(h, mode="reopen")
+
+    # Then the failure names both the mode and the target it arrived on, so the
+    # caller that asked for it can be found in the ARQ log
+    assert "reopen" in str(refusal.value)
+    assert str(h.seed.target_id) in str(refusal.value)
+
+    # ... and nothing ran: no attempt was opened and no review was bought
+    assert await _runs(h) == []
+    assert h.seed.llm.models == []

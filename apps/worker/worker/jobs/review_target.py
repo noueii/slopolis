@@ -69,7 +69,7 @@ from worker.deps import (
     ReviewContext,
     SessionFactory,
 )
-from worker.errors import PermanentTargetError
+from worker.errors import PermanentTargetError, UnknownModeError
 from worker.jobs import persistence
 from worker.jobs.agent_runs import RunRecorder, RunRef
 from worker.jobs.loading import LoadOutcome, TargetJob, load_target
@@ -89,6 +89,14 @@ _LOG = logging.getLogger("worker.review_target")
 #: job is told — this module never re-derives the decision.
 REVIEW = "review"
 PUBLISH = "publish"
+
+#: Every mode this build accepts, the two constants above and nothing else. A job
+#: that arrives with any other value came from a server that disagrees with this
+#: worker about what the job is for, and the disagreement has to be named: treating
+#: it as a review would spend a model call nobody asked for, and letting it fall
+#: through to a signature that no longer takes the parameter reports a bare
+#: ``TypeError`` naming neither the mode nor the target.
+_MODES = (REVIEW, PUBLISH)
 
 #: The registry role that runs V1.1's single-pass review as one ``sub`` run
 #: (spec v2 §3, §15). V1.2 replaces it with the aspect sub-agents.
@@ -191,8 +199,15 @@ async def review_target(
     ``mode`` is the server's decision for this attempt (spec 10.5): ``"review"``
     or ``"publish"``. A retried job keeps whatever the queue was given — an
     attempt that fails and is retried by ARQ runs the same mode again, which is
-    what keeps a throttled publish from turning into a second review.
+    what keeps a throttled publish from turning into a second review. A mode this
+    build does not define fails the job before it touches the target, naming the
+    mode and the target it arrived on.
     """
+    if mode not in _MODES:
+        raise UnknownModeError(
+            f"review_target does not know mode {mode!r} for target {target_id}; "
+            f"expected one of {', '.join(_MODES)}"
+        )
     async with ctx["session_factory"]() as db:
         job = await _guarded_target(db, session_id, target_id)
         if job is None:

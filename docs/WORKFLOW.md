@@ -64,6 +64,10 @@ docs/specification/  # versioned specs
   submitted session has to actually run.
 - `make worker` — just the ARQ worker, in its own shell (`uv run arq worker.main.WorkerSettings`).
   It needs Redis and the DB from `infra/docker-compose.yml`, and `apps/worker/.env`.
+  **Restart it after pulling**: a worker keeps the code it started with, and a job whose arguments
+  changed (a new job parameter, a renamed function) fails inside ARQ with a `TypeError` that never
+  touches the target — leaving it `queued` with no job. The worker logs a build fingerprint at
+  startup, so compare it with the checkout when a queue looks stuck.
 - `make dev-browser-mock` — web app only, against the in-browser MSW mock; no API, no worker.
   (Formerly `dev-worker`: that name collided with the ARQ worker, which it is not.)
 - `make dev` — web app only; `MOCK_MODE=server|worker|off`, `/api` proxied for server/off

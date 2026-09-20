@@ -33,7 +33,8 @@ from app.errors import ApiError
 from app.retry_actions import (
     PUBLISH,
     RETRYABLE_TARGET_STATUSES,
-    retry_actions,
+    attempt_retry_action,
+    latest_attempts,
 )
 from app.routers._session_data import (
     accessible_views,
@@ -57,15 +58,39 @@ from app.schemas import (
 from app.schemas import ReviewSession as ReviewSessionSchema
 from app.serializers import serialize_session
 from slopolis_core.domain import SessionStatus, TargetStatus
-from slopolis_db.models import Repository, ReviewSession, SessionTarget, User
+from slopolis_db.models import (
+    Repository,
+    ReviewSession,
+    SessionTarget,
+    SessionTargetRun,
+    User,
+)
 
 __all__ = ["router"]
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 #: Target statuses the queue already owns. Retrying one would duplicate the job
-#: it is already running, so it is refused instead.
+#: it is already running, so it is refused instead — except for a ``queued``
+#: target whose job the queue lost, which :func:`_queue_lost` recognizes.
 _ACTIVE_TARGET_STATUSES = (TargetStatus.QUEUED.value, TargetStatus.RUNNING.value)
+
+#: How long a target may sit ``queued`` before a retry reads its job as lost.
+#: A queued target is normally picked up and marked ``running`` within seconds, so
+#: one still queued well past that, with no running attempt behind it, is a job
+#: that died before it could touch the target. The case this exists for is a job
+#: the queue refuses outright: a worker running older code rejects the arguments
+#: the newer server enqueued with (``TypeError``) before the target is ever
+#: loaded, leaving it ``queued`` with no job and no attempt — a dead end that only
+#: a direct database edit used to get out of.
+#:
+#: Generous rather than tight, because re-enqueuing a target the queue does still
+#: hold is what the guard must avoid: behind a saturated worker a target can wait
+#: this long with its job still queued, and a retry would then duplicate it. The
+#: window is the stand-in for knowing what the queue holds, and the alternative was
+#: a session nothing could finish. It lives here, not beside the worker's knobs,
+#: because the decision is the server's: it is the side that can put the job back.
+QUEUE_STALE_AFTER_S = 120
 
 
 @router.get("")
@@ -251,6 +276,11 @@ async def retry_session(
     worker opens the next attempt itself. Each target is re-queued in the mode its
     last attempt calls for, so a target that only failed to publish is not
     reviewed — and paid for — a second time.
+
+    A queued target is normally the queue's to run, and is refused. The exception
+    is one whose job the queue lost (:data:`QUEUE_STALE_AFTER_S`): nothing but a
+    re-enqueue can run it, so it is recovered here rather than refused — the way
+    out of a session the queue moved on from without finishing.
     """
     session = await _require_session(db, session_id, workspace_id)
     view = await require_session_access(db, session, viewer=viewer, checker=checker)
@@ -263,12 +293,24 @@ async def retry_session(
     # and the point of the lock is that the second caller sees what a first caller
     # in flight has already written.
     all_targets = await _reload_targets(db, session_id)
+    # A queued target is the one status whose meaning has to be read rather than
+    # known: whether the queue holds its job is what the running attempts say.
+    running_attempts = await _running_attempts(
+        db,
+        [
+            target.id
+            for target in all_targets
+            if target.status == TargetStatus.QUEUED.value
+        ],
+    )
     # The candidates are the targets this viewer may read, and therefore the ones
     # the detail screen could have offered them.
     readable = {target.id for target in view.targets}
     targets = _retry_selection(
         [target for target in all_targets if target.id in readable],
         body.target_ids if body else None,
+        running_attempts=running_attempts,
+        now=dt.datetime.now(dt.UTC),
     )
     # Each target comes back in the mode its own last attempt calls for (spec 10.5
     # §Retrying a run that only failed to publish): one whose review is already on
@@ -276,11 +318,28 @@ async def retry_session(
     # the rule asks whether the target is retryable *now* — which the flip below
     # is what ends. The mode travels with the job, so the worker never re-derives
     # it, and never re-reviews a pull request the user has already paid for.
-    actions = await retry_actions(db, targets)
+    # Only the attempt is asked, not the status: the selection above already
+    # decided each of these targets may be retried — including the queued ones the
+    # status rule alone would refuse.
+    attempts = await latest_attempts(db, [target.id for target in targets])
+    actions = {
+        target.id: attempt_retry_action(attempts.get(target.id)) for target in targets
+    }
     publish_retry = [target for target in targets if actions[target.id] == PUBLISH]
     review_retry = [target for target in targets if actions[target.id] != PUBLISH]
+    recovered = [
+        target for target in targets if target.status == TargetStatus.QUEUED.value
+    ]
     for target in targets:
         target.status = SessionStatus.QUEUED.value
+    # A recovered target was already queued, so that write changes nothing and the
+    # row would keep the timestamp the decision above was made from: a second retry
+    # would then read the same target as lost again and put a second job of it on
+    # the queue. Being queued again is what the timestamp means, so the recovery
+    # stamps it.
+    requeued_at = dt.datetime.now(dt.UTC)
+    for target in recovered:
+        target.updated_at = requeued_at
     # The session only goes back to queued when nothing in it is still running: a
     # session with a live target is a review in progress, and reporting it as queued
     # (with no finish time) would move live work backwards. Left running, it is the
@@ -309,16 +368,30 @@ async def _serialize(db: AsyncSession, session: ReviewSession) -> ReviewSessionS
 
 
 def _retry_selection(
-    targets: list[SessionTarget], requested: list[uuid.UUID] | None
+    targets: list[SessionTarget],
+    requested: list[uuid.UUID] | None,
+    *,
+    running_attempts: set[uuid.UUID],
+    now: dt.datetime,
 ) -> list[SessionTarget]:
     """Return the targets a retry re-queues, or raise the refusal for it.
 
     Refusals come before the caller writes anything: a target the queue already
     owns is named rather than duplicated, and a selection with nothing retryable
-    in it is a conflict, not a silent no-op (spec 10.5 §Manual retry). The
-    statuses it accepts are the ones the retry rule reads, so a target the
-    endpoint re-queues is always one the wire labelled as retryable.
+    in it is a conflict, not a silent no-op (spec 10.5 §Manual retry). What counts
+    as retryable is the statuses the retry rule reads, plus a queued target whose
+    job is gone (:func:`_queue_lost`) — a target the queue owns only in name, and
+    which nothing else can put back on it.
     """
+    lost = {
+        target.id
+        for target in targets
+        if _queue_lost(target, running_attempts=running_attempts, now=now)
+    }
+
+    def retryable(target: SessionTarget) -> bool:
+        return target.status in RETRYABLE_TARGET_STATUSES or target.id in lost
+
     if requested:
         wanted = list(dict.fromkeys(requested))
         by_id = {target.id: target for target in targets}
@@ -332,11 +405,13 @@ def _retry_selection(
                 )
         selection = [by_id[target_id] for target_id in wanted]
     else:
-        selection = [
-            target for target in targets if target.status in RETRYABLE_TARGET_STATUSES
-        ]
+        selection = [target for target in targets if retryable(target)]
 
-    busy = [target for target in selection if target.status in _ACTIVE_TARGET_STATUSES]
+    busy = [
+        target
+        for target in selection
+        if target.status in _ACTIVE_TARGET_STATUSES and not retryable(target)
+    ]
     if busy:
         raise ApiError(
             409,
@@ -345,16 +420,59 @@ def _retry_selection(
             detail=f"Target {busy[0].id} is {busy[0].status}.",
         )
 
-    retryable = [
-        target for target in selection if target.status in RETRYABLE_TARGET_STATUSES
-    ]
-    if not retryable:
+    requeued = [target for target in selection if retryable(target)]
+    if not requeued:
         raise ApiError(
             409,
             "nothing_to_retry",
             "This session has no failed or cancelled targets to retry.",
         )
-    return retryable
+    return requeued
+
+
+def _queue_lost(
+    target: SessionTarget, *, running_attempts: set[uuid.UUID], now: dt.datetime
+) -> bool:
+    """Whether a queued target's job is gone rather than still on its way.
+
+    Two things say the queue does not have it: no attempt row of the target is
+    running (a worker that took the job marks one before it touches anything
+    else), and the target has been queued longer than
+    :data:`QUEUE_STALE_AFTER_S` — long enough that a job which was going to start
+    it would have. A target with no attempt at all is exactly the case this is
+    for: the job died before it could open one.
+    """
+    if target.status != TargetStatus.QUEUED.value:
+        return False
+    if target.id in running_attempts:
+        return False
+    updated_at = target.updated_at
+    if updated_at.tzinfo is None:
+        # SQLite hands timestamps back naive; they are stored as UTC.
+        updated_at = updated_at.replace(tzinfo=dt.UTC)
+    return updated_at <= now - dt.timedelta(seconds=QUEUE_STALE_AFTER_S)
+
+
+async def _running_attempts(
+    db: AsyncSession, target_ids: list[uuid.UUID]
+) -> set[uuid.UUID]:
+    """Return the targets with an attempt row still marked running.
+
+    The evidence a queued target is being worked on: a worker opens its attempt
+    (and marks the target running) before the attempt does anything, so a running
+    row means the queue did not lose the job, whatever the target's own status
+    says — including a retry that queued it while the previous attempt was still
+    winding down.
+    """
+    if not target_ids:
+        return set()
+    rows = await db.scalars(
+        select(SessionTargetRun.target_id).where(
+            SessionTargetRun.target_id.in_(target_ids),
+            SessionTargetRun.status == TargetStatus.RUNNING.value,
+        )
+    )
+    return set(rows)
 
 
 async def _require_session(

@@ -40,6 +40,33 @@ export interface UserRef {
   isAdmin: boolean
 }
 
+/** A workspace an account belongs to (or is about to create). */
+export interface WorkspaceRef {
+  id: string
+  name: string
+  /** URL-safe identifier, e.g. `acme-labs`. */
+  slug: string
+}
+
+/**
+ * `GET /api/me`: the signed-in account plus the workspace it belongs to.
+ * `workspace` is `null` for an account that has not created or joined one yet —
+ * the app shows the onboarding gate instead of the shell in that case.
+ */
+export interface MeResponse extends UserRef {
+  workspace: WorkspaceRef | null
+}
+
+/** `GET /api/workspaces`: the workspaces the account can see. */
+export interface WorkspaceListResponse {
+  items: WorkspaceRef[]
+}
+
+/** `POST /api/workspaces` body. */
+export interface CreateWorkspaceRequest {
+  name: string
+}
+
 /** One pull request within a session. */
 export interface SessionTarget {
   id: string

@@ -11,18 +11,21 @@ import json
 from typing import Any, TypeGuard
 
 import httpx
+import pytest
 import respx
 from githubkit import GitHub, TokenAuthStrategy
 from githubkit_schemas.latest.models import (  # pyright: ignore[reportMissingTypeStubs]
     CheckRun,
+    Integration,
     IssueComment,
     PullRequestReviewComment,
     ReposOwnerRepoCommitsRefCheckRunsGetResponse200,
 )
 from test_github_helpers import fixture
 
+from slopolis_core.github.errors import GitHubError
 from slopolis_core.github.models import InlineComment
-from slopolis_core.github.publisher import CHECK_RUN_NAME, GitHubPublisher
+from slopolis_core.github.publisher import CHECK_RUN_NAME, SUMMARY_MARKER, GitHubPublisher
 
 _BASE = "https://api.github.com"
 _REPO = "acme/widget"
@@ -30,10 +33,25 @@ _OWNER, _NAME = _REPO.split("/")
 _TOKEN = "ghs_test"
 _COMMIT = "headsha"
 _NUMBER = 7
+_APP_ID = 987
+_OTHER_APP_ID = 654
+_COMMENTS_URL = f"/repos/{_OWNER}/{_NAME}/issues/{_NUMBER}/comments"
 
 
-def _publisher() -> GitHubPublisher:
-    return GitHubPublisher(GitHub(TokenAuthStrategy(_TOKEN)))
+def _publisher(*, app_id: int | None = _APP_ID) -> GitHubPublisher:
+    return GitHubPublisher(GitHub(TokenAuthStrategy(_TOKEN)), app_id=app_id)
+
+
+def _comment(comment_id: int, *, body: str, app_id: int | None = None) -> dict[str, Any]:
+    """One comment body as GitHub serves it: performed by ``app_id``'s App, or a person."""
+    if app_id is None:
+        return fixture(IssueComment, id=comment_id, body=body)
+    return fixture(
+        IssueComment,
+        id=comment_id,
+        body=body,
+        performed_via_github_app=fixture(Integration, id=app_id),
+    )
 
 
 def _is_str_dict(value: object) -> TypeGuard[dict[str, Any]]:
@@ -174,3 +192,87 @@ async def test_upsert_check_run_updates_existing(respx_mock: respx.Router) -> No
     assert returned == 777
     assert route.called
     assert _request_body(route.calls.last.request)["conclusion"] == "success"
+
+
+@respx.mock(base_url=_BASE)
+async def test_find_summary_comment_ignores_a_marker_written_by_someone_else(
+    respx_mock: respx.Router,
+) -> None:
+    """A quoted marker from a user, or another App, is not slopolis's to edit."""
+    respx_mock.get(_COMMENTS_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                _comment(11, body=f">{SUMMARY_MARKER}\n\nsomeone's reply, quoting the review"),
+                _comment(12, body=f"{SUMMARY_MARKER}\n\n- Status: **done**", app_id=_OTHER_APP_ID),
+                _comment(13, body=f"{SUMMARY_MARKER}\n\n- Status: **done**", app_id=_APP_ID),
+            ],
+        )
+    )
+
+    found = await _publisher().find_summary_comment(_REPO, _NUMBER)
+
+    assert found == 13
+
+
+@respx.mock(base_url=_BASE)
+async def test_find_summary_comment_scans_past_a_full_page(respx_mock: respx.Router) -> None:
+    """A summary behind a full page of conversation is still found."""
+    route = respx_mock.get(_COMMENTS_URL).mock(
+        side_effect=[
+            httpx.Response(
+                200, json=[_comment(1000 + index, body="chatter") for index in range(100)]
+            ),
+            httpx.Response(200, json=[_comment(21, body=SUMMARY_MARKER, app_id=_APP_ID)]),
+        ]
+    )
+
+    found = await _publisher().find_summary_comment(_REPO, _NUMBER)
+
+    assert found == 21
+    assert route.call_count == 2
+
+
+@respx.mock(base_url=_BASE)
+async def test_find_summary_comment_answers_none_without_a_marker(
+    respx_mock: respx.Router,
+) -> None:
+    """A pull request that never had a review has no comment to edit."""
+    route = respx_mock.get(_COMMENTS_URL).mock(
+        return_value=httpx.Response(200, json=[_comment(31, body="please review this")])
+    )
+
+    found = await _publisher().find_summary_comment(_REPO, _NUMBER)
+
+    assert found is None
+    # The short page ends the walk: a bounded lookup is one request here, not five
+    assert route.call_count == 1
+
+
+@respx.mock(base_url=_BASE)
+async def test_find_summary_comment_matches_an_app_comment_when_the_app_is_unknown(
+    respx_mock: respx.Router,
+) -> None:
+    """A publisher that cannot name its own App still rolls its comment forward."""
+    respx_mock.get(_COMMENTS_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                _comment(41, body=f">{SUMMARY_MARKER}\n\nquoting the review"),
+                _comment(42, body=SUMMARY_MARKER, app_id=_OTHER_APP_ID),
+            ],
+        )
+    )
+
+    found = await _publisher(app_id=None).find_summary_comment(_REPO, _NUMBER)
+
+    assert found == 42
+
+
+@respx.mock(base_url=_BASE)
+async def test_find_summary_comment_reports_a_refused_listing(respx_mock: respx.Router) -> None:
+    """A listing GitHub refuses surfaces as a ``GitHubError`` for the caller's fallback."""
+    respx_mock.get(_COMMENTS_URL).mock(return_value=httpx.Response(403, json={"message": "nope"}))
+
+    with pytest.raises(GitHubError):
+        await _publisher().find_summary_comment(_REPO, _NUMBER)

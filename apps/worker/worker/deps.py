@@ -71,6 +71,8 @@ class ContextReader(Protocol):
 class Publisher(Protocol):
     """Publish surface the job needs (subset of :class:`GitHubPublisher`)."""
 
+    def find_summary_comment(self, repo_full_name: str, number: int) -> Awaitable[int | None]: ...
+
     def upsert_summary_comment(
         self,
         repo_full_name: str,
@@ -237,7 +239,7 @@ async def build_publisher(
 ) -> GitHubPublisher:
     """Mint (or reuse) a token and build a GitHub publisher."""
     token = await _installation_token(installation, cache)
-    return GitHubPublisher(GitHub(TokenAuthStrategy(token)))
+    return _publisher(token)
 
 
 async def build_installation_clients(
@@ -247,7 +249,16 @@ async def build_installation_clients(
     token = await _installation_token(installation, cache)
     return InstallationClients(
         reader=GitHubClient.from_installation_token(token),
-        publisher=GitHubPublisher(GitHub(TokenAuthStrategy(token))),
+        publisher=_publisher(token),
+    )
+
+
+def _publisher(token: str) -> GitHubPublisher:
+    """Build a publisher that knows which App's comments are its own (§10.7)."""
+    app_id = get_settings().github_app_id
+    return GitHubPublisher(
+        GitHub(TokenAuthStrategy(token)),
+        app_id=int(app_id) if app_id else None,
     )
 
 

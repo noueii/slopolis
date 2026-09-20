@@ -1,6 +1,6 @@
 """ARQ job: run one review target and publish its results (spec 10.5-10.9).
 
-`review_target(ctx, session_id, target_id)` is the unit of work the server
+`review_target(ctx, session_id, target_id, mode)` is the unit of work the server
 enqueues once per PR target. It loads the target graph, guards on terminal and
 cancelled state, opens the target's nodes in the Harness V1.1 run tree (the
 session's `main` run and this target's `pr` run, then the reviewer's `sub` run),
@@ -11,6 +11,14 @@ visible rather than erasing the run's expensive half. Transient failures retry
 with bounded exponential backoff; permanent failures (invalid repo config, an
 installation GitHub refused to authorize) fail the target immediately. One
 target's failure never affects another — they are separate jobs.
+
+`mode` says what the attempt is for (spec 10.5 §Retrying a run that only failed
+to publish). `"review"` — what a submission and an ordinary retry ask for — runs
+the harness. `"publish"` is a retry of a target whose last attempt failed after
+the model had run: its review is already persisted, unposted, so this attempt
+rebuilds the publish payloads from those findings and posts them, with no model
+call and no second bill for the same answer. The server decided it where the
+target's state is known and passed it with the job, so this job never guesses.
 
 The target's per-repository and per-installation caps are applied here too
 (spec 10.5): before an attempt starts, the job holds a run slot per capped
@@ -30,10 +38,11 @@ from dataclasses import dataclass
 from typing import NotRequired, TypedDict
 
 from arq import Retry
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from slopolis_core.config.repo_config import RepoConfig
-from slopolis_core.domain import TargetStatus
+from slopolis_core.domain import Severity, TargetStatus
 from slopolis_core.findings import Finding as CoreFinding
 from slopolis_core.github.errors import GitHubAuthError
 from slopolis_core.github.models import GitHubPullRequest
@@ -74,9 +83,30 @@ __all__ = ["WorkerCtx", "review_target"]
 
 _LOG = logging.getLogger("worker.review_target")
 
+#: The two things a retry can ask this job for (spec 10.5 §Retrying a run that
+#: only failed to publish). ``PUBLISH`` re-posts the review the last attempt
+#: already bought; ``REVIEW`` runs the model again. The server decides, and the
+#: job is told — this module never re-derives the decision.
+REVIEW = "review"
+PUBLISH = "publish"
+
 #: The registry role that runs V1.1's single-pass review as one ``sub`` run
 #: (spec v2 §3, §15). V1.2 replaces it with the aspect sub-agents.
 _REVIEWER_SPEC: AgentSpec = agent_spec("reviewer")
+
+#: What the run tree says when a retry re-posts a review instead of buying it
+#: again. The node is what the history reads, so it says what happened.
+_PUBLISH_RETRY_MESSAGE = "re-published the existing review without a model call"
+
+#: How the attempt's own text — its node summary, or its stored error when it
+#: failed — marks itself. Without it, a publish retry that spends nothing reads
+#: exactly like a review that cost nothing (spec 10.5).
+_PUBLISH_RETRY_MARK = "publish retry: the review was not re-run"
+
+#: What a publish retry says when the attempt that bought the review is gone.
+#: Publishing an empty review instead would be a silent lie; there is nothing to
+#: re-derive it from, and no retry can conjure it back.
+_NO_REVIEW_TO_PUBLISH = "the attempt that bought this review is no longer recorded"
 
 #: Position of each level in the tree: main(0) -> pr(1) -> sub(2) (spec §2).
 _MAIN_DEPTH = 0
@@ -153,15 +183,23 @@ class _ReviewStopped(RuntimeError):
     """The reviewer run ended without a review (run ceiling or model resolution)."""
 
 
-async def review_target(ctx: WorkerCtx, session_id: str, target_id: str) -> None:
-    """Run one review target end to end, retrying transient failures via ARQ."""
+async def review_target(
+    ctx: WorkerCtx, session_id: str, target_id: str, mode: str = REVIEW
+) -> None:
+    """Run one review target end to end, retrying transient failures via ARQ.
+
+    ``mode`` is the server's decision for this attempt (spec 10.5): ``"review"``
+    or ``"publish"``. A retried job keeps whatever the queue was given — an
+    attempt that fails and is retried by ARQ runs the same mode again, which is
+    what keeps a throttled publish from turning into a second review.
+    """
     async with ctx["session_factory"]() as db:
         job = await _guarded_target(db, session_id, target_id)
         if job is None:
             return
         slots = ctx.get("slots")
         if slots is None:
-            await _start_and_run(ctx=ctx, db=db, job=job)
+            await _start_and_run(ctx=ctx, db=db, job=job, mode=mode)
             return
         try:
             async with slots.hold(job, wait_s=_slot_wait(ctx)) as waited:
@@ -174,7 +212,7 @@ async def review_target(ctx: WorkerCtx, session_id: str, target_id: str) -> None
                     if reloaded is None:
                         return
                     job = reloaded
-                await _start_and_run(ctx=ctx, db=db, job=job)
+                await _start_and_run(ctx=ctx, db=db, job=job, mode=mode)
         except SlotUnavailable as exc:
             raise _defer_without_slot(ctx=ctx, job=job) from exc
 
@@ -203,11 +241,13 @@ async def _guarded_target(
     return load.job
 
 
-async def _start_and_run(*, ctx: WorkerCtx, db: AsyncSession, job: TargetJob) -> None:
+async def _start_and_run(
+    *, ctx: WorkerCtx, db: AsyncSession, job: TargetJob, mode: str
+) -> None:
     """Open this attempt's run row and execute it."""
     run = await persistence.start_run(db, job.target, now=_now())
     await db.commit()
-    await _run_attempt(ctx=ctx, db=db, review=ctx["review"], job=job, run=run)
+    await _run_attempt(ctx=ctx, db=db, review=ctx["review"], job=job, run=run, mode=mode)
 
 
 def _slot_wait(ctx: WorkerCtx) -> float:
@@ -252,6 +292,7 @@ async def _run_attempt(
     review: ReviewContext,
     job: TargetJob,
     run: SessionTargetRun,
+    mode: str,
 ) -> None:
     """Execute one attempt and record its outcome, retrying or failing."""
     ids = _Ids(
@@ -264,34 +305,43 @@ async def _run_attempt(
     # The tree is an artifact of its own: commit it before the attempt does any
     # work, so a failure below cannot erase the nodes a retry will reuse (§15).
     await db.commit()
-    # A new attempt supersedes the previous one's findings, whichever path asked
-    # for it — an automatic retry after a throttled publish, or a manual retry
-    # (spec 10.5). Discarding them here rather than on the failure path keeps
-    # them visible while a retry waits, and keeps one rule in one place: a posted
-    # finding is the app's link to a comment that is on the pull request, so it
-    # is never dropped. The first attempt finds nothing to discard.
-    discarded = await persistence.discard_unposted_findings(db, job.target_id)
-    if discarded:
-        _LOG.info(
-            "superseded unposted findings",
-            extra={"target_id": str(job.target_id), "count": discarded},
-        )
-    await db.commit()
+    if mode == REVIEW:
+        # A new review supersedes the previous one's findings, whichever path
+        # asked for it — an automatic retry after a throttled publish, or a manual
+        # retry (spec 10.5). Discarding them here rather than on the failure path
+        # keeps them visible while a retry waits, and keeps one rule in one place:
+        # a posted finding is the app's link to a comment that is on the pull
+        # request, so it is never dropped. The first attempt finds nothing to
+        # discard.
+        #
+        # A publish retry is the one attempt that keeps them: those unposted rows
+        # are the review it was asked to post, and deleting them would publish an
+        # empty summary instead (spec 10.5 §Retrying a run that only failed to
+        # publish).
+        discarded = await persistence.discard_unposted_findings(db, job.target_id)
+        if discarded:
+            _LOG.info(
+                "superseded unposted findings",
+                extra={"target_id": str(job.target_id), "count": discarded},
+            )
+        await db.commit()
     started = time.monotonic()
     try:
-        plan = await _execute(db=db, review=review, job=job, tree=tree)
-        await _record_review(tree=tree, job=job, result=plan.result)
-        # Each run's row and its events become visible together, and before the
-        # attempt's own writes, so no node reports a status without its log (§8).
-        await db.commit()
-        # Publishing is inside the guarded region: a refused or throttled write is
-        # an attempt failure like any other, and it must close the attempt row
-        # instead of escaping the job with the target stuck ``running`` (§10.7).
-        # The check run is the exception — the publisher records its refusal
-        # instead of raising, and returns why (see ``_persist_and_publish``).
-        check_note = await _persist_and_publish(db=db, job=job, run=run, ids=ids, plan=plan)
+        if mode == PUBLISH:
+            # Publishing is inside the guarded region for the same reason it is in
+            # review mode: a refused or throttled write is an attempt failure like
+            # any other and must close the attempt row (§10.7).
+            plan, check_note = await _publish_attempt(
+                db=db, review=review, job=job, run=run, tree=tree, ids=ids
+            )
+        else:
+            plan, check_note = await _review_attempt(
+                db=db, review=review, job=job, run=run, tree=tree, ids=ids
+            )
     except PermanentTargetError as exc:
-        await _fail_permanently(db=db, job=job, run=run, ids=ids, tree=tree, exc=exc)
+        await _fail_permanently(
+            db=db, job=job, run=run, ids=ids, tree=tree, exc=exc, mode=mode
+        )
         return
     except GitHubAuthError as exc:
         # A missing App permission or a revoked token is not a transient state:
@@ -300,10 +350,14 @@ async def _run_attempt(
         # attempt's findings are already committed and stay visible.
         # ``GitHubRateLimitError`` is a sibling of this error rather than a
         # subclass, so a throttled 403 still reaches the retry handler below.
-        await _fail_permanently(db=db, job=job, run=run, ids=ids, tree=tree, exc=exc)
+        await _fail_permanently(
+            db=db, job=job, run=run, ids=ids, tree=tree, exc=exc, mode=mode
+        )
         return
     except Exception as exc:  # classified as retryable or terminal below
-        await _fail_retryable(ctx=ctx, db=db, job=job, run=run, ids=ids, tree=tree, exc=exc)
+        await _fail_retryable(
+            ctx=ctx, db=db, job=job, run=run, ids=ids, tree=tree, exc=exc, mode=mode
+        )
         return
 
     duration_ms = int((time.monotonic() - started) * 1000)
@@ -324,7 +378,9 @@ async def _run_attempt(
     await tree.recorder.finish(
         tree.pr.id,
         AgentStatus.DONE,
-        summary=_review_summary(job, plan.result, skipped=check_note),
+        summary=_attempt_text(
+            _review_summary(job, plan.result, skipped=check_note), mode
+        ),
         finding_count=len(plan.result.findings),
     )
     await persistence.recompute_session(db, job.session_id)
@@ -336,6 +392,178 @@ async def _run_attempt(
             "target_id": str(ids.target),
             "findings": len(plan.result.findings),
             "tokens": plan.result.tokens,
+        },
+    )
+
+
+async def _review_attempt(
+    *,
+    db: AsyncSession,
+    review: ReviewContext,
+    job: TargetJob,
+    run: SessionTargetRun,
+    tree: _AttemptTree,
+    ids: _Ids,
+) -> tuple[_AttemptPlan, str | None]:
+    """Review the pull request, persist its output, and publish it.
+
+    Returns the plan it published and the note about a surface GitHub refused, so
+    the success tail can finish the attempt exactly as before.
+    """
+    plan = await _execute(db=db, review=review, job=job, tree=tree)
+    await _record_review(tree=tree, job=job, result=plan.result)
+    # Each run's row and its events become visible together, and before the
+    # attempt's own writes, so no node reports a status without its log (§8).
+    await db.commit()
+    # The check run is best effort — the publisher records its refusal instead of
+    # raising, and returns why (see ``_persist_and_publish``).
+    check_note = await _persist_and_publish(db=db, job=job, run=run, ids=ids, plan=plan)
+    return plan, check_note
+
+
+async def _publish_attempt(
+    *,
+    db: AsyncSession,
+    review: ReviewContext,
+    job: TargetJob,
+    run: SessionTargetRun,
+    tree: _AttemptTree,
+    ids: _Ids,
+) -> tuple[_AttemptPlan, str | None]:
+    """Re-post the review this target's last attempt already bought (spec 10.5).
+
+    No model is resolved and none is called: the review exists as persisted
+    findings, so this attempt only re-reads the pull request (for the head commit
+    the inline comments anchor to) and the repository config (which decides what
+    to post), rebuilds the payloads the original publish would have sent, and
+    posts them. The attempt is recorded like any other, marked as a publish
+    retry, and any refusal behaves exactly as it would have in the attempt that
+    first tried to publish.
+    """
+    review_attempt = await _last_attempt(db, target_id=job.target_id, current=run)
+    if review_attempt is None:
+        raise PermanentTargetError(_NO_REVIEW_TO_PUBLISH)
+    clients = await review.build_clients(InstallationRef(job.installation.installation_id))
+    pull = await clients.reader.get_pull_request(job.repo_full_name, job.target.number)
+    repo_config = await load_repo_config(
+        clients.reader, job.repo_full_name, pull.head_sha, review.config
+    )
+    rows = await _unposted_findings(db, job.target_id)
+    plan = _AttemptPlan(
+        clients=clients,
+        result=_rebuilt_review(job, attempt=review_attempt, rows=rows),
+        pull=pull,
+        repo_config=repo_config,
+    )
+    job.target.head_branch = plan.pull.head_branch
+    inline = inline_targets(
+        plan.result.findings,
+        threshold=plan.repo_config.review.severity_threshold,
+        suggestions=plan.repo_config.output.suggestions,
+    )
+    # The spend belongs to the attempt that bought it: this attempt copies the
+    # review's usage onto its own row, so a publish retry that fails again is
+    # still read as one (the server's rule asks for recorded tokens, spec 10.5),
+    # but records no usage — the model was never called, and a second usage row
+    # would bill the same review twice.
+    persistence.record_run_usage(job.target, run, plan.result)
+    await _record_republish(tree=tree)
+    # Everything above is this attempt's own writing and must be durable before
+    # GitHub is asked to change the pull request (spec 10.7).
+    await db.commit()
+    check_note = await _publish_review(job=job, ids=ids, plan=plan, inline=inline, rows=rows)
+    return plan, check_note
+
+
+async def _last_attempt(
+    db: AsyncSession, *, target_id: uuid.UUID, current: SessionTargetRun
+) -> SessionTargetRun | None:
+    """The attempt before this one: the row whose review is being re-published.
+
+    A publish retry opens its own attempt row before it gets here, so the review
+    belongs to the newest row that is not it — the failed attempt whose recorded
+    tokens are what the server read when it decided this target was a publish
+    retry (spec 10.5).
+    """
+    return await db.scalar(
+        select(SessionTargetRun)
+        .where(
+            SessionTargetRun.target_id == target_id,
+            SessionTargetRun.id != current.id,
+        )
+        .order_by(SessionTargetRun.attempt.desc())
+        .limit(1)
+    )
+
+
+async def _unposted_findings(db: AsyncSession, target_id: uuid.UUID) -> list[Finding]:
+    """The review's persisted findings, as the rows this attempt publishes.
+
+    A review attempt discards the previous attempt's unposted rows before it
+    persists its own (see ``_run_attempt``), and a publish attempt persists none,
+    so a target's unposted rows are exactly the last review's findings — whatever
+    attempt row they were filed under. Reading them that way is also what lets a
+    second publish retry post the same review instead of an empty summary.
+
+    The rows carry no position of their own, so what the order guarantees is not
+    the model's original order but that this same list becomes the rebuilt
+    ``ReviewResult``'s findings and the rows the inline comments are stamped on:
+    every comment is stamped on the finding it renders.
+    """
+    rows = await db.scalars(
+        select(Finding)
+        .where(Finding.target_id == target_id, Finding.posted.is_(False))
+        .order_by(Finding.created_at, Finding.id)
+    )
+    return list(rows.all())
+
+
+def _rebuilt_review(
+    job: TargetJob, *, attempt: SessionTargetRun, rows: list[Finding]
+) -> ReviewResult:
+    """Rebuild the ``ReviewResult`` the persisted findings were published from.
+
+    Only what publishing reads is recovered: the findings, the usage the attempt
+    recorded, and the session's model and provider (the shape ``ReviewResult``
+    takes). A review's notes are not stored anywhere, so a pass that carried one
+    is re-published without it — the findings are the review itself.
+    """
+    return ReviewResult(
+        findings=[_core_finding(row) for row in rows],
+        model=job.session.model,
+        provider=job.session.provider,
+        tokens=attempt.tokens,
+        cost_usd=float(attempt.cost_usd),
+    )
+
+
+def _core_finding(row: Finding) -> CoreFinding:
+    """Map a persisted finding row back onto the harness's finding model."""
+    return CoreFinding(
+        path=row.path,
+        line=row.line,
+        severity=Severity(row.severity),
+        category=row.category,
+        message=row.message,
+        suggestion=row.suggestion,
+        confidence=row.confidence,
+    )
+
+
+async def _record_republish(*, tree: _AttemptTree) -> None:
+    """Log a publish retry on the PR node: what happened, without model events.
+
+    Only the message: the previous attempt's findings and step are already on this
+    node, and the node is reused, so repeating them would read as a second review
+    that produced the same findings again.
+    """
+    await tree.recorder.emit(
+        tree.pr.id,
+        EventType.MESSAGE,
+        {
+            "role": "assistant",
+            "summary": _PUBLISH_RETRY_MESSAGE,
+            "chars": len(_PUBLISH_RETRY_MESSAGE),
         },
     )
 
@@ -622,6 +850,23 @@ async def _persist_and_publish(
     )
     persistence.record_run_usage(job.target, run, plan.result)
     await db.commit()
+    return await _publish_review(job=job, ids=ids, plan=plan, inline=inline, rows=rows)
+
+
+async def _publish_review(
+    *,
+    job: TargetJob,
+    ids: _Ids,
+    plan: _AttemptPlan,
+    inline: list[InlineTarget],
+    rows: list[Finding],
+) -> str | None:
+    """Post one attempt's summary, inline comments, and check run; stamp what posted.
+
+    Shared by both modes so a publish retry sends exactly what the attempt that
+    first tried to publish would have sent — same repo config toggles, same
+    payloads, same best-effort check run.
+    """
     outcome = await publish(
         plan.clients.publisher,
         PublishPlan(
@@ -666,6 +911,17 @@ def _error_text(exc: Exception) -> str:
     return text
 
 
+def _attempt_text(text: str, mode: str) -> str:
+    """Mark a publish retry's own history text, so the attempt explains itself.
+
+    The attempt's summary — or its stored error, when it failed — is where a
+    reader learns what happened. A publish retry is the one attempt that produced
+    nothing new, so it says so instead of looking like a review that spent nothing
+    (spec 10.5).
+    """
+    return f"{_PUBLISH_RETRY_MARK}\n{text}" if mode == PUBLISH else text
+
+
 async def _fail_permanently(
     *,
     db: AsyncSession,
@@ -674,10 +930,11 @@ async def _fail_permanently(
     ids: _Ids,
     tree: _AttemptTree,
     exc: Exception,
+    mode: str,
 ) -> None:
     """Mark the target failed without retrying (e.g. invalid config, no App permission)."""
     await db.rollback()
-    error = _error_text(exc)
+    error = _attempt_text(_error_text(exc), mode)
     await persistence.fail_target(db, target=job.target, run=run, error=error, now=_now())
     await tree.recorder.finish(tree.pr.id, AgentStatus.FAILED, summary=error, error=error)
     await persistence.recompute_session(db, job.session_id)
@@ -697,12 +954,13 @@ async def _fail_retryable(
     ids: _Ids,
     tree: _AttemptTree,
     exc: Exception,
+    mode: str,
 ) -> None:
     """Record the failed attempt and retry with backoff, or fail the target."""
     await db.rollback()
     config = ctx["review"].config
     attempt = int(ctx.get("job_try", 1))
-    error = _error_text(exc)
+    error = _attempt_text(_error_text(exc), mode)
     # The PR run follows the target: it stays reusable while the target is still
     # running, and its node records the failed attempt either way (§11).
     await tree.recorder.finish(tree.pr.id, AgentStatus.FAILED, summary=error, error=error)

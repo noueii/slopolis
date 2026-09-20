@@ -217,6 +217,14 @@ class FakePublisher:
     summaries: list[tuple[str, int, str, int | None]] = field(default_factory=list)
     inlines: list[tuple[str, int, list[InlineComment], str]] = field(default_factory=list)
     checks: list[tuple[str, str, str, str, str]] = field(default_factory=list)
+    #: Every summary-comment lookup, in order, so a test can see the job asked.
+    summary_lookups: list[tuple[str, int]] = field(default_factory=list)
+    #: The summary comment an earlier publish left on the pull request. ``None``
+    #: means there is none, which is what makes the publish create one.
+    existing_summary_id: int | None = None
+    #: When set, the lookup raises it instead of answering — a listing GitHub
+    #: refused or throttled, which the publish has to survive (spec 10.7).
+    lookup_fail_with: Exception | None = None
     #: When set, every publish method raises it instead of recording a call.
     fail_with: Exception | None = None
     #: When set, only the check run raises it — the advisory surface an
@@ -226,6 +234,12 @@ class FakePublisher:
     def _refuse(self) -> None:
         if self.fail_with is not None:
             raise self.fail_with
+
+    async def find_summary_comment(self, repo_full_name: str, number: int) -> int | None:
+        self.summary_lookups.append((repo_full_name, number))
+        if self.lookup_fail_with is not None:
+            raise self.lookup_fail_with
+        return self.existing_summary_id
 
     async def upsert_summary_comment(
         self, repo_full_name: str, number: int, body: str, existing_comment_id: int | None

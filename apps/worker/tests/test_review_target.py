@@ -25,13 +25,14 @@ from worker_fakes import (
     CATALOG_MODEL,
     HEAD_BRANCH,
     HEAD_SHA,
+    PR_NUMBER,
     REPO_FULL_NAME,
     FakeLlm,
     FakePublisher,
     FakeReader,
     FakeRedis,
 )
-from worker_seed import Harness, seed_and_build
+from worker_seed import Harness, build_harness, seed_and_build
 
 from slopolis_core.domain import TargetStatus
 from slopolis_core.github.errors import GitHubAuthError, GitHubError, GitHubRateLimitError
@@ -56,6 +57,13 @@ _FINDINGS_JSON = (
 )
 
 _INVALID_CONFIG = "review:\n  severity_threshold: [not, a, severity]\n"
+
+#: A review that found nothing. Still a completed review — with usage and a
+#: summary — so a publish retry must post it rather than lose it to an empty list.
+_CLEAN_JSON = '{"findings": []}'
+
+#: A repo config that keeps the inline and check-run surfaces and drops the summary.
+_NO_SUMMARY_CONFIG = "output:\n  summary_comment: false\n"
 
 #: What the client raises when an installation was never granted write scope —
 #: the live failure this lifecycle guards against.
@@ -133,12 +141,35 @@ async def _until(predicate: Callable[[], bool], *, timeout: float = 5.0) -> None
             await asyncio.sleep(0.005)
 
 
-async def _run(h: Harness, target_id: uuid.UUID | None = None) -> None:
+async def _run(
+    h: Harness, target_id: uuid.UUID | None = None, *, mode: str = "review"
+) -> None:
     await review_target(
         h.ctx,
         str(h.seed.session_id),
         str(target_id if target_id is not None else h.seed.target_id),
+        mode,
     )
+
+
+async def _requeue_target(h: Harness, target_id: uuid.UUID | None = None) -> None:
+    """Commit what the retry endpoint leaves behind: the target back on the queue.
+
+    A retry flips the target (and its session) back to ``queued`` before it
+    enqueues the job, so a test that calls the job directly has to do the same or
+    the load guards skip it as terminal.
+    """
+    async with h.session_factory() as db:
+        target = await db.get(
+            SessionTarget, target_id if target_id is not None else h.seed.target_id
+        )
+        assert target is not None
+        target.status = TargetStatus.QUEUED
+        session = await db.get(ReviewSession, h.seed.session_id)
+        assert session is not None
+        session.status = "queued"
+        session.finished_at = None
+        await db.commit()
 
 
 def _gate(h: Harness) -> SlotGate:
@@ -217,8 +248,8 @@ async def _usage(h: Harness) -> list[UsageRecord]:
         return list(rows.scalars().all())
 
 
-async def _pr_node_summary(h: Harness) -> str:
-    """The summary the target's PR node ended with in the run tree (spec §15)."""
+async def _pr_events(h: Harness) -> list[AgentEventRow]:
+    """Every event on the target's PR node, in order (spec §15)."""
     async with h.session_factory() as db:
         run = (
             await db.execute(
@@ -228,16 +259,17 @@ async def _pr_node_summary(h: Harness) -> str:
                 )
             )
         ).scalar_one()
-        events = list(
-            (
-                await db.execute(
-                    select(AgentEventRow)
-                    .where(AgentEventRow.run_id == run.id)
-                    .order_by(AgentEventRow.seq)
-                )
-            ).scalars()
+        rows = await db.execute(
+            select(AgentEventRow)
+            .where(AgentEventRow.run_id == run.id)
+            .order_by(AgentEventRow.seq)
         )
-    return str(events[-1].payload["summary"])
+    return list(rows.scalars())
+
+
+async def _pr_node_summary(h: Harness) -> str:
+    """The summary the target's PR node ended with in the run tree (spec §15)."""
+    return str((await _pr_events(h))[-1].payload["summary"])
 
 
 async def test_happy_path_persists_and_publishes(session_factory: SessionFactory) -> None:
@@ -260,6 +292,8 @@ async def test_happy_path_persists_and_publishes(session_factory: SessionFactory
     assert len(h.seed.publisher.summaries) == 1
     _, _, summary, existing_id = h.seed.publisher.summaries[0]
     assert existing_id is None
+    # ... because the lookup found no earlier summary to edit on this pull request
+    assert h.seed.publisher.summary_lookups == [(REPO_FULL_NAME, PR_NUMBER)]
     assert f"/sessions/{h.seed.session_id}" in summary
     assert "done" in summary
     assert "15 tokens" in summary
@@ -303,6 +337,85 @@ async def test_happy_path_persists_and_publishes(session_factory: SessionFactory
 
     # ... and the catalog-assigned model was used (no hardcoded name)
     assert h.seed.llm.models == [CATALOG_MODEL]
+
+
+async def test_a_rerun_edits_the_existing_summary_comment(
+    session_factory: SessionFactory,
+) -> None:
+    # Given a pull request that already carries the summary comment of an earlier
+    # publish of this session
+    publisher = FakePublisher(existing_summary_id=101)
+    h = await seed_and_build(
+        session_factory, publisher=publisher, llm=FakeLlm([_FINDINGS_JSON])
+    )
+
+    # When the job runs again
+    await _run(h)
+
+    # Then the publish asked this pull request for that comment and edited it
+    # instead of posting a second summary
+    assert publisher.summary_lookups == [(REPO_FULL_NAME, PR_NUMBER)]
+    assert len(publisher.summaries) == 1
+    repo_name, number, body, existing_id = publisher.summaries[0]
+    assert (repo_name, number, existing_id) == (REPO_FULL_NAME, PR_NUMBER, 101)
+
+    # ... with the body a later run can find again by its marker
+    assert body.startswith("## slopolis review")
+
+
+async def test_a_failed_summary_lookup_still_publishes_the_review(
+    session_factory: SessionFactory,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Given a pull request whose comment listing GitHub throttles
+    publisher = FakePublisher(lookup_fail_with=_THROTTLED)
+    h = await seed_and_build(
+        session_factory, publisher=publisher, llm=FakeLlm([_FINDINGS_JSON])
+    )
+
+    # When the job runs
+    with caplog.at_level(logging.WARNING, logger="worker.jobs.publish"):
+        await _run(h)
+
+    # Then the review still posts, as a new comment because the earlier one's id
+    # never arrived, and the target completes rather than failing
+    assert len(publisher.summaries) == 1
+    assert publisher.summaries[0][3] is None
+    assert len(publisher.inlines) == 1
+    assert (await _target(h)).status == "done"
+    assert (await _session(h)).status == "done"
+
+    # ... with the reason the comment could not roll recorded for the operator
+    warned = [
+        record
+        for record in caplog.records
+        if "summary comment lookup failed" in record.getMessage()
+    ]
+    assert len(warned) == 1
+    assert "GitHubRateLimitError" in str(getattr(warned[0], "reason", ""))
+
+
+async def test_a_disabled_summary_comment_is_never_looked_up(
+    session_factory: SessionFactory,
+) -> None:
+    # Given a repo whose config turns the summary comment off
+    h = await seed_and_build(
+        session_factory,
+        reader=FakeReader(config_text=_NO_SUMMARY_CONFIG),
+        publisher=FakePublisher(existing_summary_id=101),
+        llm=FakeLlm([_FINDINGS_JSON]),
+    )
+
+    # When the job runs
+    await _run(h)
+
+    # Then nothing touched the summary surface at all
+    assert h.seed.publisher.summary_lookups == []
+    assert h.seed.publisher.summaries == []
+
+    # ... while the surfaces the config kept still post
+    assert len(h.seed.publisher.inlines) == 1
+    assert len(h.seed.publisher.checks) == 1
 
 
 async def test_parse_failure_publishes_summary_only(session_factory: SessionFactory) -> None:
@@ -559,6 +672,212 @@ async def test_publish_throttled_retries_and_drops_the_failed_attempts_findings(
     assert findings[None].posted is False
     assert (await _target(h)).status == "done"
     assert (await _session(h)).status == "done"
+
+
+async def _throttled_publish(session_factory: SessionFactory, *, findings: str) -> Harness:
+    """Run the review whose publish GitHub throttled away, leaving it unposted.
+
+    The last permitted try fails permanently at the publish, which is the state a
+    publish retry starts from: findings and usage committed, target failed, and an
+    attempt that recorded the review's tokens alongside the GitHub error.
+    """
+    h = await seed_and_build(
+        session_factory,
+        publisher=FakePublisher(fail_with=_THROTTLED),
+        llm=FakeLlm([findings]),
+        config=WorkerConfig(WORKER_MAX_TRIES=1, WORKER_RETRY_BACKOFF_S=1),
+        job_try=1,
+    )
+    await _run(h)
+    assert (await _target(h)).status == "failed"
+    return h
+
+
+async def test_a_publish_retry_posts_the_persisted_review_without_a_model_call(
+    session_factory: SessionFactory,
+) -> None:
+    # Given a review that ran and whose publish GitHub throttled away
+    h = await _throttled_publish(session_factory, findings=_FINDINGS_JSON)
+    assert len(await _findings(h)) == 2
+
+    # When GitHub accepts writes again and the target is retried in publish mode
+    h.seed.publisher.fail_with = None
+    await _requeue_target(h)
+    await _run(h, mode="publish")
+
+    # Then the review the target already paid for is what posted, in full
+    assert len(h.seed.publisher.summaries) == 1
+    summary = h.seed.publisher.summaries[0][2]
+    assert "boom" in summary and "nit" in summary
+    assert "15 tokens" in summary
+    assert "$0.0020" in summary
+    assert len(h.seed.publisher.inlines) == 1
+    assert h.seed.publisher.inlines[0][3] == HEAD_SHA
+    assert len(h.seed.publisher.checks) == 1
+    assert h.seed.publisher.checks[0][2] == "failure"
+
+    # ... and the model was never asked for it again: the one turn the fake
+    # recorded is the first review's
+    assert h.seed.llm.models == [CATALOG_MODEL]
+
+    # ... the posted finding is stamped with its comment id while the one with no
+    # line stays in the summary, on the rows the review attempt persisted
+    runs = await _runs(h)
+    findings = {row.line: row for row in await _findings(h)}
+    assert set(findings) == {3, None}
+    assert all(row.run_id == runs[0].id for row in findings.values())
+    assert findings[3].posted is True
+    assert findings[3].github_comment_id == 201
+    assert findings[None].posted is False
+
+    # ... the review is billed once: a publish retry records no second usage row
+    assert len(await _usage(h)) == 1
+
+    # ... the new attempt is recorded like any other, carrying the review's tokens
+    # so a further failure is still read as a publish retry rather than a reason
+    # to review again
+    assert [run.attempt for run in runs] == [1, 2]
+    assert runs[1].status == "done"
+    assert runs[1].tokens == 15
+    assert (await _target(h)).status == "done"
+    assert (await _session(h)).status == "done"
+
+    # ... and the tree says what happened: the reused PR node re-published the
+    # review without calling a model, without duplicating its findings as new ones
+    events = await _pr_events(h)
+    messages = [
+        str(event.payload["summary"])
+        for event in events
+        if event.type == "agent.message"
+    ]
+    assert "re-published the existing review without a model call" in messages
+    assert [event.type for event in events].count("agent.finding") == 2
+    summary = await _pr_node_summary(h)
+    assert "publish retry" in summary
+    assert "2 finding(s)" in summary
+
+
+async def test_a_publish_retry_posts_the_summary_of_a_clean_review(
+    session_factory: SessionFactory,
+) -> None:
+    # Given a review that found nothing, whose one attempt was throttled away
+    h = await _throttled_publish(session_factory, findings=_CLEAN_JSON)
+    assert await _findings(h) == []
+
+    # When the target is retried in publish mode
+    h.seed.publisher.fail_with = None
+    await _requeue_target(h)
+    await _run(h, mode="publish")
+
+    # Then the clean review still posts — an empty review is a result, not a
+    # reason to publish nothing and lose the pass the user paid for
+    assert len(h.seed.publisher.summaries) == 1
+    summary = h.seed.publisher.summaries[0][2]
+    assert "No findings." in summary
+    assert "15 tokens" in summary
+    assert h.seed.publisher.inlines == []
+    assert len(h.seed.publisher.checks) == 1
+    assert h.seed.publisher.checks[0][2] == "success"
+    assert (await _target(h)).status == "done"
+    assert (await _session(h)).status == "done"
+    assert h.seed.llm.models == [CATALOG_MODEL]
+
+
+async def test_a_publish_retry_refused_by_github_fails_the_target_the_same_way(
+    session_factory: SessionFactory,
+) -> None:
+    # Given a review whose publish was throttled away
+    h = await _throttled_publish(session_factory, findings=_FINDINGS_JSON)
+
+    # When the retry's writes are refused a permission instead
+    h.seed.publisher.fail_with = _PERMISSION_REFUSAL
+    await _requeue_target(h)
+    await _run(h, mode="publish")
+
+    # Then the target fails naming the scope to grant, exactly as the attempt that
+    # first tried to publish would have
+    runs = await _runs(h)
+    assert len(runs) == 2
+    assert runs[1].status == "failed"
+    assert runs[1].error is not None
+    assert "GitHubAuthError" in runs[1].error
+    assert "(HTTP 403)" in runs[1].error
+    assert "posting the review needs Pull requests 'Read & write'" in runs[1].error
+    assert (await _target(h)).status == "failed"
+    assert (await _session(h)).status == "failed"
+
+    # ... and the attempt says it was a publish retry, so the failure is not read
+    # as a model run that spent nothing
+    assert "publish retry" in runs[1].error
+
+    # ... while the review it could not post is still visible in the app
+    findings = await _findings(h)
+    assert len(findings) == 2
+    assert all(row.posted is False for row in findings)
+
+
+async def test_a_publish_retry_keeps_a_refused_check_run_best_effort(
+    session_factory: SessionFactory,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Given a review whose publish was throttled away, and an installation that
+    # cannot post the advisory check run
+    h = await _throttled_publish(session_factory, findings=_FINDINGS_JSON)
+    h.seed.publisher.fail_with = None
+    h.seed.publisher.check_fail_with = _CHECK_REFUSAL
+
+    # When the target is retried in publish mode
+    with caplog.at_level(logging.WARNING, logger="worker.review_target"):
+        await _requeue_target(h)
+        await _run(h, mode="publish")
+
+    # Then the review the user asked for still posts, and only the advisory surface
+    # is missing
+    assert h.seed.publisher.checks == []
+    assert len(h.seed.publisher.summaries) == 1
+    assert len(h.seed.publisher.inlines) == 1
+    assert (await _target(h)).status == "done"
+    assert (await _session(h)).status == "done"
+
+    # ... and the PR node says both things: that this was a publish retry, and why
+    # the check run is not on the pull request
+    summary = await _pr_node_summary(h)
+    assert "publish retry" in summary
+    assert "without a check run" in summary
+    assert "GitHubAuthError" in summary
+
+
+async def test_a_throttled_publish_retry_keeps_the_review_for_the_next_try(
+    session_factory: SessionFactory,
+) -> None:
+    # Given a review whose publish was throttled away and a retry whose publish is
+    # throttled too, with a second try of its own still permitted
+    h = await _throttled_publish(session_factory, findings=_FINDINGS_JSON)
+    await _requeue_target(h)
+    second_try = build_harness(
+        session_factory=session_factory,
+        seed=h.seed,
+        config=WorkerConfig(WORKER_MAX_TRIES=2, WORKER_RETRY_BACKOFF_S=1),
+        job_try=1,
+    )
+    with pytest.raises(Retry):
+        await _run(second_try, mode="publish")
+
+    # Then the attempt is failed but the review is still there to post, unposted
+    assert [run.status for run in await _runs(h)] == ["failed", "failed"]
+    assert len(await _findings(h)) == 2
+
+    # When the queue's next try runs, it publishes that same review, not a fresh one
+    h.seed.publisher.fail_with = None
+    await _run(second_try, mode="publish")
+
+    # Then the review reaches the pull request without the model being asked again
+    assert len(h.seed.publisher.summaries) == 1
+    assert len(await _findings(h)) == 2
+    assert (await _target(h)).status == "done"
+    assert (await _session(h)).status == "done"
+    assert h.seed.llm.models == [CATALOG_MODEL]
+    assert len(await _usage(h)) == 1
 
 
 async def test_repo_cap_keeps_one_target_running_at_a_time(

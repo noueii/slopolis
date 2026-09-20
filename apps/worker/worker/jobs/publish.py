@@ -12,6 +12,7 @@ output.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from slopolis_core.config.repo_config import RepoConfig
@@ -27,6 +28,8 @@ from worker.jobs.publishing import (
 )
 
 __all__ = ["PublishOutcome", "PublishPlan", "publish"]
+
+_LOG = logging.getLogger("worker.jobs.publish")
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,7 +80,7 @@ async def publish(publisher: Publisher, plan: PublishPlan) -> PublishOutcome:
                 tokens=plan.result.tokens,
                 cost_usd=plan.result.cost_usd,
             ),
-            existing_comment_id=None,
+            existing_comment_id=await _existing_summary_id(publisher, plan),
         )
 
     inline_ids: list[int] = []
@@ -115,3 +118,26 @@ async def publish(publisher: Publisher, plan: PublishPlan) -> PublishOutcome:
         check_run_id=check_id,
         check_run_skipped=check_skipped,
     )
+
+
+async def _existing_summary_id(publisher: Publisher, plan: PublishPlan) -> int | None:
+    """The summary comment this publish should edit, or ``None`` to post a new one.
+
+    A lookup GitHub refuses is not a review GitHub refused: the summary is one
+    artifact among the ones this publish posts, and a second copy of it is a
+    smaller loss than a review that never reaches the pull request. So the
+    failure degrades to a create, with a warning naming the reason — the next
+    publish cannot roll a comment it never learned the id of (spec 10.7).
+    """
+    try:
+        return await publisher.find_summary_comment(plan.repo_full_name, plan.number)
+    except GitHubError as exc:
+        _LOG.warning(
+            "summary comment lookup failed; posting a new one",
+            extra={
+                "repo_full_name": plan.repo_full_name,
+                "number": plan.number,
+                "reason": f"{type(exc).__name__}: {exc}",
+            },
+        )
+        return None

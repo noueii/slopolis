@@ -12,6 +12,7 @@ from typing import NamedTuple
 from slopolis_core.domain import Severity, severity_at_least
 from slopolis_core.findings import Finding
 from slopolis_core.github.models import InlineComment
+from slopolis_core.github.publisher import SUMMARY_MARKER
 from slopolis_core.review.harness import ReviewResult
 
 __all__ = [
@@ -45,7 +46,7 @@ def summary_body(
 ) -> str:
     """Build the rolling summary comment carried across reruns."""
     lines: list[str] = [
-        "## slopolis review",
+        SUMMARY_MARKER,
         "",
         f"- Status: **{status}**",
         f"- Session: {session_url}",

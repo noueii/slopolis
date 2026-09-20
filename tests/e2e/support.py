@@ -262,6 +262,13 @@ class FakePublisher:
     summaries: list[tuple[str, int, str, int | None]] = field(default_factory=list)
     inlines: list[tuple[str, int, list[InlineComment], str]] = field(default_factory=list)
     checks: list[tuple[str, str, str, str, str]] = field(default_factory=list)
+    #: A test sets this to the summary comment an earlier publish left on the
+    #: pull request; ``None`` — the default — is a pull request with none yet.
+    existing_summary_id: int | None = None
+
+    async def find_summary_comment(self, repo_full_name: str, number: int) -> int | None:
+        """Answer with the seeded existing comment, or ``None`` on a first publish."""
+        return self.existing_summary_id
 
     async def upsert_summary_comment(
         self, repo_full_name: str, number: int, body: str, existing_comment_id: int | None

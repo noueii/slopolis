@@ -1,7 +1,7 @@
 """Publisher: writes review results back to GitHub (spec 10.7).
 
 Three surfaces, all idempotent across reruns:
-- a **rolling summary comment** edited in place when an id is supplied,
+- a **rolling summary comment**, found by its marker and edited in place,
 - **inline line comments** anchored to the PR head commit,
 - a **Check Run** named ``slopolis`` created or updated in place.
 """
@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, cast
 
-import githubkit.auth
 from githubkit import GitHub, TokenAuthStrategy
 
 from slopolis_core.github._mapping import raise_for_status, split_repo
@@ -20,10 +19,21 @@ from slopolis_core.github.errors import GitHubError
 from slopolis_core.github.models import InlineComment
 from slopolis_core.github.transport import translate_errors
 
-__all__ = ["CHECK_RUN_NAME", "CheckConclusion", "GitHubPublisher"]
+__all__ = ["CHECK_RUN_NAME", "SUMMARY_MARKER", "CheckConclusion", "GitHubPublisher"]
 
 #: Fixed check-run name so reruns find and update their own run.
 CHECK_RUN_NAME = "slopolis"
+
+#: First line of the rolling summary comment. One constant shared by the body
+#: that carries the marker and the lookup that finds it again, so a rerun edits
+#: the comment it posted instead of adding a second one (spec 10.7).
+SUMMARY_MARKER = "## slopolis review"
+
+#: How many comment pages the summary lookup walks. One page covers every
+#: ordinary pull request; the bound keeps a pathological thread from costing an
+#: unbounded number of requests.
+_SUMMARY_PAGE_SIZE = 100
+_MAX_SUMMARY_PAGES = 5
 
 #: Conclusions slopolis is allowed to publish.
 CheckConclusion = Literal["success", "failure", "neutral"]
@@ -46,16 +56,23 @@ class _RepoRef:
 
 
 class GitHubPublisher:
-    """Publishes summary, inline, and check-run results to GitHub."""
+    """Publishes summary, inline, and check-run results to GitHub.
+
+    ``app_id`` is the App this publisher writes as: GitHub stamps it on every
+    comment the installation token posts, and it is what tells a rerun's own
+    summary comment apart from a user's quote of the same marker (spec 10.7).
+    A caller that does not know it still gets a working publisher — the lookup
+    then trusts the marker and an App author.
+    """
 
     def __init__(
         self,
         github: GitHub[TokenAuthStrategy],
         *,
-        app_client: GitHub[githubkit.auth.AppAuthStrategy] | None = None,
+        app_id: int | None = None,
     ) -> None:
         self._github = github
-        self._app_client = app_client
+        self._app_id = app_id
 
     @classmethod
     def from_installation_token(cls, token: str) -> GitHubPublisher:
@@ -84,6 +101,38 @@ class GitHubPublisher:
         )
         raise_for_status(response, f"edit summary comment {existing_comment_id}")
         return response.parsed_data.id
+
+    @translate_errors
+    async def find_summary_comment(self, repo_full_name: str, number: int) -> int | None:
+        """Return the id of this pull request's rolling summary comment, if any.
+
+        The marker is deliberately not enough on its own: users quote the summary
+        in the conversation, and editing one of those would rewrite a comment
+        that is not ours. A comment counts as ours only when an App performed it
+        — and, when this publisher knows which App it writes as, when that App is
+        the one that performed it (spec 10.7).
+        """
+        ref = _RepoRef.of(repo_full_name, number)
+        for page in range(1, _MAX_SUMMARY_PAGES + 1):
+            response = await self._github.rest.issues.async_list_comments(
+                ref.owner,
+                ref.repo,
+                ref.number,
+                per_page=_SUMMARY_PAGE_SIZE,
+                page=page,
+            )
+            raise_for_status(response, f"list comments on {repo_full_name}#{number}")
+            comments = response.parsed_data
+            for comment in comments:
+                body = comment.body
+                if not isinstance(body, str) or not body.startswith(SUMMARY_MARKER):
+                    continue
+                performer = _performing_app_id(comment)
+                if performer is not None and (self._app_id is None or performer == self._app_id):
+                    return comment.id
+            if len(comments) < _SUMMARY_PAGE_SIZE:
+                break
+        return None
 
     @translate_errors
     async def post_inline_comments(
@@ -177,3 +226,15 @@ class GitHubPublisher:
             if run.name == CHECK_RUN_NAME:
                 return run.id
         return None
+
+
+def _performing_app_id(comment: object) -> int | None:
+    """The App id that performed ``comment``, or ``None`` when no App did.
+
+    Read structurally on purpose: githubkit marks an absent optional field with
+    its own ``UNSET`` sentinel instead of ``None``, and the model class that
+    carries it is not type-importable from here.
+    """
+    performed_by = getattr(comment, "performed_via_github_app", None)
+    app_id = getattr(performed_by, "id", None)
+    return app_id if isinstance(app_id, int) else None

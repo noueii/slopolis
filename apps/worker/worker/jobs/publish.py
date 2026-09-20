@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from slopolis_core.config.repo_config import RepoConfig
+from slopolis_core.github.errors import GitHubError
 from slopolis_core.review.harness import ReviewResult
 from worker.deps import Publisher
 from worker.jobs.publishing import (
@@ -49,10 +50,20 @@ class PublishOutcome:
     summary_comment_id: int | None
     inline_comment_ids: list[int]
     check_run_id: int | None
+    #: Why the check run was not posted, when GitHub refused it. Its own field
+    #: rather than an error, because the refusal is survivable: the comments it
+    #: follows are already on the pull request (spec 10.7).
+    check_run_skipped: str | None = None
 
 
 async def publish(publisher: Publisher, plan: PublishPlan) -> PublishOutcome:
-    """Publish summary, inline comments, and the check run per the repo config."""
+    """Publish summary, inline comments, and the check run per the repo config.
+
+    The order is summary, inline, check run, and only the first two are
+    load-bearing: they are the review the user asked for, so a refusal there
+    propagates. The check run is the advisory surface (spec 10.7), so GitHub
+    refusing it is recorded in the outcome instead of raised.
+    """
     output = plan.repo_config.output
     summary_id: int | None = None
     if output.summary_comment:
@@ -79,17 +90,28 @@ async def publish(publisher: Publisher, plan: PublishPlan) -> PublishOutcome:
         )
 
     check_id: int | None = None
+    check_skipped: str | None = None
     if output.check_run:
-        check_id = await publisher.upsert_check_run(
-            plan.repo_full_name,
-            plan.head_sha,
-            conclusion=check_conclusion(plan.result.findings),
-            title=check_title(plan.result.findings),
-            summary=check_summary(plan.result.findings),
-        )
+        # Only this call is best effort, and it is caught broadly on purpose: a
+        # refusal here means an installation without `checks: write` (a warning at
+        # pre-flight, not a refusal), and other `GitHubError`s — a throttle, a
+        # revoked permission — must not fail a review whose comments already
+        # published either. It is not retried for the same reason: re-running the
+        # publish would duplicate the comments for an artifact nobody required.
+        try:
+            check_id = await publisher.upsert_check_run(
+                plan.repo_full_name,
+                plan.head_sha,
+                conclusion=check_conclusion(plan.result.findings),
+                title=check_title(plan.result.findings),
+                summary=check_summary(plan.result.findings),
+            )
+        except GitHubError as exc:
+            check_skipped = f"{type(exc).__name__}: {exc}"
 
     return PublishOutcome(
         summary_comment_id=summary_id,
         inline_comment_ids=inline_ids,
         check_run_id=check_id,
+        check_run_skipped=check_skipped,
     )

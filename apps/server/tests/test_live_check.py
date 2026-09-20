@@ -36,6 +36,7 @@ from slopolis_core.vault import SecretVault, VaultDecryptError
 from slopolis_db.models import ModelCatalog, ProviderCredential
 
 from .conftest import (
+    WRITE_PERMISSIONS,
     ApiHarness,
     FakeGateway,
     FakeInstallationClients,
@@ -527,8 +528,12 @@ class PreflightGitHub:
 
     These tests are about the model call, so GitHub answers exactly what
     pre-flight must get past to reach it: the repository is covered, the link
-    resolves, the viewer may trigger, and ``.codereview.yml`` is absent.
+    resolves, the viewer may trigger, the installation may publish, and
+    ``.codereview.yml`` is absent.
     """
+
+    #: The seeded installation these tests' repository is granted through.
+    installation_id = 555
 
     async def list_installation_repositories(self) -> list[InstallationRepository]:
         return [
@@ -539,6 +544,9 @@ class PreflightGitHub:
                 default_branch="main",
             )
         ]
+
+    async def installation_permissions(self) -> dict[str, str]:
+        return dict(WRITE_PERMISSIONS)
 
     async def resolve_pr(self, url: str) -> GitHubPullRequest:
         return GitHubPullRequest(

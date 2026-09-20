@@ -18,10 +18,17 @@ unresolvable.
 
 ``read_repo_file`` reads at the repository's default branch (the port does not
 carry a ref); a missing file is a normal ``None``, not an error.
+
+``publish_permissions`` reads what the repository's installation was granted and
+memoizes it per installation for the life of the request. It is the one read
+whose failure is *not* translated into an :class:`ApiError`: pre-flight reports it
+as a notice and refuses that link, so an unanswerable permission read refuses a
+submission rather than failing the request.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Protocol
 
 from app.errors import ApiError
@@ -37,6 +44,8 @@ from slopolis_core.github.limits import PR_URL_RE
 from slopolis_core.preflight.models import PrReference, RepositoryRef
 
 __all__ = ["GitHubGatewayAdapter", "RepositoryClients", "as_api_error"]
+
+_logger = logging.getLogger(__name__)
 
 
 class RepositoryClients(Protocol):
@@ -60,6 +69,12 @@ class GitHubGatewayAdapter:
         self._repositories = repositories
         self._clients: dict[str, GitHubClient] = {}
         self._default_branches: dict[str, str] = {}
+        #: Granted permissions per installation id, for the life of the request:
+        #: a submission of several links must not ask the same installation once
+        #: per link, and a short-lived answer must not be trusted across requests
+        #: — a permission revoked between submits is exactly what this check
+        #: exists to catch (spec 10.3).
+        self._permissions: dict[int, dict[str, str]] = {}
 
     async def resolve_pr(self, url: str) -> PrReference:
         """Resolve a PR URL to a typed reference.
@@ -160,6 +175,39 @@ class GitHubGatewayAdapter:
             return None
         except GitHubError as exc:
             raise as_api_error(exc) from exc
+
+    async def publish_permissions(self, repo_full_name: str) -> dict[str, str] | None:
+        """What the repository's installation was granted, or ``None``.
+
+        Read through the client that already serves ``repo_full_name``; the
+        answer is memoized per installation id for the life of the request, so a
+        submission carrying several links on one installation reads it once. A
+        failure to read is ``None``, not an :class:`ApiError`: pre-flight renders
+        it as a notice and refuses that link, because a check that cannot run
+        must not pass a submission whose whole point is that publishing will
+        succeed (spec 10.3 §Publish prerequisites). Whether what it *does* read
+        refuses the link or only notices a skipped check run is core's
+        required/optional split — this read does not judge a scope.
+        """
+        client = await self._client_for(repo_full_name)
+        installation_id = client.installation_id
+        if installation_id is not None:
+            cached = self._permissions.get(installation_id)
+            if cached is not None:
+                return cached
+        try:
+            permissions = await client.installation_permissions()
+        except GitHubError as exc:
+            # The failure is the caller's notice, so it must not raise; the
+            # warning keeps it visible to operators, the way a degraded
+            # installation is already reported elsewhere (spec 10.1).
+            _logger.warning(
+                "installation permissions unreadable for %s: %s", repo_full_name, exc
+            )
+            return None
+        if installation_id is not None:
+            self._permissions[installation_id] = permissions
+        return permissions
 
     async def _client_for(self, full_name: str) -> GitHubClient:
         """The client for ``full_name``'s installation, memoized for this request."""

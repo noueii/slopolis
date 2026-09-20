@@ -8,6 +8,7 @@ values the job produces.
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from collections.abc import Callable
 from decimal import Decimal
@@ -36,6 +37,8 @@ from slopolis_core.domain import TargetStatus
 from slopolis_core.github.errors import GitHubAuthError, GitHubError, GitHubRateLimitError
 from slopolis_core.llm.models import ChatMessage, CompletionResult
 from slopolis_db.models import (
+    AgentEventRow,
+    AgentRun,
     Finding,
     ReviewSession,
     SessionTarget,
@@ -62,6 +65,13 @@ _PERMISSION_REFUSAL = GitHubAuthError(
 
 #: What it raises when a write is throttled instead; retrying this one is right.
 _THROTTLED = GitHubRateLimitError("GitHub rate limit hit during upsert_summary_comment")
+
+#: What the client raises when the installation cannot post the advisory check run
+#: — a warning at pre-flight rather than a refusal, since the comments the review
+#: was asked for post with ``pull_requests: write`` alone (spec 10.7).
+_CHECK_REFUSAL = GitHubAuthError(
+    "GitHub authorization failed during async_create_check_run (HTTP 403)"
+)
 
 #: Caps being enforced, with a wait no test runs out by accident.
 _GATE_CONFIG = WorkerConfig(
@@ -205,6 +215,29 @@ async def _usage(h: Harness) -> list[UsageRecord]:
             select(UsageRecord).where(UsageRecord.target_id == h.seed.target_id)
         )
         return list(rows.scalars().all())
+
+
+async def _pr_node_summary(h: Harness) -> str:
+    """The summary the target's PR node ended with in the run tree (spec §15)."""
+    async with h.session_factory() as db:
+        run = (
+            await db.execute(
+                select(AgentRun).where(
+                    AgentRun.target_id == h.seed.target_id,
+                    AgentRun.level == "pr",
+                )
+            )
+        ).scalar_one()
+        events = list(
+            (
+                await db.execute(
+                    select(AgentEventRow)
+                    .where(AgentEventRow.run_id == run.id)
+                    .order_by(AgentEventRow.seq)
+                )
+            ).scalars()
+        )
+    return str(events[-1].payload["summary"])
 
 
 async def test_happy_path_persists_and_publishes(session_factory: SessionFactory) -> None:
@@ -407,7 +440,8 @@ async def test_publish_permission_refusal_fails_target_and_keeps_findings(
     assert runs[0].error is not None
     assert "GitHubAuthError" in runs[0].error
     assert "(HTTP 403)" in runs[0].error
-    assert "grant Pull requests, Issues and Checks 'Read & write'" in runs[0].error
+    assert "posting the review needs Pull requests 'Read & write'" in runs[0].error
+    assert "then approve the update for the installation" in runs[0].error
     assert (await _target(h)).status == "failed"
     assert (await _session(h)).status == "failed"
 
@@ -424,6 +458,56 @@ async def test_publish_permission_refusal_fails_target_and_keeps_findings(
     assert [row.run_id for row in findings] == [runs[0].id, runs[0].id]
     assert all(row.posted is False for row in findings)
     assert all(row.github_comment_id is None for row in findings)
+
+
+async def test_refused_check_run_does_not_fail_the_published_review(
+    session_factory: SessionFactory,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Given an installation that posts comments but cannot post a check run
+    publisher = FakePublisher(check_fail_with=_CHECK_REFUSAL)
+    h = await seed_and_build(
+        session_factory, publisher=publisher, llm=FakeLlm([_FINDINGS_JSON])
+    )
+
+    # When the target runs
+    with caplog.at_level(logging.WARNING, logger="worker.review_target"):
+        await _run(h)
+
+    # Then the review the user asked for is published: the summary and the inline
+    # comment reached the pull request, and only the advisory surface was refused
+    assert publisher.checks == []
+    assert len(publisher.summaries) == 1
+    assert len(publisher.inlines) == 1
+
+    # ... the target completes rather than failing, with no retry to duplicate the
+    # comments that are already on the pull request
+    runs = await _runs(h)
+    assert [run.status for run in runs] == ["done"]
+    assert runs[0].error is None
+    assert (await _target(h)).status == "done"
+    assert (await _session(h)).status == "done"
+
+    # ... the findings that posted are stamped, not rolled back with the refused
+    # artifact
+    findings = {row.line: row for row in await _findings(h)}
+    assert findings[3].posted is True
+    assert findings[3].github_comment_id == 201
+    assert findings[None].posted is False
+
+    # ... the skip is visible in the PR node's summary together with its reason,
+    # so a missing check run is never read as a review that failed to post
+    summary = await _pr_node_summary(h)
+    assert "without a check run" in summary
+    assert "GitHubAuthError" in summary
+    assert "(HTTP 403)" in summary
+
+    # ... and the log carries the same reason for the operator reading it live
+    skipped = [
+        record for record in caplog.records if "check run skipped" in record.getMessage()
+    ]
+    assert len(skipped) == 1
+    assert "GitHubAuthError" in str(getattr(skipped[0], "reason", ""))
 
 
 async def test_publish_throttled_retries_and_drops_the_failed_attempts_findings(

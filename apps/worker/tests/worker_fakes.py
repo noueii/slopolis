@@ -219,6 +219,9 @@ class FakePublisher:
     checks: list[tuple[str, str, str, str, str]] = field(default_factory=list)
     #: When set, every publish method raises it instead of recording a call.
     fail_with: Exception | None = None
+    #: When set, only the check run raises it — the advisory surface an
+    #: installation without ``checks: write`` cannot post (spec 10.7).
+    check_fail_with: Exception | None = None
 
     def _refuse(self) -> None:
         if self.fail_with is not None:
@@ -247,6 +250,8 @@ class FakePublisher:
         title: str,
         summary: str,
     ) -> int:
+        if self.check_fail_with is not None:
+            raise self.check_fail_with
         self._refuse()
         self.checks.append((repo_full_name, head_sha, conclusion, title, summary))
         return 303

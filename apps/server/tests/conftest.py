@@ -56,6 +56,24 @@ from slopolis_db.models import (
 
 # --- fakes ------------------------------------------------------------------
 
+#: What a fully-scoped App installation reports: every scope publishing touches,
+#: all at write (spec 10.3 §Publish prerequisites) — nothing to refuse or notice.
+WRITE_PERMISSIONS: dict[str, str] = {
+    "pull_requests": "write",
+    "checks": "write",
+}
+
+#: The grant of the live installation this change was verified against: Pull
+#: requests write is enough to post both comment kinds, Checks is read-only, and
+#: there is no Issues scope at all. Publishing works; only the advisory check run
+#: is lost, so a submission on it must be creatable with a notice.
+LIVE_PERMISSIONS: dict[str, str] = {
+    "pull_requests": "write",
+    "checks": "read",
+    "contents": "read",
+    "metadata": "read",
+}
+
 
 def _refuse_network_factory(base_url: str, api_key: str) -> ManagedLlmClient:
     """Fail a test that reaches a provider through the real live check.
@@ -146,11 +164,17 @@ class FakeGateway:
         covered: list[str] | None = None,
         access: bool = True,
         files: dict[tuple[str, str], str] | None = None,
+        permissions: dict[str, str] | None = None,
     ) -> None:
         self.refs = refs or {}
         self.covered = covered if covered is not None else ["acme/api", "acme/web"]
         self.access = access
         self.files = files or {}
+        #: The installation's granted permissions (spec 10.3); fully scoped by
+        #: default, so only the tests about that check configure it.
+        self.permissions = (
+            permissions if permissions is not None else dict(WRITE_PERMISSIONS)
+        )
         #: The access override pre-flight asked each repo's check for (spec 10.10).
         self.access_calls: list[tuple[str, str | None]] = []
 
@@ -175,6 +199,9 @@ class FakeGateway:
 
     async def read_repo_file(self, repo_full_name: str, path: str) -> str | None:
         return self.files.get((repo_full_name, path))
+
+    async def publish_permissions(self, repo_full_name: str) -> dict[str, str] | None:
+        return dict(self.permissions)
 
 
 class FakeWorkspace:

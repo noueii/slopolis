@@ -269,6 +269,38 @@ class GitHubClient:
         return await self._repo_reads.list_installation_repositories()
 
     @translate_errors
+    async def installation_permissions(self) -> dict[str, str]:
+        """Return the permissions this client's installation was granted.
+
+        Read with the App's own JWT (``GET /app/installations/{id}``): what an
+        installation may write is an App-side fact, and an installation access
+        token carries what it was granted rather than granting more, so the token
+        itself cannot answer this. Keys are GitHub's permission names and values
+        its levels (``read``/``write``); a scope the installation was not granted
+        is absent. A client built from an installation token alone has no App
+        credentials to ask with, so it raises
+        :class:`~slopolis_core.github.errors.GitHubAuthError`.
+        """
+        if self._app_client is None or self._auth.installation_id is None:
+            raise GitHubAuthError(
+                "installation permissions need the App credentials that a client "
+                "built from an installation token does not carry"
+            )
+        response = await self._app_client.rest.apps.async_get_installation(
+            self._auth.installation_id
+        )
+        raise_for_status(response, "installation permissions")
+        # GitHub reports only the scopes it granted; the model's remaining fields
+        # stay unset, so dumping what was set is exactly the granted set.
+        return {
+            name: level
+            for name, level in response.parsed_data.permissions.model_dump(
+                exclude_unset=True
+            ).items()
+            if isinstance(level, str)
+        }
+
+    @translate_errors
     async def user_can_trigger(
         self,
         repo_full_name: str,

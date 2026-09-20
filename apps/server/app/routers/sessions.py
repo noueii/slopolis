@@ -248,14 +248,32 @@ async def retry_session(
     """
     session = await _require_session(db, session_id, workspace_id)
     view = await require_session_access(db, session, viewer=viewer, checker=checker)
+    # The lock goes before the decision below but after the access check, which can
+    # call GitHub: two concurrent retries of one session would otherwise both read
+    # these targets as failed, both flip them to queued, and both enqueue — the same
+    # review bought twice.
+    await _lock_session(db, session_id, workspace_id)
+    # Statuses are re-read under that lock: `view.targets` is a pre-lock snapshot,
+    # and the point of the lock is that the second caller sees what a first caller
+    # in flight has already written.
+    all_targets = await _reload_targets(db, session_id)
     # The candidates are the targets this viewer may read, and therefore the ones
     # the detail screen could have offered them.
-    targets = _retry_selection(view.targets, body.target_ids if body else None)
+    readable = {target.id for target in view.targets}
+    targets = _retry_selection(
+        [target for target in all_targets if target.id in readable],
+        body.target_ids if body else None,
+    )
     for target in targets:
         target.status = SessionStatus.QUEUED.value
-    # The session as a whole goes back to queued; it is finished again only when
-    # the worker's recompute says every target is.
-    session.status = SessionStatus.QUEUED
+    # The session only goes back to queued when nothing in it is still running: a
+    # session with a live target is a review in progress, and reporting it as queued
+    # (with no finish time) would move live work backwards. Left running, it is the
+    # worker's recompute that finishes it once every target is terminal.
+    if any(target.status == SessionStatus.RUNNING.value for target in all_targets):
+        session.status = SessionStatus.RUNNING
+    else:
+        session.status = SessionStatus.QUEUED
     session.finished_at = None
     await db.commit()
     await db.refresh(session)
@@ -325,13 +343,64 @@ async def _require_session(
     """Load a session or raise the standard 404."""
     session = await load_session(db, session_id, workspace_id=workspace_id)
     if session is None:
-        raise ApiError(
-            404,
-            "session_not_found",
-            "That review session does not exist.",
-            detail=f"No session with id {session_id}.",
-        )
+        raise _session_not_found(session_id)
     return session
+
+
+def _session_not_found(session_id: uuid.UUID) -> ApiError:
+    """The refusal for a session that is absent, or not the caller's to act on."""
+    return ApiError(
+        404,
+        "session_not_found",
+        "That review session does not exist.",
+        detail=f"No session with id {session_id}.",
+    )
+
+
+async def _lock_session(
+    db: AsyncSession, session_id: uuid.UUID, workspace_id: uuid.UUID
+) -> None:
+    """Lock one session row: the lock a retry's read-decide-write needs.
+
+    Two retries racing on one session both read its targets as failed, both flip
+    them to queued, and both enqueue, unless the second waits for the first to
+    commit. The lock is the *session* row rather than the target rows a retry is
+    about to flip, for two reasons: the decision also depends on every other target
+    of the session (whether any is still running), which no lock on the selection
+    would cover; and taking target rows while holding the session row would invert
+    the worker's own order — it updates a target and then recomputes the session
+    row — into a deadlock. SQLite (the tests) has no row locks; this compiles to a
+    plain select there.
+    """
+    locked = await db.scalar(
+        select(ReviewSession.id)
+        .where(
+            ReviewSession.id == session_id,
+            ReviewSession.workspace_id == workspace_id,
+        )
+        .with_for_update()
+    )
+    if locked is None:
+        raise _session_not_found(session_id)
+
+
+async def _reload_targets(
+    db: AsyncSession, session_id: uuid.UUID
+) -> list[SessionTarget]:
+    """Re-read a session's targets in display order, in place of loaded copies.
+
+    Called under the retry's session lock, so the statuses it returns are the ones
+    the last committed writer left behind rather than the pre-lock snapshot the
+    access check worked from. ``populate_existing`` is what makes the copies already
+    in the identity map take those fresh values.
+    """
+    rows = await db.scalars(
+        select(SessionTarget)
+        .where(SessionTarget.session_id == session_id)
+        .order_by(SessionTarget.created_at, SessionTarget.number)
+        .execution_options(populate_existing=True)
+    )
+    return list(rows.all())
 
 
 async def _triggered_by(db: AsyncSession, session: ReviewSession) -> User:

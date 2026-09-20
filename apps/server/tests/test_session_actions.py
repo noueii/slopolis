@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from app.services.repo_access import RepoAccessChecker, RepoAccessUnavailable
@@ -110,15 +111,28 @@ async def test_cancel_session_then_conflict(
 
 
 class FakeRepoProbe:
-    """Answers the viewer's repository read with a fixed verdict."""
+    """Answers the viewer's repository read with a fixed verdict.
 
-    def __init__(self, *, readable: bool = True, unavailable: bool = False) -> None:
+    ``on_read`` runs before the verdict, so a test can commit what another writer
+    would have committed while this request was still nowhere near its own write.
+    """
+
+    def __init__(
+        self,
+        *,
+        readable: bool = True,
+        unavailable: bool = False,
+        on_read: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
         self.readable = readable
         self.unavailable = unavailable
+        self.on_read = on_read
         self.calls: list[str] = []
 
     async def user_can_read(self, *, token: str, repo_full_name: str) -> bool:
         self.calls.append(repo_full_name)
+        if self.on_read is not None:
+            await self.on_read()
         if self.unavailable:
             raise RepoAccessUnavailable("github is unreachable")
         return self.readable
@@ -237,6 +251,25 @@ async def add_attempt(session_factory: Any, target_id_: uuid.UUID) -> uuid.UUID:
         return run.id
 
 
+async def queue_session_and_targets(
+    session_factory: Any, session_id: uuid.UUID
+) -> None:
+    """Commit what a retry that got there first leaves behind: all of it queued."""
+    async with session_factory() as session:
+        row = await session.get(ReviewSession, session_id)
+        assert row is not None
+        row.status = "queued"
+        row.finished_at = None
+        queued = (
+            await session.scalars(
+                select(SessionTarget).where(SessionTarget.session_id == session_id)
+            )
+        ).all()
+        for target in queued:
+            target.status = "queued"
+        await session.commit()
+
+
 async def test_retry_requeues_failed_targets_and_enqueues_each(
     seeded: Any, session_factory: Any, build_harness: Any
 ) -> None:
@@ -273,6 +306,107 @@ async def test_retry_requeues_failed_targets_and_enqueues_each(
             )
         ).all()
     assert [run.id for run in runs] == [attempt]
+
+
+async def test_retry_enqueues_a_target_once_across_two_calls(
+    seeded: Any, session_factory: Any, build_harness: Any
+) -> None:
+    # Given a failed session with two failed targets
+    first = await target_id(session_factory, seeded.session_id, 7)
+    second = await add_target(
+        session_factory, seeded.session_id, seeded.repository_id, number=8, status="failed"
+    )
+    await set_state(session_factory, seeded.session_id, status="failed", target_status="failed")
+    harness: ApiHarness = await build_harness(user_id=seeded.user_id)
+
+    # When the same session is retried twice — the double POST a client that sends
+    # the request again would produce; the retry's session-row lock is what makes
+    # the second request wait for the first instead of racing it
+    accepted = await harness.client.post(f"/api/sessions/{seeded.session_id}/retry")
+    refused = await harness.client.post(
+        f"/api/sessions/{seeded.session_id}/retry",
+        json={"targetIds": [str(first), str(second)]},
+    )
+
+    # Then the first call queues both targets and the second finds the queue owns
+    # them rather than queueing them again
+    assert accepted.status_code == 200
+    assert refused.status_code == 409
+    assert refused.json()["error"]["code"] == "target_running"
+
+    # And each target was enqueued exactly once across the two calls
+    assert sorted(harness.pool.jobs) == sorted(
+        [
+            ("review_target", (str(seeded.session_id), str(first))),
+            ("review_target", (str(seeded.session_id), str(second))),
+        ]
+    )
+
+
+async def test_retry_leaves_a_session_with_a_running_target_running(
+    seeded: Any, session_factory: Any, build_harness: Any
+) -> None:
+    # Given a live session: one target failed, its sibling still running
+    failed = await target_id(session_factory, seeded.session_id, 7)
+    running = await add_target(
+        session_factory, seeded.session_id, seeded.repository_id, number=8, status="running"
+    )
+    await set_state(session_factory, seeded.session_id, status="running", target_status="failed")
+    await set_target_state(session_factory, running, "running")
+    harness: ApiHarness = await build_harness(user_id=seeded.user_id)
+
+    # When only the failed target is retried
+    response = await harness.client.post(
+        f"/api/sessions/{seeded.session_id}/retry", json={"targetIds": [str(failed)]}
+    )
+
+    # Then it goes back on the queue, and the session stays the live one it is
+    # rather than being moved backwards to queued
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "running"
+    assert body["finishedAt"] is None
+    statuses = {target["id"]: target["status"] for target in body["targets"]}
+    assert statuses[str(failed)] == "queued"
+    assert statuses[str(running)] == "running"
+    assert harness.pool.jobs == [("review_target", (str(seeded.session_id), str(failed)))]
+
+
+async def test_retry_judges_the_targets_it_reads_under_the_lock(
+    seeded: Any, session_factory: Any, build_harness: Any
+) -> None:
+    # Given a failed session, and a request overtaken mid-flight by a retry whose
+    # commit queued both targets — the state the row lock waits for, injected here
+    # because the test database has no row locks to wait on
+    first = await target_id(session_factory, seeded.session_id, 7)
+    second = await add_target(
+        session_factory, seeded.session_id, seeded.repository_id, number=8, status="failed"
+    )
+    await set_state(session_factory, seeded.session_id, status="failed", target_status="failed")
+    reader_id = await add_member(session_factory, seeded.workspace_id)
+    harness: ApiHarness = await build_harness(
+        user_id=reader_id,
+        repo_access=make_checker(
+            FakeRepoProbe(
+                on_read=lambda: queue_session_and_targets(
+                    session_factory, seeded.session_id
+                )
+            )
+        ),
+    )
+
+    # When that request goes on to retry the same two targets
+    response = await harness.client.post(
+        f"/api/sessions/{seeded.session_id}/retry",
+        json={"targetIds": [str(first), str(second)]},
+    )
+
+    # Then it judges them on the statuses it read under the lock rather than the
+    # snapshot it loaded before it, so targets the queue already owns are refused
+    # instead of being enqueued a second time
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "target_running"
+    assert harness.pool.jobs == []
 
 
 async def test_retry_requeues_only_a_requested_cancelled_target(

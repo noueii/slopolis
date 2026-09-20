@@ -16,6 +16,10 @@ from slopolis_core.preflight.service import PreflightService
 
 _USER = "octocat"
 
+#: The permission set a fully-scoped installation reports: everything publishing
+#: writes, so pre-flight has nothing to refuse or notice (spec 10.3).
+_WRITE_PERMISSIONS = {"pull_requests": "write", "checks": "write"}
+
 
 def _ref(
     full_name: str = "acme/api", *, private: bool = False, number: int = 1
@@ -41,12 +45,20 @@ class FakeGateway:
         covered: list[str] | None = None,
         access: set[str] | None = None,
         files: dict[tuple[str, str], str] | None = None,
+        permissions: dict[str, str] | None = None,
+        permissions_readable: bool = True,
     ) -> None:
         self.refs = refs or {}
         self.covered = covered if covered is not None else ["acme/api", "acme/web"]
         self.access = access
         self.files = files or {}
         self.access_calls: list[tuple[str, bool, str, str | None]] = []
+        #: What the installation was granted; fully scoped unless a test says not.
+        self.permissions = (
+            permissions if permissions is not None else dict(_WRITE_PERMISSIONS)
+        )
+        self.permissions_readable = permissions_readable
+        self.permission_calls: list[str] = []
 
     async def resolve_pr(self, url: str) -> PrReference:
         if url not in self.refs:
@@ -71,6 +83,10 @@ class FakeGateway:
 
     async def read_repo_file(self, repo_full_name: str, path: str) -> str | None:
         return self.files.get((repo_full_name, path))
+
+    async def publish_permissions(self, repo_full_name: str) -> dict[str, str] | None:
+        self.permission_calls.append(repo_full_name)
+        return dict(self.permissions) if self.permissions_readable else None
 
 
 class FakeWorkspace:
@@ -168,6 +184,8 @@ async def test_uncovered_repo_is_invalid() -> None:
     assert outcome.valid == []
     assert outcome.invalid == [ref.url]
     assert any("not covered" in note for note in outcome.notices)
+    # A link refused for coverage never reaches the installation's permissions
+    assert gateway.permission_calls == []
 
 
 async def test_access_denied_is_invalid_with_actionable_notice() -> None:
@@ -201,6 +219,159 @@ async def test_access_override_is_passed_and_named(private: bool, required: str)
         for note in outcome.notices
     )
     assert not any("private repos need read access" in note for note in outcome.notices)
+
+
+# --- publish prerequisites (spec 10.3) --------------------------------------
+
+
+async def test_a_fully_scoped_installation_passes() -> None:
+    """Given the installation may write every publishing scope, the link is valid."""
+    ref = _ref()
+    gateway = FakeGateway(refs={ref.url: ref})
+    service, check = _service(gateway)
+
+    outcome = await service.run(PreflightRequest(pr_urls=[ref.url]), user_login=_USER)
+
+    assert [entry.url for entry in outcome.valid] == [ref.url]
+    assert gateway.permission_calls == ["acme/api"]
+    assert check.calls == ["gpt-4o"]
+    assert not any("check run" in note for note in outcome.notices)
+
+
+async def test_pull_requests_write_alone_passes_with_a_check_run_notice() -> None:
+    """Given only the required scope is granted, the link validates with a notice.
+
+    The check run is advisory, so losing it costs the review nothing it cannot
+    post: pre-flight says what will be skipped and lets the submission through.
+    """
+    ref = _ref()
+    gateway = FakeGateway(
+        refs={ref.url: ref}, permissions={"pull_requests": "write"}
+    )
+    service, check = _service(gateway)
+
+    outcome = await service.run(PreflightRequest(pr_urls=[ref.url]), user_login=_USER)
+
+    assert [entry.url for entry in outcome.valid] == [ref.url]
+    assert outcome.invalid == []
+    assert any(
+        "cannot write Checks: the review will post without a check run" in note
+        for note in outcome.notices
+    )
+    # Everything the submission pays for still runs: the review will publish
+    assert check.calls == ["gpt-4o"]
+
+
+async def test_the_users_read_only_checks_installation_passes() -> None:
+    """Given the live installation's grant — Checks read-only, no Issues — it passes.
+
+    Verified against the installation that posts both comment kinds with Pull
+    requests write: the check run is the only thing lost, and it is announced.
+    """
+    ref = _ref()
+    gateway = FakeGateway(
+        refs={ref.url: ref},
+        permissions={
+            "checks": "read",
+            "contents": "read",
+            "metadata": "read",
+            "pull_requests": "write",
+        },
+    )
+    service, check = _service(gateway)
+
+    outcome = await service.run(PreflightRequest(pr_urls=[ref.url]), user_login=_USER)
+
+    assert [entry.url for entry in outcome.valid] == [ref.url]
+    assert any("without a check run" in note for note in outcome.notices)
+    assert check.calls == ["gpt-4o"]
+
+
+@pytest.mark.parametrize("level", [None, "read"])
+async def test_a_missing_pull_requests_grant_refuses_naming_it(level: str | None) -> None:
+    """Given Pull requests is read-only or unlisted, the link is refused by name."""
+    ref = _ref()
+    permissions = {"checks": "write"}
+    if level is not None:
+        permissions["pull_requests"] = level
+    gateway = FakeGateway(refs={ref.url: ref}, permissions=permissions)
+    service, check = _service(gateway)
+
+    outcome = await service.run(PreflightRequest(pr_urls=[ref.url]), user_login=_USER)
+
+    assert outcome.valid == []
+    assert outcome.invalid == [ref.url]
+    notice = next(note for note in outcome.notices if "cannot write" in note)
+    assert "grant Pull requests 'Read & write' on the App" in notice
+    assert "approve the update for the installation" in notice
+    # Only the required scope is named: Checks is write-granted here
+    assert "Checks" not in notice
+    # Nothing the submission pays for runs for a link that cannot be published
+    assert check.calls == []
+
+
+@pytest.mark.parametrize(
+    "permissions",
+    [
+        {"pull_requests": "write", "checks": "write"},
+        {"pull_requests": "write", "checks": "write", "issues": "write"},
+        {"pull_requests": "write", "checks": "write", "issues": "read"},
+    ],
+    ids=["absent", "issues-write", "issues-read"],
+)
+async def test_an_issues_grant_changes_nothing(permissions: dict[str, str]) -> None:
+    """Given Issues is granted at any level or absent, the outcome is the same.
+
+    Both comment kinds publish with Pull requests write, so pre-flight must not
+    read an Issues grant as a reason to accept — or its absence as one to refuse.
+    """
+    ref = _ref()
+    gateway = FakeGateway(refs={ref.url: ref}, permissions=permissions)
+    service, check = _service(gateway)
+
+    outcome = await service.run(PreflightRequest(pr_urls=[ref.url]), user_login=_USER)
+
+    assert [entry.url for entry in outcome.valid] == [ref.url]
+    assert not any("Issues" in note for note in outcome.notices)
+    assert check.calls == ["gpt-4o"]
+
+
+async def test_a_read_only_installation_refuses_in_the_backstops_wording() -> None:
+    """Given a read-only installation — every other check passes — it refuses."""
+    ref = _ref()
+    read_only = dict.fromkeys(_WRITE_PERMISSIONS, "read")
+    gateway = FakeGateway(refs={ref.url: ref}, permissions=read_only)
+    service, check = _service(gateway)
+
+    outcome = await service.run(PreflightRequest(pr_urls=[ref.url]), user_login=_USER)
+
+    assert outcome.valid == []
+    assert outcome.invalid == [ref.url]
+    assert any(
+        "grant Pull requests 'Read & write' on the App, then "
+        "approve the update for the installation" in note
+        for note in outcome.notices
+    )
+    # A refusal is not also a skipped-check-run notice: nothing will publish
+    assert not any("without a check run" in note for note in outcome.notices)
+    assert check.calls == []
+
+
+async def test_an_unreadable_permission_set_is_a_notice_not_a_failure() -> None:
+    """Given the permissions cannot be read, the link is refused with a notice."""
+    ref = _ref()
+    gateway = FakeGateway(refs={ref.url: ref}, permissions_readable=False)
+    service, _ = _service(gateway)
+
+    outcome = await service.run(PreflightRequest(pr_urls=[ref.url]), user_login=_USER)
+
+    assert outcome.valid == []
+    assert outcome.invalid == [ref.url]
+    assert any(
+        "Could not check whether the GitHub App installation can write to acme/api"
+        in note
+        for note in outcome.notices
+    )
 
 
 async def test_missing_model_short_circuits_with_notice() -> None:

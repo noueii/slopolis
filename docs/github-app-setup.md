@@ -19,14 +19,15 @@ This guide creates that App and puts its credentials where the server and worker
 
 | Permission | Level | Why | Where it is used |
 |---|---|---|---|
-| **Metadata** | Read-only | Mandatory for every GitHub App; repository metadata and the triggering-access check. | `GET /repos/{owner}/{repo}`, `GET /repos/{owner}/{repo}/collaborators/{user}/permission`, `GET /installation/repositories` |
+| **Metadata** | Read-only | Mandatory for every GitHub App; repository metadata and the triggering-access check. | `GET /repos/{owner}/{repo}`, `GET /repos/{owner}/{repo}/collaborators/{user}/permission` |
 | **Contents** | Read-only | The review harness reads files, directory listings, and the repo config. | `GET /repos/{owner}/{repo}/contents/{path}` |
-| **Pull requests** | **Read & write** | Read the PR, its diff, and changed files; post inline review comments. | `GET /repos/{owner}/{repo}/pulls[/{number}][/files]`, `POST /repos/{owner}/{repo}/pulls/{number}/comments` |
-| **Checks** | **Read & write** | Read CI state, then create/update the `slopolis` check run. | `GET /repos/{owner}/{repo}/commits/{ref}/check-runs`, `POST|PATCH /repos/{owner}/{repo}/check-runs` |
-| **Issues** | **Read & write** | Read the PR conversation and maintain the rolling summary comment (PR conversation comments are issue comments). | `GET /repos/{owner}/{repo}/issues/{number}`, `POST|PATCH /repos/{owner}/{repo}/issues/{number}/comments` |
+| **Pull requests** | **Read & write** | **Required to publish.** Read the PR, its diff and changed files; post the inline review comments *and* the rolling summary comment (a PR conversation comment is an issue comment, but GitHub accepts it with Pull requests write). | `GET /repos/{owner}/{repo}/pulls[/{n}][/files]`, `POST /repos/{owner}/{repo}/pulls/{n}/comments`, `POST /repos/{owner}/{repo}/issues/{n}/comments` |
+| **Checks** | **Read & write** | Read CI state for the picker, then create/update the `slopolis` check run. Optional: without it the review still posts as comments and the check run is skipped. | `GET /repos/{owner}/{repo}/commits/{ref}/check-runs`, `POST|PATCH /repos/{owner}/{repo}/check-runs` |
 
-Read-only is enough to *browse* (repositories, PR picker, pre-flight), but the review cannot
-publish without the three write scopes — the check run and comments are the deliverable.
+**Issues is not required.** Nothing slopolis writes needs it: both comment kinds post with Pull
+requests write, so do not grant it. Read-only is enough to *browse* (repositories, PR picker,
+pre-flight), but publishing needs **Pull requests: Read & write**; a submission whose installation
+lacks it is refused at pre-flight rather than after a review has been paid for.
 
 **Events:** subscribe to **Installation**, **Installation repositories**, and **Repository** (see §9);
 slopolis also answers a `ping` delivery. Everything else is accepted and ignored. Set **Active**,
@@ -64,8 +65,9 @@ point the **Webhook URL** at `{APP_URL}/api/github/webhook`, and generate a **We
    same URL instead of waiting for a manual reinstall.
 9. **Webhook → Active** — **select**, with the Webhook URL from §1 and a generated secret
    (`openssl rand -hex 32`) recorded as `GITHUB_WEBHOOK_SECRET` in §4.
-10. **Permissions** — grant the five repository permissions from §1. Metadata, Contents stay
-   Read-only; Pull requests, Checks, Issues are Read & write.
+10. **Permissions** — grant the repository permissions from §1. Metadata and Contents stay
+    Read-only; **Pull requests is Read & write** (required to publish) and **Checks is Read &
+    write** (the advisory check run). Do not grant Issues.
 11. **Where can this GitHub App be installed?** — **Any account** if you review organization
     repositories, otherwise **Only on this account**.
 12. **Create GitHub App.**
@@ -213,6 +215,8 @@ selection, with "Redirect on update" on) refreshes the same rows instead of dupl
 | `NotImplementedError: Algorithm 'RS256' could not be found` | PyJWT's `crypto` extra is missing (`pyjwt[crypto]`), so no App JWT can be signed. Fixed by declaring it in `packages/core/pyproject.toml`; run `uv sync --all-packages`. |
 | `InvalidKeyError: Could not parse the provided public key` | The private key is not the quoted multi-line form (§4), or belongs to a different App. |
 | GitHub calls fail with 403 after the first request | A permission from §1 is missing. Update the App's permissions, then have an installation admin approve the change (Installations → **Review request**). |
+| `403` on `upsert_check_run` (the review posted, the check run did not) | The installation lacks `checks: write` — the check run is the advisory surface, so the review still reaches the PR as comments and the target completes. Grant **Checks: Read & write** if you want the check run. |
+| `403` on `upsert_summary_comment` / `post_inline_comments` (nothing posted) | The installation lacks **Pull requests: Read & write** — that one scope covers *both* comment kinds: a pull request conversation comment is an issue comment, but GitHub accepts it with Pull requests write (verified against an installation with no Issues scope at all). Issues is not required. Print what is granted — **declared** (the App's settings) and **granted** (what the installation approved) are two lists: `cd apps/worker && uv run python -c "import json,time,httpx,jwt;from slopolis_core.settings import get_settings as g;s=g();t=jwt.encode({'iat':int(time.time())-60,'exp':int(time.time())+300,'iss':s.github_app_id},s.github_app_private_key,algorithm='RS256');h={'Authorization':f'Bearer {t}','Accept':'application/vnd.github+json'};print('declared:',json.dumps(httpx.get('https://api.github.com/app',headers=h,timeout=20).json()['permissions'],sort_keys=True));print('granted:',json.dumps(httpx.get('https://api.github.com/app/installations',headers=h,timeout=20).json()[0]['permissions'],sort_keys=True))"`. Fix the App's Permissions, then approve the pending update on the installation page (`https://github.com/settings/installations/<id>`). Pre-flight refuses such a submission, so it fails *before* a review is paid for. |
 | Review finishes but nothing appears on the PR | The publisher needs Pull requests/Checks/Issues **write**; the harness needs the App installed on that repository. |
 | Worker logs a failed installation-token mint | No `github_installations` row for the PR's repository: open the app and install the App again, or hit `/api/github/setup` through the install button. |
 | Setup redirect lands on the app with nothing recorded | The account is not signed in (the browser is sent to sign in first) or has no workspace yet (onboarding shows first); the installation is recorded on the next attempt. |

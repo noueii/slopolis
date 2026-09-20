@@ -150,6 +150,15 @@ class FakeGitHub:
             return self.config_text
         return None
 
+    async def publish_permissions(self, repo_full_name: str) -> dict[str, str]:
+        """Report an installation that can write everything publishing needs.
+
+        The fake models a correctly configured App: pre-flight refuses a
+        submission whose installation cannot write (spec 10.3), and this flow is
+        about what happens *after* that gate.
+        """
+        return {"pull_requests": "write", "issues": "write", "checks": "write"}
+
     # --- worker.deps.ContextReader port (review harness) --------------------
 
     async def get_pull_request(self, repo_full_name: str, number: int) -> GitHubPullRequest:

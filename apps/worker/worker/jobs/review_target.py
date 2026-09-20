@@ -92,8 +92,9 @@ _NO_OUTPUT_NOTE = "no model output for this review pass"
 #: granted, and the operator reading the failed target is the only one who can
 #: grant it, so the stored error names the scope and where to apply it (§10.7).
 _PERMISSION_HINT = (
-    "the GitHub App installation cannot write: grant Pull requests, Issues and Checks "
-    "'Read & write' on the App, then approve the update for the installation"
+    "the GitHub App installation cannot write: posting the review needs Pull requests "
+    "'Read & write', and the check run needs Checks 'Read & write' — grant them on the App, "
+    "then approve the update for the installation"
 )
 
 
@@ -286,7 +287,9 @@ async def _run_attempt(
         # Publishing is inside the guarded region: a refused or throttled write is
         # an attempt failure like any other, and it must close the attempt row
         # instead of escaping the job with the target stuck ``running`` (§10.7).
-        await _persist_and_publish(db=db, job=job, run=run, ids=ids, plan=plan)
+        # The check run is the exception — the publisher records its refusal
+        # instead of raising, and returns why (see ``_persist_and_publish``).
+        check_note = await _persist_and_publish(db=db, job=job, run=run, ids=ids, plan=plan)
     except PermanentTargetError as exc:
         await _fail_permanently(db=db, job=job, run=run, ids=ids, tree=tree, exc=exc)
         return
@@ -307,10 +310,21 @@ async def _run_attempt(
     await persistence.finish_run(
         db, target=job.target, run=run, now=_now(), duration_ms=duration_ms
     )
+    if check_note is not None:
+        # The review is published and the target is done, so a warning is the only
+        # place left to say the check run is missing from the pull request (§10.7).
+        _LOG.warning(
+            "check run skipped; the published review stands",
+            extra={
+                "session_id": str(ids.session),
+                "target_id": str(ids.target),
+                "reason": check_note,
+            },
+        )
     await tree.recorder.finish(
         tree.pr.id,
         AgentStatus.DONE,
-        summary=_review_summary(job, plan.result),
+        summary=_review_summary(job, plan.result, skipped=check_note),
         finding_count=len(plan.result.findings),
     )
     await persistence.recompute_session(db, job.session_id)
@@ -533,13 +547,19 @@ async def _cancel_target(db: AsyncSession, job: TargetJob) -> None:
     await persistence.recompute_session(db, job.session_id)
 
 
-def _review_summary(job: TargetJob, result: ReviewResult) -> str:
-    """One readable line about a completed pass, plus whatever it could not do."""
+def _review_summary(job: TargetJob, result: ReviewResult, *, skipped: str | None = None) -> str:
+    """One readable line about a completed pass, plus whatever it could not do.
+
+    ``skipped`` is the note about a surface GitHub refused while the review
+    published anyway (spec 10.7). It lands in the node's summary because nothing
+    failed: the tree is where a reader learns the check run is missing.
+    """
     line = (
         f"PR #{job.target.number}: {len(result.findings)} finding(s), "
         f"{result.tokens} tokens, ${result.cost_usd:.4f}"
     )
-    return "\n".join([line, *result.notes]) if result.notes else line
+    notes = [*result.notes, skipped] if skipped is not None else result.notes
+    return "\n".join([line, *notes]) if notes else line
 
 
 def _reviewer_objective(job: TargetJob) -> str:
@@ -567,7 +587,7 @@ async def _persist_and_publish(
     run: SessionTargetRun,
     ids: _Ids,
     plan: _AttemptPlan,
-) -> None:
+) -> str | None:
     """Commit the review's output, then publish it to GitHub.
 
     The findings and the usage they cost are the expensive half of an attempt and
@@ -576,6 +596,11 @@ async def _persist_and_publish(
     (which begin with a rollback) cannot undo a commit. Posting is the last thing
     an attempt does, and the comment ids it returns are stamped on the rows that
     are already durable (spec 10.7).
+
+    Returns the note about a check run GitHub refused, or ``None`` when every
+    surface the config asked for posted. The caller folds it into the node's
+    summary, so a skipped check run is told apart from a publish that never
+    happened.
     """
     job.target.head_branch = plan.pull.head_branch
     inline = inline_targets(
@@ -611,6 +636,9 @@ async def _persist_and_publish(
         ),
     )
     _stamp_posted(rows=rows, inline=inline, comment_ids=outcome.inline_comment_ids)
+    if outcome.check_run_skipped is None:
+        return None
+    return f"the review posted without a check run: {outcome.check_run_skipped}"
 
 
 def _stamp_posted(

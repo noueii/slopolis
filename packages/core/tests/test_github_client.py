@@ -13,12 +13,16 @@ from typing import Any
 import httpx
 import pytest
 import respx
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from githubkit import GitHub, TokenAuthStrategy
+from githubkit.auth import AppAuthStrategy
 from githubkit_schemas.latest.models import (  # pyright: ignore[reportMissingTypeStubs]
     CheckRun,
     ContentFile,
     DiffEntry,
     FullRepository,
+    Installation,
     PullRequest,
     RepositoryCollaboratorPermission,
     ReposOwnerRepoCommitsRefCheckRunsGetResponse200,
@@ -27,7 +31,7 @@ from test_github_helpers import fixture
 
 from slopolis_core.github.auth import InstallationAuth
 from slopolis_core.github.client import GitHubClient
-from slopolis_core.github.errors import GitHubNotFoundError
+from slopolis_core.github.errors import GitHubAuthError, GitHubNotFoundError
 from slopolis_core.github.limits import MAX_FILE_BYTES
 
 _BASE = "https://api.github.com"
@@ -35,12 +39,34 @@ _REPO = "acme/widget"
 _OWNER, _NAME = _REPO.split("/")
 _TOKEN = "ghs_test"
 _PULL_URL = "https://github.com/acme/widget/pull/7"
+#: App-JWT reads need a real App id: githubkit caches one JWT per issuer.
+_APP_ID = 5017401
+_INSTALLATION_ID = 555
 
 
 def _client() -> GitHubClient:
     return GitHubClient(
         GitHub(TokenAuthStrategy(_TOKEN)),
         auth=InstallationAuth.from_installation_token(_TOKEN),
+    )
+
+
+def _installation_client() -> GitHubClient:
+    """A client that also holds the App credentials ``from_app`` retains.
+
+    githubkit caches one JWT per issuer in a process-wide cache, so the App id is
+    unique to this module.
+    """
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+    return GitHubClient(
+        GitHub(TokenAuthStrategy(_TOKEN)),
+        auth=InstallationAuth(installation_id=_INSTALLATION_ID, token=_TOKEN),
+        app_client=GitHub(AppAuthStrategy(_APP_ID, pem), rest_api_validate_body=False),
     )
 
 
@@ -261,5 +287,37 @@ async def test_user_can_trigger_rejects_an_unknown_level(
         await _client().user_can_trigger(
             _REPO, private=False, user_login="alice", required="admin"
         )
+
+    assert len(respx_mock.calls) == 0
+
+
+@respx.mock(base_url=_BASE)
+async def test_installation_permissions_returns_the_granted_scopes(
+    respx_mock: respx.Router,
+) -> None:
+    """Given an installation granting three scopes, only those are reported."""
+    body = fixture(Installation, id=_INSTALLATION_ID)
+    # GitHub omits what it did not grant, so the payload is not schema-complete.
+    body["permissions"] = {"pull_requests": "write", "issues": "read", "metadata": "read"}
+    respx_mock.get(f"/app/installations/{_INSTALLATION_ID}").mock(
+        return_value=httpx.Response(200, json=body)
+    )
+
+    permissions = await _installation_client().installation_permissions()
+
+    assert permissions == {
+        "pull_requests": "write",
+        "issues": "read",
+        "metadata": "read",
+    }
+
+
+@respx.mock(base_url=_BASE)
+async def test_installation_permissions_without_app_credentials_send_no_request(
+    respx_mock: respx.Router,
+) -> None:
+    """Given a client holding only an installation token, the read is refused."""
+    with pytest.raises(GitHubAuthError, match="installation permissions need"):
+        await _client().installation_permissions()
 
     assert len(respx_mock.calls) == 0

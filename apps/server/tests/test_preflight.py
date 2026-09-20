@@ -12,12 +12,14 @@ from app.main import create_app
 from app.services.github_clients import WorkspaceRepositories
 from sqlalchemy import func, select
 
-from slopolis_core.github.errors import GitHubNotFoundError
+from slopolis_core.github.errors import GitHubError, GitHubNotFoundError
 from slopolis_core.github.models import GitHubPullRequest, InstallationRepository
 from slopolis_core.llm.client import LiteLlmClient, LlmAuthError
 from slopolis_db.models import Repository, ReviewSession
 
 from .conftest import (
+    LIVE_PERMISSIONS,
+    WRITE_PERMISSIONS,
     ApiHarness,
     FakeGateway,
     FakeInstallationClients,
@@ -30,6 +32,7 @@ from .conftest import (
 )
 
 _VALID_URL = "https://github.com/acme/api/pull/11"
+_WEB_URL = "https://github.com/acme/web/pull/22"
 _UNKNOWN_URL = "https://github.com/other/repo/pull/3"
 _WIDGETS_URL = "https://github.com/widgets/app/pull/5"
 
@@ -49,12 +52,21 @@ class GatewayClient:
         pulls: dict[str, GitHubPullRequest] | None = None,
         files: dict[tuple[str, str], str] | None = None,
         access: bool = True,
+        permissions: dict[str, str] | None = None,
+        permissions_error: bool = False,
     ) -> None:
         self.installation_id = installation_id
         self.covered = covered
         self.pulls = pulls or {}
         self.files = files or {}
         self.access = access
+        #: What this installation was granted (spec 10.3); a fully-scoped
+        #: installation unless a test says otherwise.
+        self.permissions = (
+            permissions if permissions is not None else dict(WRITE_PERMISSIONS)
+        )
+        #: Whether GitHub fails the permission read, as it does on a bad App key.
+        self.permissions_error = permissions_error
         self.calls: list[str] = []
         #: The access override each check was asked for (spec 10.10).
         self.required_levels: list[str | None] = []
@@ -89,6 +101,13 @@ class GatewayClient:
         self.calls.append(f"user_can_trigger:{repo_full_name}")
         self.required_levels.append(required)
         return self.access
+
+    async def installation_permissions(self) -> dict[str, str]:
+        """The permissions GitHub reports this installation was granted."""
+        self.calls.append("installation_permissions")
+        if self.permissions_error:
+            raise GitHubError("installation permissions unavailable")
+        return dict(self.permissions)
 
     async def list_open_pull_requests(self, full_name: str) -> list[GitHubPullRequest]:
         """A repository switch reports the open count; this fake has none."""
@@ -244,6 +263,7 @@ async def test_preflight_reads_a_link_through_its_repositorys_installation(
         "list_installation_repositories",
         f"resolve_pr:{_WIDGETS_URL}",
         "user_can_trigger:widgets/app",
+        "installation_permissions",
         "read_file:widgets/app:.codereview.yml",
     ]
     # ...while the other installation was only asked what it covers
@@ -506,6 +526,187 @@ async def test_preflight_applies_each_repositorys_access_override(
     assert acme.required_levels == ["write"]
     # ...while one on the spec rule is told nothing, i.e. the client decides
     assert widgets.required_levels == [None]
+
+
+# --- the installation's publish permissions (spec 10.3) ---------------------
+
+
+async def test_a_submission_is_refused_when_the_installation_cannot_publish(
+    seeded: Any, session_factory: Any, build_harness: Any
+) -> None:
+    # Given a workspace whose installation may not write Pull requests — it can
+    # read the PR, so every other check passes
+    async with session_factory() as session:
+        await seed_review_model(session, seeded.workspace_id)
+    acme = GatewayClient(
+        installation_id=555,
+        covered=["acme/api"],
+        pulls={_VALID_URL: _pull("acme/api", 11)},
+        permissions={"pull_requests": "read", "checks": "write"},
+    )
+    harness: ApiHarness = await build_harness(
+        user_id=seeded.user_id,
+        real_preflight=True,
+        github_clients=FakeInstallationClients({555: acme}),
+    )
+
+    # When it is submitted
+    response = await harness.client.post("/api/sessions", json={"prUrls": [_VALID_URL]})
+
+    # Then no session is created, nothing is enqueued, and the refusal names the
+    # scope and the fix
+    assert response.status_code == 422
+    error = response.json()["error"]
+    assert error["code"] == "no_valid_targets"
+    assert "grant Pull requests 'Read & write' on the App" in error["detail"]
+    assert "approve the update for the installation" in error["detail"]
+    assert harness.pool.jobs == []
+    async with session_factory() as session:
+        refused = await session.scalar(select(func.count(ReviewSession.id)))
+    assert refused == 1
+
+    # When the App is granted the scope and the installation updated
+    acme.permissions = dict(WRITE_PERMISSIONS)
+    accepted = await harness.client.post("/api/sessions", json={"prUrls": [_VALID_URL]})
+
+    # Then the very same link is accepted: the permissions are read per submit
+    assert accepted.status_code == 201, accepted.text
+    assert len(harness.pool.jobs) == 1
+    async with session_factory() as session:
+        persisted = await session.scalar(select(func.count(ReviewSession.id)))
+    assert persisted == 2
+
+
+async def test_a_submission_posts_without_a_check_run_on_the_live_grant(
+    seeded: Any, session_factory: Any, build_harness: Any
+) -> None:
+    # Given the installation's own grant: Pull requests write, Checks read-only,
+    # no Issues scope at all — the set both comment kinds post with
+    async with session_factory() as session:
+        await seed_review_model(session, seeded.workspace_id)
+    acme = GatewayClient(
+        installation_id=555,
+        covered=["acme/api"],
+        pulls={_VALID_URL: _pull("acme/api", 11)},
+        permissions=dict(LIVE_PERMISSIONS),
+    )
+    harness: ApiHarness = await build_harness(
+        user_id=seeded.user_id,
+        real_preflight=True,
+        github_clients=FakeInstallationClients({555: acme}),
+    )
+
+    # When a link is pre-flighted
+    response = await harness.client.post(
+        "/api/reviews/preflight", json={"prUrls": [_VALID_URL]}
+    )
+
+    # Then it is valid, and the notice says what the review loses — not that it
+    # cannot run
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["url"] for item in body["valid"]] == [_VALID_URL]
+    assert body["invalid"] == []
+    assert any(
+        "the review will post without a check run" in notice
+        for notice in body["notices"]
+    )
+    assert not any("cannot write:" in notice for notice in body["notices"])
+
+    # And the submission it belongs to is created
+    created = await harness.client.post(
+        "/api/sessions", json={"prUrls": [_VALID_URL]}
+    )
+
+    assert created.status_code == 201, created.text
+    assert created.json()["targetCount"] == 1
+    assert len(harness.pool.jobs) == 1
+    async with session_factory() as session:
+        sessions = await session.scalar(select(func.count(ReviewSession.id)))
+    # The seeded workspace's own session, plus this submission's
+    assert sessions == 2
+
+
+async def test_one_submission_reads_an_installations_permissions_once(
+    seeded: Any, session_factory: Any, build_harness: Any
+) -> None:
+    # Given one installation granting two repositories, and both submitted
+    async with session_factory() as session:
+        await seed_review_model(session, seeded.workspace_id)
+        row = await session.get(Repository, seeded.repository_id)
+        assert row is not None
+        session.add(
+            Repository(
+                workspace_id=seeded.workspace_id,
+                installation_id=row.installation_id,
+                github_id=4243,
+                full_name="acme/web",
+                private=False,
+                default_branch="main",
+            )
+        )
+        await session.commit()
+    acme = GatewayClient(
+        installation_id=555,
+        covered=["acme/api", "acme/web"],
+        pulls={
+            _VALID_URL: _pull("acme/api", 11),
+            _WEB_URL: _pull("acme/web", 22),
+        },
+    )
+    harness: ApiHarness = await build_harness(
+        user_id=seeded.user_id,
+        real_preflight=True,
+        github_clients=FakeInstallationClients({555: acme}),
+    )
+
+    # When both links are submitted
+    response = await harness.client.post(
+        "/api/sessions", json={"prUrls": [_VALID_URL, _WEB_URL]}
+    )
+
+    # Then both are queued, and the installation was asked what it may write once
+    assert response.status_code == 201, response.text
+    assert response.json()["targetCount"] == 2
+    assert len(harness.pool.jobs) == 2
+    assert acme.calls.count("installation_permissions") == 1
+
+
+async def test_an_unreadable_permission_read_is_a_notice_not_a_failed_request(
+    seeded: Any, session_factory: Any, build_harness: Any
+) -> None:
+    # Given an installation GitHub will not answer a permission read for, in a
+    # workspace that is otherwise ready to submit
+    async with session_factory() as session:
+        await seed_review_model(session, seeded.workspace_id)
+    acme = GatewayClient(
+        installation_id=555,
+        covered=["acme/api"],
+        pulls={_VALID_URL: _pull("acme/api", 11)},
+        permissions_error=True,
+    )
+    harness: ApiHarness = await build_harness(
+        user_id=seeded.user_id,
+        real_preflight=True,
+        github_clients=FakeInstallationClients({555: acme}),
+    )
+
+    # When a link is pre-flighted
+    response = await harness.client.post(
+        "/api/reviews/preflight", json={"prUrls": [_VALID_URL]}
+    )
+
+    # Then it answers the outcome rather than failing the request, and refuses
+    # the link: publishing cannot be guaranteed for it
+    assert response.status_code == 200
+    body = response.json()
+    assert body["valid"] == []
+    assert body["invalid"] == [_VALID_URL]
+    assert any(
+        "Could not check whether the GitHub App installation can write to acme/api"
+        in notice
+        for notice in body["notices"]
+    )
 
 
 async def test_an_unconfigured_gateway_is_a_notice_not_a_failed_request(

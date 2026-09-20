@@ -107,6 +107,13 @@ interface SessionRuns {
 
 const CACHE = new Map<string, SessionRuns>()
 
+/** Whether a run id appears anywhere in the tree (children included). */
+function hasRun(nodes: AgentRunNode[], runId: string): boolean {
+  return nodes.some(
+    (node) => node.id === runId || hasRun(node.children ?? [], runId),
+  )
+}
+
 function sessionRuns(session: ReviewSession): SessionRuns {
   const cached = CACHE.get(session.id)
   if (cached) return cached
@@ -1145,8 +1152,12 @@ export const runsHandlers = [
           `No session with id "${String(params.id)}".`,
         )
       }
-      const rows = sessionRuns(session).events.get(String(params.runId))
-      if (!rows) {
+      const store = sessionRuns(session)
+      // A run that exists but has not produced an event yet — a node waiting
+      // behind its parent — is an empty page, not a missing run: the server only
+      // 404s for a run that is not part of the session.
+      const rows = store.events.get(String(params.runId))
+      if (!rows && !hasRun(store.runs, String(params.runId))) {
         return errorResponse(
           404,
           "run_not_found",
@@ -1154,6 +1165,7 @@ export const runsHandlers = [
           `Run "${String(params.runId)}" has no events in session "${session.id}".`,
         )
       }
+      const events = rows ?? []
 
       const url = new URL(request.url)
       const afterSeq = Number(url.searchParams.get("afterSeq") ?? "0") || 0
@@ -1164,7 +1176,7 @@ export const runsHandlers = [
       const items =
         scenarioOf(request) === "empty"
           ? []
-          : rows.filter((row) => row.seq > afterSeq).slice(0, limit)
+          : events.filter((row) => row.seq > afterSeq).slice(0, limit)
       const body: AgentEventPage = {
         items,
         nextSeq: items.length > 0 ? items[items.length - 1].seq : null,

@@ -261,3 +261,34 @@ describe("mock session stream", () => {
     expect(lastSnapshot(frames).status).toBe("done")
   })
 })
+
+describe("run events for a node that has not started", () => {
+  it("answers an empty page for a run that exists without events", async () => {
+    // A queued session's tree is a pending main run with nothing in it yet. The
+    // server 404s only for a run that is not part of the session, so the pane
+    // must read an empty page rather than claim the run is foreign.
+    const queued = dataset.sessions.find(
+      (session) => session.status === "queued" && session.id !== RETRY_SESSION_ID,
+    )
+    if (!queued) throw new Error("the dataset has no plain queued session")
+
+    const runs = await readTree(queued.id)
+    const pending = runs.find((run) => run.status === "pending")
+    expect(pending).toBeDefined()
+
+    const response = await fetch(
+      `/api/sessions/${queued.id}/runs/${pending?.id}/events`,
+    )
+
+    expect(response.status).toBe(200)
+    expect((await response.json()).items).toEqual([])
+  })
+
+  it("still refuses a run that is not in the session", async () => {
+    const response = await fetch(
+      "/api/sessions/ses_0000retry/runs/run_not_here/events",
+    )
+
+    expect(response.status).toBe(404)
+  })
+})

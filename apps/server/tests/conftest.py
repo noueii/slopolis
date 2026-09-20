@@ -554,6 +554,7 @@ async def build_harness(
         github_client: FakeGitHubClient | None = None,
         github_clients: FakeInstallationClients[Any] | None = None,
         real_preflight: bool = False,
+        unconfigured_gateway: bool = False,
         app_installations: FakeAppInstallations | None = None,
         oauth_client: FakeOAuthClient | None = None,
         repo_access: RepoAccessChecker | None = None,
@@ -608,8 +609,14 @@ async def build_harness(
             registry = FakeInstallationClients(default=github_client)
         app.state.github_clients = registry
         app.state.app_installations = app_installations
-        # The real pre-flight assembly takes its live check from the app.
-        app.state.live_model_check = live_check or FakeLiveCheck()
+        # The real pre-flight assembly takes its live check from the app. A
+        # deployment with no gateway has neither a check nor a client, which is
+        # the state that must still answer 200 with an explanation rather than
+        # failing the request.
+        app.state.live_model_check = (
+            None if unconfigured_gateway else live_check or FakeLiveCheck()
+        )
+        app.state.llm_client = None
         app.state.arq_pool = pool
         # The OAuth client is process state, like the GitHub one: the routes read
         # it from the app, and leaving it unset is the unconfigured-deployment path.

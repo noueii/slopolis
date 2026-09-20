@@ -32,8 +32,8 @@ from app.services.github_clients import (
     WorkspaceRepositories,
 )
 from app.services.repo_access import GitHubRepoProbe, RepoAccessChecker
-from slopolis_core.llm.client import LlmClient
-from slopolis_core.preflight.ports import LlmLiveModelCheck
+from slopolis_core.llm.client import LlmClient, LlmError
+from slopolis_core.preflight.ports import LiveModelCheck, LlmLiveModelCheck
 from slopolis_core.preflight.service import PreflightService
 from slopolis_core.vault import SecretVault, VaultDecryptError, VaultNotConfigured
 from slopolis_db.models import User
@@ -52,6 +52,7 @@ __all__ = [
     "OptionalVaultDep",
     "PreflightServiceDep",
     "RepoAccessCheckerDep",
+    "UnconfiguredGatewayCheck",
     "VaultDep",
     "WorkspaceIdDep",
     "WorkspaceRepositoriesDep",
@@ -236,19 +237,35 @@ async def get_preflight_service(
 PreflightServiceDep = Annotated[PreflightService, Depends(get_preflight_service)]
 
 
-def _live_check_from_app(request: Request) -> LlmLiveModelCheck:
-    """Return the app-owned live model check, building a lazy default if absent."""
-    check: LlmLiveModelCheck | None = getattr(
-        request.app.state, "live_model_check", None
-    )
+class UnconfiguredGatewayCheck:
+    """The live check a deployment without a model gateway gets.
+
+    Raised as a transport error this would hide everything else pre-flight
+    found — every submission would answer 503 before the service ever ran, and
+    the user would see one line instead of the list of things to fix (spec 10.3
+    reports validation failures as notices). Failing the port's own way puts it
+    in that list, where it belongs: it is a workspace/deployment problem, not a
+    broken request.
+    """
+
+    def __init__(self, reason: str) -> None:
+        self._reason = reason
+
+    async def check(self, model: str) -> None:
+        """Always fail, naming what the deployment has to configure."""
+        raise LlmError(self._reason)
+
+
+def _live_check_from_app(request: Request) -> LiveModelCheck:
+    """Return the app-owned live model check, or one that explains its absence."""
+    check: LiveModelCheck | None = getattr(request.app.state, "live_model_check", None)
     if check is not None:
         return check
     llm: LlmClient | None = getattr(request.app.state, "llm_client", None)
     if llm is None:
-        raise ApiError(
-            503,
-            "model_gateway_not_configured",
-            "No model gateway is configured for live checks.",
+        return UnconfiguredGatewayCheck(
+            "the model gateway is not configured, so no review can call a model; "
+            "set LITELLM_BASE_URL and LITELLM_MASTER_KEY on the server and restart"
         )
     return LlmLiveModelCheck(llm)
 

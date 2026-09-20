@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import patch
 
+import httpx
 from app.adapters.github import GitHubGatewayAdapter
 from app.adapters.workspace import WorkspaceConfigAdapter
+from app.main import create_app
 from app.services.github_clients import WorkspaceRepositories
 from sqlalchemy import func, select
 
 from slopolis_core.github.errors import GitHubNotFoundError
 from slopolis_core.github.models import GitHubPullRequest, InstallationRepository
+from slopolis_core.llm.client import LiteLlmClient, LlmAuthError
 from slopolis_db.models import Repository, ReviewSession
 
 from .conftest import (
@@ -121,14 +125,10 @@ def _pull(repo: str, number: int) -> GitHubPullRequest:
     )
 
 
-async def test_preflight_splits_valid_and_invalid(
-    seeded: Any, build_harness: Any
-) -> None:
+async def test_preflight_splits_valid_and_invalid(seeded: Any, build_harness: Any) -> None:
     # Given a gateway that resolves one link and rejects the other
     gateway = FakeGateway(refs={_VALID_URL: make_ref("acme/api", 11)})
-    harness: ApiHarness = await build_harness(
-        user_id=seeded.user_id, gateway=gateway
-    )
+    harness: ApiHarness = await build_harness(user_id=seeded.user_id, gateway=gateway)
 
     # When pre-flight runs over both links
     response = await harness.client.post(
@@ -144,21 +144,13 @@ async def test_preflight_splits_valid_and_invalid(
     assert body["notices"]
 
 
-async def test_preflight_reports_uncovered_repository(
-    seeded: Any, build_harness: Any
-) -> None:
+async def test_preflight_reports_uncovered_repository(seeded: Any, build_harness: Any) -> None:
     # Given a PR in a repo the installation does not cover
-    gateway = FakeGateway(
-        refs={_VALID_URL: make_ref("acme/private")}, covered=["acme/api"]
-    )
-    harness: ApiHarness = await build_harness(
-        user_id=seeded.user_id, gateway=gateway
-    )
+    gateway = FakeGateway(refs={_VALID_URL: make_ref("acme/private")}, covered=["acme/api"])
+    harness: ApiHarness = await build_harness(user_id=seeded.user_id, gateway=gateway)
 
     # When pre-flight runs
-    response = await harness.client.post(
-        "/api/reviews/preflight", json={"prUrls": [_VALID_URL]}
-    )
+    response = await harness.client.post("/api/reviews/preflight", json={"prUrls": [_VALID_URL]})
 
     # Then the link is invalid with an explanatory notice
     body = response.json()
@@ -167,18 +159,14 @@ async def test_preflight_reports_uncovered_repository(
     assert any("not covered" in notice for notice in body["notices"])
 
 
-async def test_preflight_fails_without_model(
-    seeded: Any, build_harness: Any
-) -> None:
+async def test_preflight_fails_without_model(seeded: Any, build_harness: Any) -> None:
     # Given a workspace with no assigned model
     harness: ApiHarness = await build_harness(
         user_id=seeded.user_id, workspace=FakeWorkspace(model=None)
     )
 
     # When pre-flight runs
-    response = await harness.client.post(
-        "/api/reviews/preflight", json={"prUrls": [_VALID_URL]}
-    )
+    response = await harness.client.post("/api/reviews/preflight", json={"prUrls": [_VALID_URL]})
 
     # Then no target validates and the missing model is surfaced
     body = response.json()
@@ -186,9 +174,7 @@ async def test_preflight_fails_without_model(
     assert any("No review model" in notice for notice in body["notices"])
 
 
-async def test_preflight_fails_when_live_check_fails(
-    seeded: Any, build_harness: Any
-) -> None:
+async def test_preflight_fails_when_live_check_fails(seeded: Any, build_harness: Any) -> None:
     # Given a gateway that resolves the link but a failing live model check
     gateway = FakeGateway(refs={_VALID_URL: make_ref("acme/api", 11)})
     harness: ApiHarness = await build_harness(
@@ -198,9 +184,7 @@ async def test_preflight_fails_when_live_check_fails(
     )
 
     # When pre-flight runs
-    response = await harness.client.post(
-        "/api/reviews/preflight", json={"prUrls": [_VALID_URL]}
-    )
+    response = await harness.client.post("/api/reviews/preflight", json={"prUrls": [_VALID_URL]})
 
     # Then the link is rejected and no session is created
     body = response.json()
@@ -213,12 +197,8 @@ async def test_preflight_never_creates_a_session(
 ) -> None:
     # Given a successful pre-flight run
     gateway = FakeGateway(refs={_VALID_URL: make_ref("acme/api", 11)})
-    harness: ApiHarness = await build_harness(
-        user_id=seeded.user_id, gateway=gateway
-    )
-    await harness.client.post(
-        "/api/reviews/preflight", json={"prUrls": [_VALID_URL]}
-    )
+    harness: ApiHarness = await build_harness(user_id=seeded.user_id, gateway=gateway)
+    await harness.client.post("/api/reviews/preflight", json={"prUrls": [_VALID_URL]})
 
     # Then the session table is unchanged
     async with session_factory() as session:
@@ -253,9 +233,7 @@ async def test_preflight_reads_a_link_through_its_repositorys_installation(
     )
 
     # When a link to the second installation's repository is pre-flighted
-    response = await harness.client.post(
-        "/api/reviews/preflight", json={"prUrls": [_WIDGETS_URL]}
-    )
+    response = await harness.client.post("/api/reviews/preflight", json={"prUrls": [_WIDGETS_URL]})
 
     # Then the link is valid, read entirely through its own installation's client
     assert response.status_code == 200
@@ -283,9 +261,7 @@ async def test_preflight_fails_like_a_missing_client_without_an_installation(
     harness: ApiHarness = await build_harness(user_id=user.id, real_preflight=True)
 
     # When a link is pre-flighted
-    response = await harness.client.post(
-        "/api/reviews/preflight", json={"prUrls": [_WIDGETS_URL]}
-    )
+    response = await harness.client.post("/api/reviews/preflight", json={"prUrls": [_WIDGETS_URL]})
 
     # Then it fails exactly the way a workspace with no GitHub client always did
     assert response.status_code == 503
@@ -318,9 +294,7 @@ async def test_preflight_fails_like_a_missing_client_for_an_unmintable_installat
     )
 
     # Then a link on the readable installation still validates...
-    covered = await harness.client.post(
-        "/api/reviews/preflight", json={"prUrls": [_VALID_URL]}
-    )
+    covered = await harness.client.post("/api/reviews/preflight", json={"prUrls": [_VALID_URL]})
     assert covered.status_code == 200
     assert [item["url"] for item in covered.json()["valid"]] == [_VALID_URL]
 
@@ -355,9 +329,7 @@ async def test_preflight_refuses_a_parked_repository_by_its_reason(
     )
 
     # When a link in it is pre-flighted
-    response = await harness.client.post(
-        "/api/reviews/preflight", json={"prUrls": [_VALID_URL]}
-    )
+    response = await harness.client.post("/api/reviews/preflight", json={"prUrls": [_VALID_URL]})
 
     # Then it is refused for being disabled, with the way back named — never as
     # an uncovered repository
@@ -378,9 +350,7 @@ async def test_preflight_refuses_a_parked_repository_by_its_reason(
         f"/api/repositories/{seeded.repository_id}", json={"enabled": True}
     )
     assert reenabled.json()["enabled"] is True
-    accepted = await harness.client.post(
-        "/api/reviews/preflight", json={"prUrls": [_VALID_URL]}
-    )
+    accepted = await harness.client.post("/api/reviews/preflight", json={"prUrls": [_VALID_URL]})
 
     # Then the very same link validates through its repository's installation
     assert [item["url"] for item in accepted.json()["valid"]] == [_VALID_URL]
@@ -405,9 +375,7 @@ async def test_preflight_still_reports_a_repository_github_no_longer_grants(
     )
 
     # When a link in it is pre-flighted
-    response = await harness.client.post(
-        "/api/reviews/preflight", json={"prUrls": [_VALID_URL]}
-    )
+    response = await harness.client.post("/api/reviews/preflight", json={"prUrls": [_VALID_URL]})
 
     # Then it keeps the uncovered notice: a repository that is merely no longer
     # granted is not the same refusal as one the workspace parked
@@ -431,9 +399,7 @@ async def test_preflight_hands_the_resolved_override_to_the_access_check(
     )
 
     # When a link in it is pre-flighted
-    response = await harness.client.post(
-        "/api/reviews/preflight", json={"prUrls": [_VALID_URL]}
-    )
+    response = await harness.client.post("/api/reviews/preflight", json={"prUrls": [_VALID_URL]})
 
     # Then the override was read for that repository and handed to the check,
     # which is the only thing that can apply it
@@ -540,3 +506,64 @@ async def test_preflight_applies_each_repositorys_access_override(
     assert acme.required_levels == ["write"]
     # ...while one on the spec rule is told nothing, i.e. the client decides
     assert widgets.required_levels == [None]
+
+
+async def test_an_unconfigured_gateway_is_a_notice_not_a_failed_request(
+    seeded: Any, session_factory: Any, build_harness: Any
+) -> None:
+    # Given a deployment with no model gateway, and a link that otherwise passes
+    # (model assigned, credential ready, repository covered, access granted)
+    async with session_factory() as session:
+        await seed_review_model(session, seeded.workspace_id)
+    acme = GatewayClient(
+        installation_id=555,
+        covered=["acme/api"],
+        pulls={_VALID_URL: _pull("acme/api", 11)},
+    )
+    harness: ApiHarness = await build_harness(
+        user_id=seeded.user_id,
+        real_preflight=True,
+        unconfigured_gateway=True,
+        github_clients=FakeInstallationClients({555: acme}),
+    )
+
+    # When pre-flight runs through the real dependency assembly
+    response = await harness.client.post("/api/reviews/preflight", json={"prUrls": [_VALID_URL]})
+
+    # Then it answers the outcome rather than a 503: the missing gateway is one
+    # more thing to fix, and the user can see it without losing the rest
+    assert response.status_code == 200
+    body = response.json()
+    assert body["valid"] == []
+    assert body["invalid"] == [_VALID_URL]
+    assert any("LITELLM_MASTER_KEY" in notice for notice in body["notices"])
+
+
+async def test_the_gateway_client_is_built_from_settings_at_boot() -> None:
+    # An app that never opens a client cannot run a live check on any
+    # deployment, however well its environment is configured. Driven through the
+    # real lifespan, so the wiring itself is what is under test.
+    app = create_app()
+    with patch.object(LiteLlmClient, "from_settings", return_value=object()) as from_settings:
+        async with app.router.lifespan_context(app):
+            assert app.state.llm_client is not None
+
+    from_settings.assert_called_once()
+
+
+async def test_a_gateway_less_deployment_still_boots_and_serves() -> None:
+    # Without LITELLM_MASTER_KEY the server must still start and answer: reads,
+    # the install flow and settings do not need a model, and pre-flight is where
+    # the missing gateway is explained.
+    app = create_app()
+    with patch.object(
+        LiteLlmClient,
+        "from_settings",
+        side_effect=LlmAuthError("LITELLM_MASTER_KEY is not configured"),
+    ):
+        async with app.router.lifespan_context(app):
+            assert app.state.llm_client is None
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+            ) as client:
+                assert (await client.get("/healthz")).status_code == 200

@@ -9,6 +9,7 @@ or Redis configured still boots and serves ``/healthz`` and ``/openapi.json``.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -38,12 +39,15 @@ __all__ = ["app", "create_app"]
 
 _API_PREFIX = "/api"
 
+_logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """Open process-wide clients; close them on shutdown."""
     settings = get_app_settings()
     await _open_github(app, settings)
+    _open_llm(app)
     oauth = GitHubOAuthClient()
     app.state.oauth_client = oauth
     await _open_arq(app, settings)
@@ -51,7 +55,36 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
         yield
     finally:
         await _close_arq(app)
+        await _close_llm(app)
         await oauth.aclose()
+
+
+def _open_llm(app: FastAPI) -> None:
+    """Open the model gateway client the live check and any model call needs.
+
+    Without this the server has no way to reach a provider at all, and every
+    submission used to answer 503 from a dependency before pre-flight could say
+    what was actually wrong. A deployment that has not configured a gateway
+    still boots — reads, the install flow and settings all work — and pre-flight
+    reports the missing gateway as a validation notice naming what to set.
+    """
+    from slopolis_core.llm.client import LiteLlmClient, LlmAuthError
+
+    try:
+        app.state.llm_client = LiteLlmClient.from_settings()
+    except LlmAuthError as exc:
+        # One line at a level an operator sees, because "reviews cannot run" is
+        # the consequence and the cause is one environment variable.
+        _logger.warning("Model gateway is not configured: %s", exc)
+        app.state.llm_client = None
+
+
+async def _close_llm(app: FastAPI) -> None:
+    """Close the gateway connection pool if one was opened."""
+    llm = getattr(app.state, "llm_client", None)
+    close = getattr(llm, "aclose", None)
+    if close is not None:
+        await close()
 
 
 async def _open_github(app: FastAPI, settings: AppSettings) -> None:
@@ -84,9 +117,7 @@ async def _open_arq(app: FastAPI, settings: AppSettings) -> None:
         from arq import create_pool
         from arq.connections import RedisSettings
 
-        app.state.arq_pool = await create_pool(
-            RedisSettings.from_dsn(settings.core.redis_url)
-        )
+        app.state.arq_pool = await create_pool(RedisSettings.from_dsn(settings.core.redis_url))
     except Exception:
         app.state.arq_pool = None
 

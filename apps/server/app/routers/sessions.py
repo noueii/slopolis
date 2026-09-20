@@ -5,7 +5,10 @@ user, status, range, page, pageSize, sort). Creation runs pre-flight first and
 only persists a session when at least one target is valid — it never creates a
 session on failure. Each persisted target is enqueued as one ARQ job. A manual
 retry puts a finished session's failed or cancelled targets back on that same
-queue, without re-running pre-flight (spec 10.5 §Manual retry).
+queue, without re-running pre-flight (spec 10.5 §Manual retry) — and in the mode
+each target's own last attempt calls for, so a target whose review already exists
+is re-published rather than reviewed again (§Retrying a run that only failed to
+publish).
 """
 
 from __future__ import annotations
@@ -27,6 +30,11 @@ from app.deps import (
     WorkspaceIdDep,
 )
 from app.errors import ApiError
+from app.retry_actions import (
+    PUBLISH,
+    RETRYABLE_TARGET_STATUSES,
+    retry_actions,
+)
 from app.routers._session_data import (
     accessible_views,
     load_session,
@@ -54,10 +62,6 @@ from slopolis_db.models import Repository, ReviewSession, SessionTarget, User
 __all__ = ["router"]
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
-
-#: Target statuses a manual retry may put back on the queue (spec 10.5 §Manual
-#: retry): the run failed, or the user cancelled it, and either is re-runnable.
-_RETRYABLE_TARGET_STATUSES = (TargetStatus.FAILED.value, TargetStatus.CANCELLED.value)
 
 #: Target statuses the queue already owns. Retrying one would duplicate the job
 #: it is already running, so it is refused instead.
@@ -244,7 +248,9 @@ async def retry_session(
     Manual retry is not a second submission: pre-flight already validated the
     links, coverage, and access, so nothing is re-validated here (spec 10.5
     §Manual retry). Earlier attempt rows are history and stay untouched — the
-    worker opens the next attempt itself.
+    worker opens the next attempt itself. Each target is re-queued in the mode its
+    last attempt calls for, so a target that only failed to publish is not
+    reviewed — and paid for — a second time.
     """
     session = await _require_session(db, session_id, workspace_id)
     view = await require_session_access(db, session, viewer=viewer, checker=checker)
@@ -264,6 +270,15 @@ async def retry_session(
         [target for target in all_targets if target.id in readable],
         body.target_ids if body else None,
     )
+    # Each target comes back in the mode its own last attempt calls for (spec 10.5
+    # §Retrying a run that only failed to publish): one whose review is already on
+    # hand is re-published, everything else is reviewed again. Read here, because
+    # the rule asks whether the target is retryable *now* — which the flip below
+    # is what ends. The mode travels with the job, so the worker never re-derives
+    # it, and never re-reviews a pull request the user has already paid for.
+    actions = await retry_actions(db, targets)
+    publish_retry = [target for target in targets if actions[target.id] == PUBLISH]
+    review_retry = [target for target in targets if actions[target.id] != PUBLISH]
     for target in targets:
         target.status = SessionStatus.QUEUED.value
     # The session only goes back to queued when nothing in it is still running: a
@@ -279,7 +294,10 @@ async def retry_session(
     await db.refresh(session)
     # Enqueue only after the commit, so a worker can never pick up a job whose
     # session still reads as finished.
-    await enqueue_targets(pool, session.id, targets)
+    if review_retry:
+        await enqueue_targets(pool, session.id, review_retry)
+    if publish_retry:
+        await enqueue_targets(pool, session.id, publish_retry, mode=PUBLISH)
     return await _serialize(db, session)
 
 
@@ -297,7 +315,9 @@ def _retry_selection(
 
     Refusals come before the caller writes anything: a target the queue already
     owns is named rather than duplicated, and a selection with nothing retryable
-    in it is a conflict, not a silent no-op (spec 10.5 §Manual retry).
+    in it is a conflict, not a silent no-op (spec 10.5 §Manual retry). The
+    statuses it accepts are the ones the retry rule reads, so a target the
+    endpoint re-queues is always one the wire labelled as retryable.
     """
     if requested:
         wanted = list(dict.fromkeys(requested))
@@ -313,7 +333,7 @@ def _retry_selection(
         selection = [by_id[target_id] for target_id in wanted]
     else:
         selection = [
-            target for target in targets if target.status in _RETRYABLE_TARGET_STATUSES
+            target for target in targets if target.status in RETRYABLE_TARGET_STATUSES
         ]
 
     busy = [target for target in selection if target.status in _ACTIVE_TARGET_STATUSES]
@@ -326,7 +346,7 @@ def _retry_selection(
         )
 
     retryable = [
-        target for target in selection if target.status in _RETRYABLE_TARGET_STATUSES
+        target for target in selection if target.status in RETRYABLE_TARGET_STATUSES
     ]
     if not retryable:
         raise ApiError(

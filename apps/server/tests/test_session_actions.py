@@ -109,6 +109,11 @@ async def test_cancel_session_then_conflict(
 
 # --- manual retry (spec 10.5) -----------------------------------------------
 
+#: What the worker stores when GitHub refuses a write after the model has run —
+#: ``ClassName: message``, the format the retry rule classifies from. The
+#: throttled publish is what a target that only failed to publish usually hit.
+_GITHUB_FAILURE = "GitHubRateLimitError: GitHub rate limit hit during upsert_summary_comment"
+
 
 class FakeRepoProbe:
     """Answers the viewer's repository read with a fixed verdict.
@@ -237,14 +242,25 @@ async def target_id(
         return found
 
 
-async def add_attempt(session_factory: Any, target_id_: uuid.UUID) -> uuid.UUID:
-    """Record a finished attempt for a target; return the run's id."""
+async def add_attempt(
+    session_factory: Any,
+    target_id_: uuid.UUID,
+    *,
+    error: str = "provider timed out",
+    tokens: int = 0,
+) -> uuid.UUID:
+    """Record a finished attempt for a target; return the run's id.
+
+    ``error`` and ``tokens`` are the two things the retry rule reads (spec 10.5):
+    a GitHub failure that recorded usage is a review the target already owns.
+    """
     async with session_factory() as session:
         run = SessionTargetRun(
             target_id=target_id_,
             attempt=1,
             status="failed",
-            error="provider timed out",
+            error=error,
+            tokens=tokens,
         )
         session.add(run)
         await session.commit()
@@ -292,10 +308,11 @@ async def test_retry_requeues_failed_targets_and_enqueues_each(
     assert body["finishedAt"] is None
     assert [target["status"] for target in body["targets"]] == ["queued", "queued"]
 
-    # And exactly one review_target job per target carries the submit path's args
+    # And exactly one review_target job per target carries the submit path's args,
+    # in review mode: neither attempt says a review is already on hand
     assert set(harness.pool.jobs) == {
-        ("review_target", (str(seeded.session_id), str(first))),
-        ("review_target", (str(seeded.session_id), str(second))),
+        ("review_target", (str(seeded.session_id), str(first), "review")),
+        ("review_target", (str(seeded.session_id), str(second), "review")),
     }
 
     # And the earlier attempt survives as history
@@ -306,6 +323,89 @@ async def test_retry_requeues_failed_targets_and_enqueues_each(
             )
         ).all()
     assert [run.id for run in runs] == [attempt]
+
+
+async def test_retry_reports_and_enqueues_a_publish_retry(
+    seeded: Any, session_factory: Any, build_harness: Any
+) -> None:
+    # Given a failed session whose target failed to publish a review it had
+    # already paid for — a GitHub error with usage recorded on the attempt
+    target = await target_id(session_factory, seeded.session_id, 7)
+    await set_state(session_factory, seeded.session_id, status="failed", target_status="failed")
+    await add_attempt(session_factory, target, error=_GITHUB_FAILURE, tokens=120)
+    harness: ApiHarness = await build_harness(user_id=seeded.user_id)
+
+    # When the session is read
+    detail = await harness.client.get(f"/api/sessions/{seeded.session_id}")
+
+    # Then the target says the retry will re-publish rather than review again
+    assert detail.status_code == 200
+    assert detail.json()["targets"][0]["retryAction"] == "publish"
+
+    # When it is retried
+    response = await harness.client.post(f"/api/sessions/{seeded.session_id}/retry")
+
+    # Then the job is enqueued in publish mode, so the model never runs again
+    assert response.status_code == 200
+    assert harness.pool.jobs == [
+        ("review_target", (str(seeded.session_id), str(target), "publish"))
+    ]
+
+
+async def test_retry_reviews_when_the_last_attempt_has_no_review_on_hand(
+    seeded: Any, session_factory: Any, build_harness: Any
+) -> None:
+    # Given two failed targets: one whose last attempt was a GitHub failure that
+    # recorded no usage (the model never finished), and one whose failure was not
+    # GitHub's at all
+    unpriced = await target_id(session_factory, seeded.session_id, 7)
+    unparsed = await add_target(
+        session_factory, seeded.session_id, seeded.repository_id, number=8, status="failed"
+    )
+    await set_state(session_factory, seeded.session_id, status="failed", target_status="failed")
+    await add_attempt(session_factory, unpriced, error=_GITHUB_FAILURE, tokens=0)
+    await add_attempt(
+        session_factory, unparsed, error="ModelNotConfiguredError: no model", tokens=120
+    )
+    harness: ApiHarness = await build_harness(user_id=seeded.user_id)
+
+    # When the session is read
+    detail = await harness.client.get(f"/api/sessions/{seeded.session_id}")
+
+    # Then neither target has a review to publish, so both say review
+    assert detail.status_code == 200
+    actions = {target["id"]: target["retryAction"] for target in detail.json()["targets"]}
+    assert actions == {str(unpriced): "review", str(unparsed): "review"}
+
+    # When it is retried
+    response = await harness.client.post(f"/api/sessions/{seeded.session_id}/retry")
+
+    # Then both jobs are enqueued in review mode
+    assert response.status_code == 200
+    assert sorted(harness.pool.jobs) == sorted(
+        [
+            ("review_target", (str(seeded.session_id), str(unpriced), "review")),
+            ("review_target", (str(seeded.session_id), str(unparsed), "review")),
+        ]
+    )
+
+
+async def test_a_target_that_is_not_retryable_reports_no_retry_action(
+    seeded: Any, session_factory: Any, build_harness: Any
+) -> None:
+    # Given a done target whose history holds a GitHub failure with usage — the
+    # same attempt a failed target would carry — and its session finished
+    target = await target_id(session_factory, seeded.session_id, 7)
+    await set_state(session_factory, seeded.session_id, status="done", target_status="done")
+    await add_attempt(session_factory, target, error=_GITHUB_FAILURE, tokens=120)
+    harness: ApiHarness = await build_harness(user_id=seeded.user_id)
+
+    # When the session is read
+    detail = await harness.client.get(f"/api/sessions/{seeded.session_id}")
+
+    # Then there is no action to promise, because the target cannot be retried
+    assert detail.status_code == 200
+    assert detail.json()["targets"][0]["retryAction"] is None
 
 
 async def test_retry_enqueues_a_target_once_across_two_calls(
@@ -337,8 +437,8 @@ async def test_retry_enqueues_a_target_once_across_two_calls(
     # And each target was enqueued exactly once across the two calls
     assert sorted(harness.pool.jobs) == sorted(
         [
-            ("review_target", (str(seeded.session_id), str(first))),
-            ("review_target", (str(seeded.session_id), str(second))),
+            ("review_target", (str(seeded.session_id), str(first), "review")),
+            ("review_target", (str(seeded.session_id), str(second), "review")),
         ]
     )
 
@@ -369,7 +469,9 @@ async def test_retry_leaves_a_session_with_a_running_target_running(
     statuses = {target["id"]: target["status"] for target in body["targets"]}
     assert statuses[str(failed)] == "queued"
     assert statuses[str(running)] == "running"
-    assert harness.pool.jobs == [("review_target", (str(seeded.session_id), str(failed)))]
+    assert harness.pool.jobs == [
+        ("review_target", (str(seeded.session_id), str(failed), "review"))
+    ]
 
 
 async def test_retry_judges_the_targets_it_reads_under_the_lock(
@@ -442,7 +544,7 @@ async def test_retry_requeues_only_a_requested_cancelled_target(
     assert statuses[str(second)] == "queued"
     assert statuses[str(first)] == "failed"
     assert harness.pool.jobs == [
-        ("review_target", (str(seeded.session_id), str(second)))
+        ("review_target", (str(seeded.session_id), str(second), "review"))
     ]
 
 

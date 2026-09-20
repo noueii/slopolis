@@ -15,6 +15,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import CAMEL
+from app.retry_actions import RetryAction
 from slopolis_core.domain import SessionStatus, TargetStatus
 from slopolis_db.models.github import RequiredAccess
 
@@ -57,6 +58,7 @@ __all__ = [
     "RepositoryRef",
     "RepositorySummary",
     "RequiredAccess",
+    "RetryAction",
     "RetryRequest",
     "ReviewPreset",
     "ReviewPresetCatalog",
@@ -183,6 +185,11 @@ class SessionTarget(WireModel):
     url: str
     head_branch: str
     status: TargetStatus
+    #: What a manual retry would do (spec 10.5 §Retrying a run that only failed to
+    #: publish): ``"publish"`` re-posts the review the last attempt already
+    #: produced, ``"review"`` runs the model again. ``None`` means the target is
+    #: not retryable, so there is nothing for the button to promise.
+    retry_action: RetryAction | None = None
     findings_count: int = 0
     tokens: int = 0
     cost_usd: float = 0.0

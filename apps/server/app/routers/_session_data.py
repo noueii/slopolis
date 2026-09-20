@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.errors import ApiError
+from app.retry_actions import retry_actions
 from app.schemas import SessionTarget as SessionTargetSchema
 from app.serializers import serialize_target
 from app.services.repo_access import RepoAccessChecker
@@ -219,16 +220,28 @@ async def repositories_for_targets(
 async def serialize_targets(
     db: AsyncSession, targets: list[SessionTarget]
 ) -> list[SessionTargetSchema]:
-    """Serialize a session's targets with findings counts and repo refs."""
+    """Serialize a session's targets with findings counts and repo refs.
+
+    Each target also carries what a manual retry would do with it (spec 10.5), so
+    the retry button can say so before the user presses it; a live session never
+    reaches GitHub for it, because a target that is not retryable needs no
+    attempt read.
+    """
     counts = await finding_counts_for(db, [target.id for target in targets])
     repos = await repositories_for_targets(db, targets)
+    actions = await retry_actions(db, targets)
     result: list[SessionTargetSchema] = []
     for target in targets:
         repository = repos.get(target.repository_id)
         if repository is None:
             continue
         result.append(
-            serialize_target(target, counts.get(target.id, 0), repository)
+            serialize_target(
+                target,
+                counts.get(target.id, 0),
+                repository,
+                retry_action=actions.get(target.id),
+            )
         )
     return result
 

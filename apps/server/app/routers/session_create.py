@@ -3,9 +3,10 @@
 Creation runs pre-flight first and refuses to persist anything unless at least
 one target resolves — a failed pre-flight never leaves a half-built session
 behind. Each persisted target is enqueued as exactly one ARQ job named
-``review_target`` with ``(session_id, target_id)``; :func:`enqueue_targets` is
-that enqueue, shared with the manual-retry path so a retried target gets the
-very job submission would have put on the queue (spec 10.5 §Manual retry).
+``review_target`` with ``(session_id, target_id, mode)``; :func:`enqueue_targets`
+is that enqueue, shared with the manual-retry path so a retried target gets the
+very job submission would have put on the queue — in the mode the retry decided
+on (spec 10.5 §Manual retry, §Retrying a run that only failed to publish).
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.adapters.workspace import WorkspaceConfigAdapter
 from app.deps import ArqPool
 from app.errors import ApiError
+from app.retry_actions import REVIEW, RetryAction
 from app.routers.catalog import (
     DEFAULT_MODEL_ID,
     DEFAULT_PROVIDER,
@@ -140,16 +142,26 @@ async def create_session(
 
 
 async def enqueue_targets(
-    pool: ArqPool, session_id: uuid.UUID, targets: Sequence[SessionTarget]
+    pool: ArqPool,
+    session_id: uuid.UUID,
+    targets: Sequence[SessionTarget],
+    *,
+    mode: RetryAction = REVIEW,
 ) -> None:
     """Put one ``review_target`` job per target on the queue.
 
     The single place that names the job and fixes its argument order: a manual
     retry must enqueue literally the work submission does (spec 10.5 §Manual
     retry), so both paths call this instead of each spelling the job out.
+
+    ``mode`` is what each job should do — ``"review"`` reviews the pull request,
+    ``"publish"`` re-posts the review the last attempt already bought. It
+    defaults to the submit path's work; the retry passes it explicitly, because
+    the decision belongs where the target's state is known (its attempts), and it
+    travels with the job so the worker never has to guess.
     """
     for target in targets:
-        await pool.enqueue_job(_JOB_NAME, str(session_id), str(target.id))
+        await pool.enqueue_job(_JOB_NAME, str(session_id), str(target.id), mode)
 
 
 async def _enforce_caps(

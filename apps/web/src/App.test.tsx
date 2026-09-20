@@ -50,6 +50,8 @@ vi.mock("@/api/client", () => ({
     listRepositoryPullRequests: vi.fn(),
     preflightReview: vi.fn(),
     createReviewSession: vi.fn(),
+    getRunTree: vi.fn(),
+    getRunEvents: vi.fn(),
   },
   ApiError: class ApiError extends Error {
     readonly status: number
@@ -125,6 +127,9 @@ beforeEach(() => {
     defaultPresetId: "default",
     presets: [{ id: "default", name: "Default", description: "Balanced." }],
   })
+  // The session detail mounts the run-tree panel, so a session view needs a tree.
+  vi.mocked(api.getRunTree).mockResolvedValue({ runs: [] })
+  vi.mocked(api.getRunEvents).mockResolvedValue({ items: [], nextSeq: null })
 })
 
 afterEach(() => {

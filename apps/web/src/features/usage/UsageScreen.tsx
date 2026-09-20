@@ -97,12 +97,16 @@ export function UsageScreen({ onNewReview }: UsageScreenProps) {
             total={{ tokens: report.totalTokens, costUsd: report.totalCostUsd }}
           />
 
+          {/* A user bucket is keyed by the internal user id (handles get
+              renamed), which is nothing a reader can act on, so the row is the
+              handle alone. */}
           <UsageBreakdownTable
             title="By user"
             dimension="User"
             emptyMessage="No usage attributed to a user yet."
             rows={report.byUser}
             total={{ tokens: report.totalTokens, costUsd: report.totalCostUsd }}
+            showKey={false}
           />
         </>
       ) : null}

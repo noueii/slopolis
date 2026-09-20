@@ -16,6 +16,7 @@ import {
 } from "@/features/onboarding/WorkspaceOnboarding"
 import { useWorkspaceOnboarding } from "@/features/onboarding/lib/useWorkspaceOnboarding"
 import { ComingSoonScreen } from "@/features/placeholder/ComingSoonScreen"
+import { ProvidersScreen } from "@/features/providers/ProvidersScreen"
 import { DashboardScreen } from "@/features/dashboard/DashboardScreen"
 import { RepositoriesScreen } from "@/features/repositories/RepositoriesScreen"
 import { RepositoryDetailScreen } from "@/features/repositories/RepositoryDetailScreen"
@@ -105,6 +106,8 @@ export default function App() {
     )
   } else if (route.id === "usage") {
     content = <UsageScreen onNewReview={handleNewReview} />
+  } else if (route.id === "providers") {
+    content = <ProvidersScreen />
   } else if (route.id === "templates") {
     content = <TemplatesScreen />
   } else {

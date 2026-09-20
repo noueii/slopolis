@@ -17,6 +17,13 @@ export interface UsageBreakdownTableProps {
   emptyMessage: string
   rows: UsageBreakdown[]
   total: { tokens: number; costUsd: number }
+  /**
+   * Whether a row may print its machine key under the label when the two
+   * differ — that is what makes a model row traceable to its model id.
+   * Defaults to true; a dimension keyed by an internal id turns it off, since
+   * the key is then nothing a reader could act on.
+   */
+  showKey?: boolean
 }
 
 export function UsageBreakdownTable({
@@ -25,19 +32,26 @@ export function UsageBreakdownTable({
   emptyMessage,
   rows,
   total,
+  showKey = true,
 }: UsageBreakdownTableProps) {
-  // The server makes no ordering promise; a spend report is read top-down, so
-  // the biggest contributor leads and ties fall back to tokens then key.
-  const ordered = [...rows].sort(
-    (a, b) =>
-      b.costUsd - a.costUsd || b.tokens - a.tokens || a.key.localeCompare(b.key),
-  )
-
   // Spend is the headline of this page, so the share bar reads against cost —
   // unless nothing has a price yet, in which case tokens are all there is.
   const byCost = total.costUsd > 0
   const denominator = byCost ? total.costUsd : total.tokens
   const shareLabel = byCost ? "Share of cost" : "Share of tokens"
+
+  // The API orders every breakdown by tokens, which is the metric the bars
+  // measure only when it falls back to tokens. Reading down a cost share column
+  // that jumps 60% → 11% → 2% → 16% looks arbitrary, so the rows follow the
+  // metric on screen (ties by tokens, then key, so the order is total).
+  const ordered = byCost
+    ? [...rows].sort(
+        (a, b) =>
+          b.costUsd - a.costUsd ||
+          b.tokens - a.tokens ||
+          a.key.localeCompare(b.key),
+      )
+    : rows
 
   return (
     <section
@@ -99,7 +113,7 @@ export function UsageBreakdownTable({
                   <span className="block max-w-[320px] truncate text-[13px]">
                     {row.label}
                   </span>
-                  {row.key !== row.label ? (
+                  {showKey && row.key !== row.label ? (
                     <span className="block max-w-[320px] truncate font-mono text-[10px] font-normal text-muted-foreground">
                       {row.key}
                     </span>

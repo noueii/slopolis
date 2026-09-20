@@ -3,11 +3,13 @@
  *
  * The server (`GET /api/sessions/{id}/events`) streams a lightweight status
  * projection until the session reaches a terminal state, then emits a final
- * `done` event and closes. `subscribeToSession` normalizes both event names into
- * one typed callback and returns an unsubscribe function.
+ * `done` event and closes. Since Harness V1 it also streams one `agent` event
+ * per persisted harness event, drained before `done` (spec v2 §7).
+ * `subscribeToSession` normalizes all three event names into typed callbacks
+ * and returns an unsubscribe function.
  */
 
-import type { SessionStatus, TargetStatus } from "./contract"
+import type { AgentEventItem, SessionStatus, TargetStatus } from "./contract"
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "/api"
 
@@ -51,6 +53,8 @@ export interface SessionEventPayload {
 
 export interface SessionEventHandlers {
   onEvent: (payload: SessionEventPayload) => void
+  /** One harness event; the stream drains these before `done` (spec v2 §7). */
+  onAgent?: (event: AgentEventItem) => void
   onError: (error: Event) => void
 }
 
@@ -97,12 +101,47 @@ function parsePayload(raw: string): SessionEventPayload | null {
 }
 
 /**
+ * Parse one `agent` frame. A payload that does not carry the fields the run
+ * tree merges on is dropped rather than delivered half-formed: the tree keeps
+ * its previous state and the next event (or the settle re-read) corrects it.
+ */
+function parseAgentEvent(raw: string): AgentEventItem | null {
+  let value: unknown
+  try {
+    value = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  if (!isRecord(value)) return null
+  const { id, runId, parentRunId, seq, type, payload, createdAt } = value
+  if (
+    typeof id !== "string" ||
+    typeof runId !== "string" ||
+    typeof seq !== "number" ||
+    typeof type !== "string" ||
+    typeof createdAt !== "string" ||
+    !isRecord(payload)
+  ) {
+    return null
+  }
+  return {
+    id,
+    runId,
+    parentRunId: typeof parentRunId === "string" ? parentRunId : null,
+    seq,
+    type,
+    payload,
+    createdAt,
+  }
+}
+
+/**
  * Subscribe to a session's status stream. Returns a teardown function that
  * closes the connection and detaches every listener.
  */
 export function subscribeToSession(
   id: string,
-  { onEvent, onError }: SessionEventHandlers,
+  { onEvent, onAgent, onError }: SessionEventHandlers,
 ): () => void {
   const source = new EventSource(
     `${API_BASE}/sessions/${encodeURIComponent(id)}/events`,
@@ -113,6 +152,11 @@ export function subscribeToSession(
     if (payload) onEvent(payload)
   }
 
+  const handleAgent = (event: Event) => {
+    const agentEvent = parseAgentEvent((event as MessageEvent<string>).data)
+    if (agentEvent) onAgent?.(agentEvent)
+  }
+
   const handleDone = (event: Event) => {
     const payload = parsePayload((event as MessageEvent<string>).data)
     if (payload) onEvent(payload)
@@ -120,11 +164,13 @@ export function subscribeToSession(
   }
 
   source.addEventListener("session", handleMessage)
+  source.addEventListener("agent", handleAgent)
   source.addEventListener("done", handleDone)
   source.onerror = (event) => onError(event)
 
   return () => {
     source.removeEventListener("session", handleMessage)
+    source.removeEventListener("agent", handleAgent)
     source.removeEventListener("done", handleDone)
     source.onerror = null
     source.close()

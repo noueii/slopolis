@@ -4,6 +4,10 @@
  * Serves the shapes in `src/api/contract.ts` and simulates loading latency as
  * well as empty and error responses, selected via the `x-mock-scenario` header
  * the API client attaches.
+ *
+ * A session's event stream carries the status projection and, while the session
+ * is running, the harness frames the run store has queued for it, so the run
+ * tree animates the way it does against a real worker.
  */
 
 import { HttpResponse, delay, http } from "msw"
@@ -18,8 +22,33 @@ import type {
   SessionStatus,
 } from "@/api/contract"
 import { dataset } from "./dataset"
+import {
+  LIVE_FRAME_INTERVAL_MS,
+  commitLiveFrame,
+  liveTargetStatus,
+  peekLiveFrame,
+} from "./runs"
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "/api"
+
+/** Pause before a running session's first live frame, so a cold tree read lands first. */
+const LIVE_WARMUP_MS = 900
+
+/**
+ * The session with any target status the live stream has moved past the
+ * dataset's. A target whose orchestrator the simulation just started is
+ * running, whatever the dataset was seeded with, so the detail view does not
+ * read `queued` beside its own running run.
+ */
+function withLiveTargets(session: ReviewSession): ReviewSession {
+  return {
+    ...session,
+    targets: session.targets.map((target) => ({
+      ...target,
+      status: liveTargetStatus(session, target.id) ?? target.status,
+    })),
+  }
+}
 
 const RANGE_MS: Record<Exclude<DateRangePreset, "all">, number> = {
   "24h": 24 * 60 * 60 * 1000,
@@ -208,24 +237,62 @@ export const sessionsHandlers = [
       )
     }
 
-    const payload = JSON.stringify({
-      id: found.id,
-      status: found.status,
-      targets: found.targets.map((target) => ({
-        id: target.id,
-        number: target.number,
-        status: target.status,
-      })),
-    })
-    const frames = [
-      `event: session\ndata: ${payload}\n\n`,
-      `event: done\ndata: ${payload}\n\n`,
-    ]
     const encoder = new TextEncoder()
+    const encode = (event: string, payload: string): Uint8Array =>
+      encoder.encode(`event: ${event}\ndata: ${payload}\n\n`)
+    const projection = (): string => {
+      const live = withLiveTargets(found)
+      return JSON.stringify({
+        id: live.id,
+        status: live.status,
+        targets: live.targets.map((target) => ({
+          id: target.id,
+          number: target.number,
+          status: target.status,
+        })),
+      })
+    }
+
+    // Deliberately pull-driven (mock only): the simulated worker only moves as
+    // far as the client actually reads, so a connection dropped mid-stream
+    // (a StrictMode remount, a closed tab) leaves the run store where its
+    // frames got to, and the next connection picks up the rest.
+    let liveFrames = 0
+    let gone = false
+    const opened = projection()
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
-        for (const frame of frames) controller.enqueue(encoder.encode(frame))
-        controller.close()
+        controller.enqueue(encode("session", opened))
+      },
+      async pull(controller) {
+        if (gone || request.signal.aborted) return
+        const frame = peekLiveFrame(found)
+        if (!frame) {
+          // A session with nothing live is the stream it always was: one
+          // snapshot, then the close that repeats it.
+          if (liveFrames === 0) {
+            controller.enqueue(encode("done", opened))
+          } else {
+            const payload = projection()
+            controller.enqueue(encode("session", payload))
+            controller.enqueue(encode("done", payload))
+          }
+          controller.close()
+          return
+        }
+        // The first live frame waits a beat longer, so the run tree a cold
+        // client is still loading lands before the frames start folding onto it.
+        await delay(liveFrames === 0 ? LIVE_WARMUP_MS : LIVE_FRAME_INTERVAL_MS)
+        try {
+          controller.enqueue(encode("agent", JSON.stringify(frame.event)))
+        } catch {
+          return
+        }
+        liveFrames += 1
+        commitLiveFrame(found, frame)
+      },
+      cancel() {
+        gone = true
       },
     })
     return new HttpResponse(stream, {
@@ -254,7 +321,7 @@ export const sessionsHandlers = [
         `No session with id "${String(params.id)}".`,
       )
     }
-    return HttpResponse.json(found)
+    return HttpResponse.json(withLiveTargets(found))
   }),
 ]
 

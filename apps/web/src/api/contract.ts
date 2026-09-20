@@ -174,6 +174,11 @@ export interface RepositorySummary {
   lastActivityAt: string
   /** Whether the GitHub App can still read the repository. */
   connected: boolean
+  /**
+   * The workspace's own switch (spec 10.1). A disabled repository stays listed
+   * with its history, but pre-flight refuses its pull requests.
+   */
+  enabled: boolean
 }
 
 export interface RepositoryListResponse {
@@ -541,7 +546,7 @@ export interface AssignmentResponse {
 
 /** One dimension's usage roll-up: a model, a repository, or a user (spec 10.9). */
 export interface UsageBreakdown {
-  /** Machine key for the dimension value: model id, repo full name, handle. */
+  /** Machine key for the dimension value: model id, repo full name, user id. */
   key: string
   label: string
   tokens: number
@@ -566,7 +571,11 @@ export interface UsageResponse {
   totalSessions: number
   byModel: UsageBreakdown[]
   byRepository: UsageBreakdown[]
-  /** Attributed per user, keyed by handle. */
+  /**
+   * Attributed per user: keyed by user id (a handle is not stable across
+   * renames), labeled with the handle, plus an `unattributed` bucket for
+   * records that resolve to no user.
+   */
   byUser: UsageBreakdown[]
   /** Daily buckets, oldest first. */
   series: UsagePoint[]
@@ -621,6 +630,8 @@ export interface AgentRunTreeResponse {
 export interface AgentEventItem {
   id: string
   runId: string
+  /** Spawning run's id; `null` on the session's main run. */
+  parentRunId: string | null
   /** Monotonic per run; also the replay cursor. */
   seq: number
   /** Event type, e.g. `agent.spawned` or `agent.tool_call`. */

@@ -1,3 +1,4 @@
+import { useState } from "react"
 import {
   BookMarked,
   ChevronRight,
@@ -15,6 +16,8 @@ import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { useRepositories } from "@/features/dashboard/lib/useDashboard"
 import { formatRelativeTime } from "@/features/sessions/lib/format"
+import { RepositoryAccessDialog } from "./components/RepositoryAccessDialog"
+import { useRepositoryAccess } from "./lib/useRepositoryAccess"
 
 export interface RepositoriesScreenProps {
   onOpenRepository: (fullName: string) => void
@@ -25,6 +28,26 @@ export function RepositoriesScreen({ onOpenRepository }: RepositoriesScreenProps
   const repositories = data?.items ?? []
   const loading = status === "loading" && !data
   const failed = status === "error"
+  const [confirming, setConfirming] = useState<RepositorySummary | null>(null)
+  const access = useRepositoryAccess()
+
+  /** Enabling needs no confirmation; it reopens something the workspace chose. */
+  async function toggle(repository: RepositorySummary) {
+    if (!repository.enabled) {
+      const updated = await access.run(repository, true)
+      if (updated !== null) refetch()
+      return
+    }
+    setConfirming(repository)
+  }
+
+  async function confirmDisable() {
+    if (confirming === null) return
+    const updated = await access.run(confirming, false)
+    if (updated === null) return
+    setConfirming(null)
+    refetch()
+  }
 
   return (
     <div className="mx-auto flex w-full max-w-[1180px] animate-fade-up flex-col gap-6 p-6">
@@ -62,9 +85,17 @@ export function RepositoriesScreen({ onOpenRepository }: RepositoriesScreenProps
           Adding a repository happens on GitHub while installing or updating the
           slopolis GitHub App — you choose which accounts and repositories to
           grant access to. There is no in-app add-repository endpoint yet, so
-          this action opens the GitHub App install flow.
+          this action opens the GitHub App install flow. Which of the granted
+          repositories slopolis reviews is this workspace&apos;s own switch:
+          disable one to park it.
         </p>
       </div>
+
+      {access.error !== null && confirming === null ? (
+        <p role="alert" className="text-xs leading-relaxed text-destructive">
+          {access.error}
+        </p>
+      ) : null}
 
       {loading ? <RepositoryListSkeleton /> : null}
 
@@ -113,9 +144,20 @@ export function RepositoriesScreen({ onOpenRepository }: RepositoriesScreenProps
               key={repository.id}
               repository={repository}
               onOpen={() => onOpenRepository(repository.fullName)}
+              onToggle={() => void toggle(repository)}
             />
           ))}
         </div>
+      ) : null}
+
+      {confirming !== null ? (
+        <RepositoryAccessDialog
+          repository={confirming}
+          pending={access.pending}
+          error={access.error}
+          onOpenChange={() => setConfirming(null)}
+          onConfirm={() => void confirmDisable()}
+        />
       ) : null}
     </div>
   )
@@ -124,37 +166,45 @@ export function RepositoriesScreen({ onOpenRepository }: RepositoriesScreenProps
 interface RepositoryCardProps {
   repository: RepositorySummary
   onOpen: () => void
+  onToggle: () => void
 }
 
-function RepositoryCard({ repository, onOpen }: RepositoryCardProps) {
+function RepositoryCard({ repository, onOpen, onToggle }: RepositoryCardProps) {
   const VisibilityIcon = repository.private ? Lock : Globe
 
   return (
-    <button
-      type="button"
-      onClick={onOpen}
-      aria-label={`Open repository ${repository.fullName}`}
-      className="group flex w-full flex-col gap-3 rounded-xl border border-border bg-card px-4 py-3.5 text-left transition-colors hover:border-accent/50 hover:bg-muted/30 focus-visible:border-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    <div
+      className={cn(
+        "group flex w-full flex-col gap-3 rounded-xl border bg-card px-4 py-3.5 transition-colors",
+        repository.enabled
+          ? "border-border hover:border-accent/50 hover:bg-muted/30"
+          : "border-dashed border-border bg-muted/20",
+      )}
     >
-      <div className="flex items-start gap-2.5">
-        <span className="grid size-8 shrink-0 place-items-center rounded-lg border border-border bg-muted/40 text-muted-foreground">
-          <BookMarked className="size-4" />
-        </span>
-        <div className="flex min-w-0 flex-1 flex-col">
-          <span className="truncate font-mono text-[12px] font-medium text-foreground">
-            {repository.fullName}
+      <button
+        type="button"
+        onClick={onOpen}
+        aria-label={`Open repository ${repository.fullName}`}
+        className="flex w-full flex-col gap-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <div className="flex items-start gap-2.5">
+          <span className="grid size-8 shrink-0 place-items-center rounded-lg border border-border bg-muted/40 text-muted-foreground">
+            <BookMarked className="size-4" />
           </span>
-          <span className="flex items-center gap-1.5 text-2xs text-muted-foreground">
-            <VisibilityIcon className="size-3" />
-            {repository.private ? "Private" : "Public"}
-            <span className="text-muted-foreground/50">·</span>
-            <span className="font-mono">{repository.defaultBranch}</span>
-          </span>
+          <div className="flex min-w-0 flex-1 flex-col">
+            <span className="truncate font-mono text-[12px] font-medium text-foreground">
+              {repository.fullName}
+            </span>
+            <span className="flex items-center gap-1.5 text-2xs text-muted-foreground">
+              <VisibilityIcon className="size-3" />
+              {repository.private ? "Private" : "Public"}
+              <span className="text-muted-foreground/50">·</span>
+              <span className="font-mono">{repository.defaultBranch}</span>
+            </span>
+          </div>
+          <ChevronRight className="mt-0.5 size-4 shrink-0 text-muted-foreground/40 transition-colors group-hover:text-muted-foreground" />
         </div>
-        <ChevronRight className="mt-0.5 size-4 shrink-0 text-muted-foreground/40 transition-colors group-hover:text-muted-foreground" />
-      </div>
 
-      <div className="flex items-center justify-between border-t border-border pt-3">
         <div className="flex items-center gap-3 text-2xs text-muted-foreground">
           <span className="font-mono">
             {repository.openPrCount} open PR
@@ -163,9 +213,36 @@ function RepositoryCard({ repository, onOpen }: RepositoryCardProps) {
           <span className="text-muted-foreground/50">·</span>
           <span>{formatRelativeTime(repository.lastActivityAt)}</span>
         </div>
-        <ConnectionBadge connected={repository.connected} />
+      </button>
+
+      <div className="flex items-center justify-between gap-2 border-t border-border pt-3">
+        <span className="flex items-center gap-1.5">
+          <ConnectionBadge connected={repository.connected} />
+          {repository.enabled ? null : <AccessBadge />}
+        </span>
+        <Button
+          type="button"
+          variant={repository.enabled ? "outline" : "default"}
+          size="sm"
+          onClick={onToggle}
+          className={cn(
+            repository.enabled &&
+              "text-muted-foreground hover:text-destructive",
+          )}
+        >
+          {repository.enabled ? "Disable" : "Enable"}
+        </Button>
       </div>
-    </button>
+    </div>
+  )
+}
+
+/** Shown beside the connection badge when the workspace has parked the row. */
+export function AccessBadge() {
+  return (
+    <span className="rounded-full border border-warning/30 bg-warning/10 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-warning">
+      Disabled
+    </span>
   )
 }
 

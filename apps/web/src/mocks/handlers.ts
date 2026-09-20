@@ -7,8 +7,10 @@ import { isMockModeEnabled } from "@/api/client"
 
 import { dashboardHandlers } from "./dashboard"
 import { meHandlers } from "./me"
+import { runsHandlers } from "./runs"
 import { sessionsHandlers } from "./sessions"
 import { templatesHandlers } from "./templates"
+import { usageHandlers } from "./usage"
 import { workspaceHandlers } from "./workspaces"
 
 /** Handlers for features that are backed by the real API. */
@@ -16,7 +18,9 @@ export const featureHandlers = [
   ...meHandlers,
   ...workspaceHandlers,
   ...sessionsHandlers,
+  ...runsHandlers,
   ...dashboardHandlers,
+  ...usageHandlers,
 ]
 
 /**

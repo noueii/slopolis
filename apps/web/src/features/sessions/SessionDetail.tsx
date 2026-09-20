@@ -10,7 +10,9 @@ import { TERMINAL_SESSION_STATUSES } from "@/api/events"
 import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
 import { Skeleton } from "@/components/ui/skeleton"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { cn } from "@/lib/utils"
+import { RunTreePanel } from "./components/RunTreePanel"
 import { SessionStatusBadge } from "./components/SessionStatusBadge"
 import {
   formatAbsoluteTime,
@@ -24,6 +26,7 @@ import {
   type SessionEventsMode,
 } from "./lib/useSessionEvents"
 import { useSession } from "./lib/useSessions"
+import { useRunTree } from "./lib/useRunTree"
 import { SessionsError } from "./SessionsError"
 
 export interface SessionDetailProps {
@@ -234,12 +237,21 @@ function DetailBody({
 export function SessionDetail({ sessionId, onBack }: SessionDetailProps) {
   const { data, status, error, refetch } = useSession(sessionId)
   const [live, setLive] = useState<SessionEventUpdate | null>(null)
-  const mode = useSessionEvents(sessionId, { onUpdate: setLive })
+  const [tab, setTab] = useState<"summary" | "runs" | null>(null)
+  const runTree = useRunTree(sessionId, live?.status)
+  const mode = useSessionEvents(sessionId, {
+    onUpdate: setLive,
+    onAgentEvent: runTree.applyEvent,
+  })
 
   const liveStatus = live?.status
   useEffect(() => {
     if (liveStatus && TERMINAL_SESSION_STATUSES.has(liveStatus)) refetch()
   }, [liveStatus, refetch])
+
+  // The run tree is the session's delegation surface, so it leads once it has
+  // something to show; a session with no runs keeps the summary it always had.
+  const activeTab = tab ?? (runTree.runs.length > 0 ? "runs" : "summary")
 
   return (
     <div className="mx-auto flex w-full max-w-[1100px] animate-fade-up flex-col gap-5 p-6">
@@ -283,7 +295,33 @@ export function SessionDetail({ sessionId, onBack }: SessionDetailProps) {
             </span>
           </header>
           <p className="text-sm text-muted-foreground">{data.title}</p>
-          <DetailBody session={data} live={live} />
+          <Tabs
+            value={activeTab}
+            onValueChange={(value) => setTab(value as "summary" | "runs")}
+            className="flex flex-col gap-4"
+          >
+            <TabsList className="h-8 self-start">
+              <TabsTrigger value="summary" className="h-6 px-2.5 text-xs">
+                Summary
+              </TabsTrigger>
+              <TabsTrigger value="runs" className="h-6 px-2.5 text-xs">
+                Run tree
+              </TabsTrigger>
+            </TabsList>
+            <TabsContent value="summary" className="mt-0">
+              <DetailBody session={data} live={live} />
+            </TabsContent>
+            <TabsContent value="runs" className="mt-0">
+              <RunTreePanel
+                sessionId={data.id}
+                runs={runTree.runs}
+                status={runTree.status}
+                error={runTree.error}
+                liveEvents={runTree.events}
+                onRetry={runTree.refetch}
+              />
+            </TabsContent>
+          </Tabs>
         </>
       ) : null}
     </div>

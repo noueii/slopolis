@@ -34,6 +34,7 @@ import type {
   ProviderUpdate,
   RepositoryListResponse,
   RepositoryPullRequestsResponse,
+  RepositorySummary,
   ReviewPresetCatalog,
   ReviewSession,
   ReviewTemplate,
@@ -264,6 +265,20 @@ export const api = {
 
   listRepositories(): Promise<RepositoryListResponse> {
     return request<RepositoryListResponse>("/repositories")
+  },
+
+  /**
+   * Park or re-enable a repository (spec 10.1). A parked repository keeps its
+   * sessions and findings and is refused at pre-flight.
+   */
+  updateRepository(
+    repositoryId: string,
+    body: { enabled: boolean },
+  ): Promise<RepositorySummary> {
+    return request<RepositorySummary>(
+      `/repositories/${encodeURIComponent(repositoryId)}`,
+      { method: "PATCH", body: JSON.stringify(body) },
+    )
   },
 
   listRepositoryPullRequests(

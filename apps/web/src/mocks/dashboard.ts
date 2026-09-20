@@ -76,6 +76,16 @@ function repoId(fullName: string): string {
   return `repo_${fullName.replace(/[^a-z0-9]/gi, "_")}`
 }
 
+/**
+ * Repositories the workspace has switched off (spec 10.1). They stay listed and
+ * keep their history; pre-flight refuses their pull requests. Seeded so the
+ * parked state is visible without clicking anything, and mutable so the mock's
+ * PATCH behaves like the real switch.
+ */
+const parkedRepositories = new Set(
+  REPOS.filter((_repo, index) => index % 5 === 2).map((repo) => repo.fullName),
+)
+
 function buildRepositories(now = Date.now()): RepositorySummary[] {
   return REPOS.map((repo, index) => ({
     id: repoId(repo.fullName),
@@ -85,6 +95,7 @@ function buildRepositories(now = Date.now()): RepositorySummary[] {
     openPrCount: OPEN_PULL_REQUESTS.get(repo.fullName)?.length ?? 0,
     lastActivityAt: new Date(now - (index + 1) * (37 * 60 * 1000)).toISOString(),
     connected: true,
+    enabled: !parkedRepositories.has(repo.fullName),
   }))
 }
 
@@ -290,6 +301,14 @@ function resolvePreflight(prUrls: string[]): PreflightResult {
       continue
     }
 
+    if (parkedRepositories.has(repo.fullName)) {
+      invalid.push(parsed.url)
+      notices.push(
+        `Repository ${repo.fullName} is disabled in slopolis, so its pull requests are not reviewed. Enable it under Repositories to review them again.`,
+      )
+      continue
+    }
+
     const generated = OPEN_PULL_REQUESTS.get(repo.fullName)?.find(
       (pull) => pull.number === parsed.number,
     )
@@ -388,6 +407,41 @@ export const dashboardHandlers = [
     }
     const items = scenarioOf(request) === "empty" ? [] : buildRepositories()
     return HttpResponse.json({ items })
+  }),
+
+  http.patch(`${API_BASE}/repositories/:id`, async ({ request, params }) => {
+    await latency(request)
+    if (scenarioOf(request) === "error") {
+      return errorResponse(
+        500,
+        "repository_update_failed",
+        "Could not update the repository.",
+      )
+    }
+    const body = (await request.json()) as { enabled?: boolean }
+    if (typeof body.enabled !== "boolean") {
+      return errorResponse(
+        422,
+        "enabled_required",
+        "Provide the state to set the repository to.",
+      )
+    }
+    const repository = buildRepositories().find(
+      (item) => item.id === String(params.id),
+    )
+    if (!repository) {
+      return errorResponse(
+        404,
+        "repository_not_found",
+        "The repository is not connected to this workspace.",
+      )
+    }
+    if (body.enabled) {
+      parkedRepositories.delete(repository.fullName)
+    } else {
+      parkedRepositories.add(repository.fullName)
+    }
+    return HttpResponse.json({ ...repository, enabled: body.enabled })
   }),
 
   http.get(

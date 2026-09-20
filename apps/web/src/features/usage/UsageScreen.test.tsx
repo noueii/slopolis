@@ -28,6 +28,9 @@ vi.mock("@/api/client", async (importOriginal) => {
   }
 })
 
+/** The server keys a user bucket by the user's id and labels it with the handle. */
+const USER_ID = "8f2a1c1e-6b0a-4b3e-9c1d-2f4a5b6c7d8e"
+
 const usage: UsageResponse = {
   totalTokens: 480_000,
   totalCostUsd: 7.2,
@@ -37,14 +40,14 @@ const usage: UsageResponse = {
       key: "claude-sonnet-4-5",
       label: "Claude Sonnet 4.5",
       tokens: 300_000,
-      costUsd: 5.4,
+      costUsd: 1.8,
       sessions: 4,
     },
     {
       key: "gpt-5-mini",
       label: "GPT-5 mini",
       tokens: 180_000,
-      costUsd: 1.8,
+      costUsd: 5.4,
       sessions: 2,
     },
   ],
@@ -58,7 +61,7 @@ const usage: UsageResponse = {
     },
   ],
   byUser: [
-    { key: "noueii", label: "Noah Yu", tokens: 480_000, costUsd: 7.2, sessions: 6 },
+    { key: USER_ID, label: "noueii", tokens: 480_000, costUsd: 7.2, sessions: 6 },
   ],
   series: [
     { date: "2026-09-01", tokens: 120_000, costUsd: 1.8, sessions: 2 },
@@ -110,6 +113,15 @@ describe("UsageScreen", () => {
     expect(within(models).getByText("300k")).toBeDefined()
     expect(within(models).getByText("$5.40")).toBeDefined()
     expect(within(models).getByText("75%")).toBeDefined()
+    // The API orders by tokens, but the share bar measures cost: rows follow the
+    // bars, so the biggest share of spend leads even when it used fewer tokens.
+    const modelOrder = within(models)
+      .getAllByRole("rowheader")
+      .map((cell) => cell.textContent)
+    expect(modelOrder).toEqual([
+      expect.stringContaining("GPT-5 mini"),
+      expect.stringContaining("Claude Sonnet 4.5"),
+    ])
 
     const repositories = screen.getByRole("table", { name: "By repository" })
     expect(
@@ -117,8 +129,12 @@ describe("UsageScreen", () => {
     ).toBeDefined()
 
     const users = screen.getByRole("table", { name: "By user" })
-    expect(within(users).getByRole("rowheader", { name: /Noah Yu/ })).toBeDefined()
+    expect(within(users).getByRole("rowheader", { name: "noueii" })).toBeDefined()
     expect(within(users).getByText("100%")).toBeDefined()
+    // The key is a machine id with nothing for a reader to act on, so the row
+    // is the handle alone — unlike the model rows above, which keep their ids.
+    expect(within(users).queryByText(USER_ID)).toBeNull()
+    expect(within(models).getByText("claude-sonnet-4-5")).toBeDefined()
   })
 
   it("says which section has nothing attributed yet instead of hiding it", async () => {

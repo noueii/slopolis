@@ -12,8 +12,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 
-const SIGN_IN_URL = "/api/auth/github/login"
-
 function initialsFor(user: UserRef): string {
   const source = (user.name.trim() || user.handle).trim()
   const parts = source.split(/\s+/).filter(Boolean)
@@ -24,13 +22,14 @@ function initialsFor(user: UserRef): string {
 }
 
 export interface UserMenuProps {
-  user: UserRef | null
+  /** The signed-in account; the shell is only rendered with one. */
+  user: UserRef
 }
 
 export function UserMenu({ user }: UserMenuProps) {
-  const name = user ? user.name : "Sign in"
-  const handle = user ? `@${user.handle}` : "Not signed in"
-  const role = user ? (user.isAdmin ? "Admin" : "Member") : "GitHub account"
+  const name = user.name
+  const handle = `@${user.handle}`
+  const role = user.isAdmin ? "Admin" : "Member"
 
   return (
     <DropdownMenu>
@@ -41,11 +40,11 @@ export function UserMenu({ user }: UserMenuProps) {
           aria-label="Account menu"
         >
           <Avatar className="size-7 border border-border/70">
-            {user?.avatarUrl ? (
+            {user.avatarUrl ? (
               <AvatarImage src={user.avatarUrl} alt="" />
             ) : null}
             <AvatarFallback className="bg-foreground text-[10px] font-semibold text-background">
-              {user ? initialsFor(user) : <User className="size-3.5" />}
+              {initialsFor(user)}
             </AvatarFallback>
           </Avatar>
           <span className="hidden flex-col items-start leading-none md:flex">
@@ -61,37 +60,26 @@ export function UserMenu({ user }: UserMenuProps) {
         <DropdownMenuLabel className="flex flex-col gap-0.5">
           <span className="text-[13px] font-medium">{name}</span>
           <span className="font-mono text-2xs font-normal text-muted-foreground">
-            {user ? `${handle} · ${role}` : role}
+            {`${handle} · ${role}`}
           </span>
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
-        {user ? (
-          <>
-            <DropdownMenuItem className="gap-2">
-              <User className="size-3.5 text-muted-foreground" />
-              Profile
-            </DropdownMenuItem>
-            <DropdownMenuItem className="gap-2">
-              <Settings className="size-3.5 text-muted-foreground" />
-              Workspace settings
-              <DropdownMenuShortcut className="font-mono text-[10px]">
-                ⌘,
-              </DropdownMenuShortcut>
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem className="gap-2 text-destructive focus:text-destructive">
-              <LogOut className="size-3.5" />
-              Sign out
-            </DropdownMenuItem>
-          </>
-        ) : (
-          <DropdownMenuItem asChild className="gap-2">
-            <a href={SIGN_IN_URL}>
-              <User className="size-3.5 text-muted-foreground" />
-              Sign in with GitHub
-            </a>
-          </DropdownMenuItem>
-        )}
+        <DropdownMenuItem className="gap-2">
+          <User className="size-3.5 text-muted-foreground" />
+          Profile
+        </DropdownMenuItem>
+        <DropdownMenuItem className="gap-2">
+          <Settings className="size-3.5 text-muted-foreground" />
+          Workspace settings
+          <DropdownMenuShortcut className="font-mono text-[10px]">
+            ⌘,
+          </DropdownMenuShortcut>
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem className="gap-2 text-destructive focus:text-destructive">
+          <LogOut className="size-3.5" />
+          Sign out
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   )

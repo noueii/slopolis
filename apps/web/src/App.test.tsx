@@ -8,11 +8,29 @@ import {
 } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { api, ApiError } from "@/api/client"
-import type { DashboardData, MeResponse, WorkspaceRef } from "@/api/contract"
+import {
+  api,
+  ApiError,
+  beginSignIn,
+  signInAttempted,
+} from "@/api/client"
+import type {
+  DashboardData,
+  MeResponse,
+  ReviewSession,
+  WorkspaceRef,
+} from "@/api/contract"
 import App from "./App"
 
+// The session detail subscribes to the SSE stream on mount; this suite is about
+// which screen the URL selects, so the transport stays out of it.
+vi.mock("@/api/events", () => ({
+  TERMINAL_SESSION_STATUSES: new Set(["done", "failed", "cancelled"]),
+  subscribeToSession: () => () => undefined,
+}))
+
 vi.mock("@/api/client", () => ({
+  githubAppInstallUrl: "/api/github/install",
   api: {
     getMe: vi.fn(),
     listWorkspaces: vi.fn(),
@@ -32,6 +50,8 @@ vi.mock("@/api/client", () => ({
     listRepositoryPullRequests: vi.fn(),
     preflightReview: vi.fn(),
     createReviewSession: vi.fn(),
+    getRunTree: vi.fn(),
+    getRunEvents: vi.fn(),
   },
   ApiError: class ApiError extends Error {
     readonly status: number
@@ -47,6 +67,9 @@ vi.mock("@/api/client", () => ({
   isMockModeEnabled: () => false,
   getMockScenario: () => "default",
   setMockScenario: vi.fn(),
+  beginSignIn: vi.fn(),
+  signInAttempted: vi.fn(),
+  clearSignInAttempt: vi.fn(),
 }))
 
 const workspace: WorkspaceRef = {
@@ -78,7 +101,25 @@ const emptyDashboard: DashboardData = {
   generatedAt: "2026-01-01T00:00:00.000Z",
 }
 
+const session: ReviewSession = {
+  id: "sess_7f3a",
+  title: "Guard token refresh skew",
+  name: "acme/api-gateway#142",
+  status: "done",
+  model: "claude-sonnet-4",
+  provider: "Anthropic",
+  triggeredBy: { id: "usr_noueii", handle: "noueii", name: "Noah Yu", isAdmin: true },
+  createdAt: "2026-01-01T00:00:00.000Z",
+  targets: [],
+  targetCount: 0,
+  tokens: 0,
+  costUsd: 0,
+  findingsCount: 0,
+}
+
 beforeEach(() => {
+  vi.mocked(signInAttempted).mockReturnValue(false)
+  vi.mocked(beginSignIn).mockResolvedValue({ started: true })
   vi.mocked(api.getMe).mockResolvedValue(adminUser)
   vi.mocked(api.getDashboard).mockResolvedValue(emptyDashboard)
   vi.mocked(api.listRepositories).mockResolvedValue({ items: [] })
@@ -86,9 +127,16 @@ beforeEach(() => {
     defaultPresetId: "default",
     presets: [{ id: "default", name: "Default", description: "Balanced." }],
   })
+  // The session detail mounts the run-tree panel, so a session view needs a tree.
+  vi.mocked(api.getRunTree).mockResolvedValue({ runs: [] })
+  vi.mocked(api.getRunEvents).mockResolvedValue({ items: [], nextSeq: null })
 })
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  // `navigate` pushes real history entries; a test must not inherit them.
+  window.history.replaceState(null, "", "/")
+})
 
 describe("App navigation and focus intent", () => {
   it("does not expose a New Review nav item", async () => {
@@ -119,15 +167,6 @@ describe("App navigation and focus intent", () => {
     expect(sidebar.getByText("Review templates")).toBeDefined()
   })
 
-  it("falls back to a guest menu when /api/me fails", async () => {
-    vi.mocked(api.getMe).mockRejectedValue(new Error("unauthorized"))
-    render(<App />)
-    await screen.findByLabelText("Review focus")
-
-    expect(within(screen.getByRole("complementary")).queryByText("Review templates")).toBeNull()
-    expect(screen.getByRole("button", { name: "Account menu" })).toBeDefined()
-  })
-
   it("focuses the dashboard composer when New review is triggered", async () => {
     render(<App />)
     const composer = await screen.findByLabelText("Review focus")
@@ -141,6 +180,45 @@ describe("App navigation and focus intent", () => {
       },
       { timeout: 2000 },
     )
+  })
+})
+
+describe("Sign-in gate", () => {
+  beforeEach(() => {
+    vi.mocked(api.getMe).mockRejectedValue(
+      new ApiError(401, "unauthorized", "Sign in with GitHub to continue."),
+    )
+  })
+
+  it("sends an account-less visitor to GitHub sign-in", async () => {
+    render(<App />)
+
+    await waitFor(() => expect(beginSignIn).toHaveBeenCalledTimes(1))
+    expect(screen.queryByRole("complementary")).toBeNull()
+    expect(screen.queryByLabelText("Review focus")).toBeNull()
+  })
+
+  it("leaves a tab that already came back unsigned on the gate", async () => {
+    vi.mocked(signInAttempted).mockReturnValue(true)
+    render(<App />)
+
+    expect(await screen.findByText(/did not sign this browser in/i)).toBeDefined()
+    expect(beginSignIn).not.toHaveBeenCalled()
+  })
+
+  it("reports why the flow could not start, and retries on demand", async () => {
+    vi.mocked(beginSignIn).mockResolvedValue({
+      started: false,
+      message: "GitHub OAuth credentials are not configured.",
+    })
+    render(<App />)
+
+    expect(
+      await screen.findByText("GitHub OAuth credentials are not configured."),
+    ).toBeDefined()
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }))
+    await waitFor(() => expect(beginSignIn).toHaveBeenCalledTimes(2))
   })
 })
 
@@ -213,5 +291,40 @@ describe("Workspace onboarding gate", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Check again" }))
 
     await waitFor(() => expect(api.getMe).toHaveBeenCalledTimes(2))
+  })
+})
+
+describe("URL routing", () => {
+  it("opens a session from its permalink", async () => {
+    vi.mocked(api.getSession).mockResolvedValue(session)
+    window.history.replaceState(null, "", "/sessions/sess_7f3a")
+
+    render(<App />)
+
+    expect(await screen.findByText("Guard token refresh skew")).toBeDefined()
+    expect(api.getSession).toHaveBeenCalledWith("sess_7f3a")
+    expect(
+      within(screen.getByRole("complementary")).getByText("Sessions"),
+    ).toBeDefined()
+  })
+
+  it("records a sidebar destination in the URL", async () => {
+    render(<App />)
+    await screen.findByLabelText("Review focus")
+
+    fireEvent.click(
+      within(screen.getByRole("complementary")).getByText("Repositories"),
+    )
+
+    await waitFor(() => expect(window.location.pathname).toBe("/repositories"))
+  })
+
+  it("falls back to the dashboard for a path nothing owns", async () => {
+    window.history.replaceState(null, "", "/nope/42")
+
+    render(<App />)
+
+    await screen.findByLabelText("Review focus")
+    await waitFor(() => expect(window.location.pathname).toBe("/"))
   })
 })

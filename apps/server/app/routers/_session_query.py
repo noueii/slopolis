@@ -3,16 +3,18 @@
 Kept separate from the router so the query semantics are unit-testable in
 isolation and the router stays a thin HTTP shell. Every filter dimension of
 :class:`SessionListParams` is applied here; ``repo`` and ``user`` are resolved
-to id sets by the caller before filtering.
+to id sets by the caller before filtering, and the target-aware filters run over
+the targets the viewer may read — never the whole session (spec 10.8 §Access).
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import uuid
+from collections.abc import Mapping
 
 from app.schemas import SessionListParams
-from slopolis_db.models import ReviewSession
+from slopolis_db.models import ReviewSession, SessionTarget
 
 __all__ = ["filter_sessions", "range_cutoff", "sort_sessions"]
 
@@ -23,15 +25,28 @@ def filter_sessions(
     sessions: list[ReviewSession],
     params: SessionListParams,
     *,
+    targets: Mapping[uuid.UUID, list[SessionTarget]],
     repo_ids: set[uuid.UUID],
     user_ids: set[uuid.UUID],
 ) -> list[ReviewSession]:
-    """Return only the sessions satisfying every supplied filter."""
+    """Return only the sessions satisfying every supplied filter.
+
+    ``targets`` is the per-session set the viewer may read. Running the repo and
+    free-text filters over those means a filter can never surface a session
+    through content the viewer cannot see (spec 10.8 §Access).
+    """
     cutoff = range_cutoff(params.range)
     return [
         session
         for session in sessions
-        if _matches(session, params, repo_ids=repo_ids, user_ids=user_ids, cutoff=cutoff)
+        if _matches(
+            session,
+            params,
+            targets=targets.get(session.id, []),
+            repo_ids=repo_ids,
+            user_ids=user_ids,
+            cutoff=cutoff,
+        )
     ]
 
 
@@ -39,14 +54,15 @@ def _matches(
     session: ReviewSession,
     params: SessionListParams,
     *,
+    targets: list[SessionTarget],
     repo_ids: set[uuid.UUID],
     user_ids: set[uuid.UUID],
     cutoff: dt.datetime | None,
 ) -> bool:
     """Return whether a session satisfies every active filter."""
-    if params.q and not _matches_query(session, params.q):
+    if params.q and not _matches_query(session, params.q, targets):
         return False
-    if params.repo and not any(t.repository_id in repo_ids for t in session.targets):
+    if params.repo and not any(t.repository_id in repo_ids for t in targets):
         return False
     if params.user and session.triggered_by_user_id not in user_ids:
         return False
@@ -63,8 +79,10 @@ def range_cutoff(range_value: str | None) -> dt.datetime | None:
     return dt.datetime.now(dt.UTC) - dt.timedelta(days=days)
 
 
-def _matches_query(session: ReviewSession, query: str) -> bool:
-    """Free-text match across session fields and every target's fields."""
+def _matches_query(
+    session: ReviewSession, query: str, targets: list[SessionTarget]
+) -> bool:
+    """Free-text match across session fields and every readable target's fields."""
     needle = query.lower()
     haystacks = [
         session.name,
@@ -73,7 +91,7 @@ def _matches_query(session: ReviewSession, query: str) -> bool:
         session.provider,
         session.status,
     ]
-    for target in session.targets:
+    for target in targets:
         haystacks.extend(
             [target.title, target.url, target.head_branch, f"#{target.number}"]
         )

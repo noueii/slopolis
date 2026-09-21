@@ -8,7 +8,13 @@
  */
 
 import type {
+  AgentEventPage,
+  AgentRunTreeResponse,
   ApiErrorBody,
+  AssignmentResponse,
+  CatalogModel,
+  CatalogModelInput,
+  CatalogModelListResponse,
   CreateReviewRequest,
   CreateWorkspaceRequest,
   CreatedSession,
@@ -16,24 +22,45 @@ import type {
   DashboardParams,
   MeResponse,
   ModelCatalog,
+  ModelImportRequest,
+  ModelImportResponse,
   Paginated,
   PreflightRequest,
   PreflightResult,
+  ProviderCredential,
+  ProviderInput,
+  ProviderListResponse,
+  ProviderTestResult,
+  ProviderUpdate,
   RepositoryListResponse,
   RepositoryPullRequestsResponse,
+  RepositorySummary,
+  RepositoryUpdate,
+  RetrySessionRequest,
   ReviewPresetCatalog,
   ReviewSession,
   ReviewTemplate,
   ReviewTemplateInput,
   ReviewTemplateListResponse,
+  RoleAssignment,
   SessionFilterOptions,
   SessionListParams,
   SessionStats,
+  UsageResponse,
   WorkspaceListResponse,
   WorkspaceRef,
+  WorkspaceSettings,
+  WorkspaceSettingsUpdate,
 } from "./contract"
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "/api"
+
+/**
+ * Where the GitHub App install flow starts. `/github/install` is a browser
+ * navigation, not a JSON route: the API redirects on to GitHub's install page
+ * for the App, which is also where repositories are added or removed.
+ */
+export const githubAppInstallUrl = `${API_BASE}/github/install`
 
 /** Mock-only request modes, toggled from the app's mock-data control. */
 export type MockScenario = "default" | "empty" | "error" | "slow"
@@ -78,6 +105,74 @@ export function isMockModeEnabled(): boolean {
   if (mode === "off") return false
   if (mode === "server" || mode === "worker") return true
   return import.meta.env.DEV
+}
+
+/** Remembers that this tab has already been sent to GitHub once. */
+const SIGN_IN_ATTEMPT_KEY = "slopolis:signin-attempted"
+
+/** Whether this tab came back from GitHub without a session. */
+export function signInAttempted(): boolean {
+  try {
+    return window.sessionStorage.getItem(SIGN_IN_ATTEMPT_KEY) === "1"
+  } catch {
+    // Storage can be unavailable (private mode); the gate just loses its guard.
+    return false
+  }
+}
+
+/** Forgets the attempt, so a later signed-out visit can redirect again. */
+export function clearSignInAttempt(): void {
+  try {
+    window.sessionStorage.removeItem(SIGN_IN_ATTEMPT_KEY)
+  } catch {
+    return
+  }
+}
+
+export type SignInStart =
+  | { started: true }
+  | { started: false; message: string }
+
+/**
+ * Send the browser to GitHub's consent screen.
+ *
+ * The flow is probed before navigating: a deployment without OAuth credentials
+ * answers the login route with a 503 body, and navigating into that would strand
+ * the visitor on raw JSON with no way back to the app.
+ */
+export async function beginSignIn(): Promise<SignInStart> {
+  // `/auth/github/login` is a browser navigation, not a JSON route: the API
+  // redirects on to GitHub's consent screen, and the callback returns the
+  // browser to `APP_URL` with the session cookie set.
+  const url = `${API_BASE}/auth/github/login`
+  try {
+    const response = await fetch(url, { redirect: "manual" })
+    // A startable flow answers with a redirect the script cannot read into
+    // (`opaqueredirect`); any readable non-ok status is a refusal.
+    if (response.type !== "opaqueredirect" && !response.ok) {
+      let body: ApiErrorBody | undefined
+      try {
+        body = (await response.json()) as ApiErrorBody
+      } catch {
+        body = undefined
+      }
+      return {
+        started: false,
+        message:
+          body?.error.message ?? "GitHub sign-in is unavailable right now.",
+      }
+    }
+  } catch {
+    // Unreadable response (cross-origin or offline): let the navigation report it.
+  }
+
+  try {
+    window.sessionStorage.setItem(SIGN_IN_ATTEMPT_KEY, "1")
+  } catch {
+    // See `signInAttempted`: the guard is best-effort.
+  }
+  window.location.replace(url)
+  return { started: true }
 }
 
 export class ApiError extends Error {
@@ -146,6 +241,21 @@ export const api = {
     })
   },
 
+  /** The workspace's caps and queue limits (spec 10.10); admin-only. */
+  getWorkspaceSettings(): Promise<WorkspaceSettings> {
+    return request<WorkspaceSettings>("/workspaces/settings")
+  },
+
+  /** Patch the workspace's caps; omitted fields keep their current value. */
+  updateWorkspaceSettings(
+    patch: WorkspaceSettingsUpdate,
+  ): Promise<WorkspaceSettings> {
+    return request<WorkspaceSettings>("/workspaces/settings", {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    })
+  },
+
   listSessions(params: SessionListParams = {}): Promise<Paginated<ReviewSession>> {
     const query = buildQuery({
       q: params.q?.trim() || undefined,
@@ -164,6 +274,24 @@ export const api = {
     return request<ReviewSession>(`/sessions/${encodeURIComponent(id)}`)
   },
 
+  /**
+   * Put a finished session's failed or cancelled targets back on the queue
+   * (spec 10.5 §Manual retry). Omitting `targetIds` retries every retryable
+   * target; the API refuses `409 target_running` for one the queue already
+   * owns and `409 nothing_to_retry` when the selection holds none.
+   */
+  retrySession(
+    id: string,
+    targetIds?: string[],
+  ): Promise<ReviewSession> {
+    const body: RetrySessionRequest =
+      targetIds && targetIds.length > 0 ? { targetIds } : {}
+    return request<ReviewSession>(`/sessions/${encodeURIComponent(id)}/retry`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    })
+  },
+
   getFilterOptions(): Promise<SessionFilterOptions> {
     return request<SessionFilterOptions>("/sessions/filters")
   },
@@ -174,6 +302,21 @@ export const api = {
 
   listRepositories(): Promise<RepositoryListResponse> {
     return request<RepositoryListResponse>("/repositories")
+  },
+
+  /**
+   * Update a repository's workspace switches (spec 10.1 / 10.10): park or
+   * re-enable it, set its access policy override, or both at once. A parked
+   * repository keeps its sessions and findings and is refused at pre-flight.
+   */
+  updateRepository(
+    repositoryId: string,
+    body: RepositoryUpdate,
+  ): Promise<RepositorySummary> {
+    return request<RepositorySummary>(
+      `/repositories/${encodeURIComponent(repositoryId)}`,
+      { method: "PATCH", body: JSON.stringify(body) },
+    )
   },
 
   listRepositoryPullRequests(
@@ -238,5 +381,115 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     })
+  },
+
+  // --- provider & model administration (spec 10.2) --------------------------
+
+  listProviders(): Promise<ProviderListResponse> {
+    return request<ProviderListResponse>("/providers")
+  },
+
+  createProvider(input: ProviderInput): Promise<ProviderCredential> {
+    return request<ProviderCredential>("/providers", {
+      method: "POST",
+      body: JSON.stringify(input),
+    })
+  },
+
+  updateProvider(
+    id: string,
+    patch: ProviderUpdate,
+  ): Promise<ProviderCredential> {
+    return request<ProviderCredential>(`/providers/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    })
+  },
+
+  deleteProvider(id: string): Promise<void> {
+    return request<void>(`/providers/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    })
+  },
+
+  testProvider(id: string): Promise<ProviderTestResult> {
+    // The provider being down comes back as `status: "failed"` with 200; only
+    // the request itself failing (missing credential, no vault) throws.
+    return request<ProviderTestResult>(
+      `/providers/${encodeURIComponent(id)}/test`,
+      { method: "POST" },
+    )
+  },
+
+  listCatalogModels(): Promise<CatalogModelListResponse> {
+    return request<CatalogModelListResponse>("/catalog/models")
+  },
+
+  addCatalogModel(input: CatalogModelInput): Promise<CatalogModel> {
+    return request<CatalogModel>("/catalog/models", {
+      method: "POST",
+      body: JSON.stringify(input),
+    })
+  },
+
+  importCatalogModels(credentialId: string): Promise<ModelImportResponse> {
+    const body: ModelImportRequest = { credentialId }
+    return request<ModelImportResponse>("/catalog/models/import", {
+      method: "POST",
+      body: JSON.stringify(body),
+    })
+  },
+
+  deleteCatalogModel(id: string): Promise<void> {
+    // Addressed by catalog row id: model ids contain slashes and would not
+    // survive as a path segment.
+    return request<void>(`/catalog/models/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    })
+  },
+
+  getAssignments(): Promise<AssignmentResponse> {
+    return request<AssignmentResponse>("/catalog/assignments")
+  },
+
+  setAssignment(
+    role: string,
+    modelId: string | null,
+  ): Promise<RoleAssignment> {
+    // `null` is `auto`: the server deletes the assignment row rather than
+    // storing a sentinel, so the role falls back to the workspace default.
+    const body: Pick<RoleAssignment, "modelId"> = { modelId }
+    return request<RoleAssignment>(
+      `/catalog/assignments/${encodeURIComponent(role)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify(body),
+      },
+    )
+  },
+
+  // --- usage (spec 10.9) ----------------------------------------------------
+
+  getUsage(): Promise<UsageResponse> {
+    return request<UsageResponse>("/usage")
+  },
+
+  // --- harness run tree (spec v2 §7) ----------------------------------------
+
+  getRunTree(sessionId: string): Promise<AgentRunTreeResponse> {
+    return request<AgentRunTreeResponse>(
+      `/sessions/${encodeURIComponent(sessionId)}/runs/tree`,
+    )
+  },
+
+  getRunEvents(
+    sessionId: string,
+    runId: string,
+    opts: { afterSeq?: number } = {},
+  ): Promise<AgentEventPage> {
+    const query = buildQuery({ afterSeq: opts.afterSeq })
+    return request<AgentEventPage>(
+      `/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/events${query}`,
+    )
   },
 }

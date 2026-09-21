@@ -10,16 +10,21 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 from decimal import Decimal
+from typing import Any, cast
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from slopolis_core.domain import SessionStatus, TargetStatus
 from slopolis_core.findings import Finding as CoreFinding
+from slopolis_core.harness import AgentStatus
 from slopolis_core.review.harness import ReviewResult
 from slopolis_db.models import Finding, SessionTarget, SessionTargetRun, UsageRecord
+from worker.jobs.agent_runs import finish_session_main_run
 
 __all__ = [
+    "discard_unposted_findings",
     "fail_run",
     "fail_target",
     "finish_run",
@@ -83,6 +88,26 @@ async def persist_findings(
     db.add_all(rows)
     await db.flush()
     return rows
+
+
+async def discard_unposted_findings(db: AsyncSession, target_id: uuid.UUID) -> int:
+    """Delete a target's findings that never reached GitHub; return how many.
+
+    A retried attempt persists its findings *before* it publishes (spec 10.7), so
+    a publish that fails leaves rows behind that the retry would duplicate. Only
+    the unposted ones go: a posted row is the app's only link to a comment that
+    exists on the PR, and deleting it would lose that link, not just a duplicate
+    (spec 10.9).
+    """
+    result = await db.execute(
+        delete(Finding)
+        .where(Finding.target_id == target_id, Finding.posted.is_(False))
+        # The deleted rows belong to an attempt whose session is about to end;
+        # syncing the identity map would only refresh them to say goodbye.
+        .execution_options(synchronize_session=False)
+    )
+    await db.flush()
+    return cast("CursorResult[Any]", result).rowcount
 
 
 async def persist_usage(
@@ -166,11 +191,21 @@ async def mark_target_cancelled(db: AsyncSession, target: SessionTarget) -> None
     await db.flush()
 
 
+#: The run status a terminal session's ``main`` node ends in (spec v2 §15).
+_SESSION_RUN_STATUS: dict[SessionStatus, AgentStatus] = {
+    SessionStatus.DONE: AgentStatus.DONE,
+    SessionStatus.FAILED: AgentStatus.FAILED,
+    SessionStatus.CANCELLED: AgentStatus.CANCELLED,
+}
+
+
 async def recompute_session(db: AsyncSession, session_id: uuid.UUID) -> SessionStatus:
     """Recompute and persist the parent session status from its targets.
 
     All targets terminal: ``failed`` if any failed, ``cancelled`` if every one
-    was cancelled, else ``done``. Otherwise the session stays ``running``.
+    was cancelled, else ``done``. Otherwise the session stays ``running``. A
+    terminal session also closes its ``main`` run (spec v2 §15), the session's
+    aggregation point in the run tree.
     """
     from slopolis_db.models import ReviewSession
 
@@ -191,6 +226,14 @@ async def recompute_session(db: AsyncSession, session_id: uuid.UUID) -> SessionS
     session.status = done
     if done is not SessionStatus.RUNNING:
         session.finished_at = dt.datetime.now(dt.UTC)
+        run_status = _SESSION_RUN_STATUS.get(done)
+        if run_status is not None:
+            await finish_session_main_run(
+                db,
+                session_id,
+                run_status,
+                summary=f"{len(statuses)} target(s) finished as {done.value}",
+            )
     await db.flush()
     return done
 

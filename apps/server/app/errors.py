@@ -11,6 +11,7 @@ against real and mocked responses alike.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -22,7 +23,12 @@ __all__ = ["ApiError", "install_error_handlers"]
 
 
 class ApiError(Exception):
-    """An expected API failure with a stable machine-readable code."""
+    """An expected API failure with a stable machine-readable code.
+
+    ``headers`` carries the response headers the failure needs beyond the
+    envelope — a browser-navigation route that has to clear a cookie it just
+    refused, for instance.
+    """
 
     def __init__(
         self,
@@ -31,12 +37,14 @@ class ApiError(Exception):
         message: str,
         *,
         detail: str | None = None,
+        headers: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.message = message
         self.detail = detail
+        self.headers = headers
 
 
 def _envelope(code: str, message: str, detail: str | None = None) -> dict[str, Any]:
@@ -48,11 +56,12 @@ def _envelope(code: str, message: str, detail: str | None = None) -> dict[str, A
 
 
 async def _api_error_handler(_request: Request, exc: Exception) -> JSONResponse:
-    """Render an :class:`ApiError` with its declared status and code."""
+    """Render an :class:`ApiError` with its declared status, code, and headers."""
     error = exc if isinstance(exc, ApiError) else _unexpected_error()
     return JSONResponse(
         status_code=error.status_code,
         content=_envelope(error.code, error.message, error.detail),
+        headers=error.headers,
     )
 
 

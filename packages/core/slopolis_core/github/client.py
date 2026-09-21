@@ -26,6 +26,7 @@ from slopolis_core.github._mapping import (
 from slopolis_core.github.auth import InstallationAuth, TokenCache
 from slopolis_core.github.errors import GitHubAuthError, GitHubNotFoundError
 from slopolis_core.github.limits import (
+    CHECK_RUNS_PER_PAGE,
     MAX_DIFF_LINES,
     MAX_FILE_BYTES,
     MAX_FILES,
@@ -36,6 +37,7 @@ from slopolis_core.github.limits import (
 )
 from slopolis_core.github.models import (
     ChangedFile,
+    CheckRun,
     GitHubIssue,
     GitHubPullRequest,
     GitHubRepository,
@@ -120,6 +122,11 @@ class GitHubClient:
         auth = InstallationAuth(installation_id=installation_id, token=minted.token)
         return cls(GitHub(TokenAuthStrategy(minted.token)), auth=auth, app_client=app_client)
 
+    @property
+    def installation_id(self) -> int | None:
+        """The installation this client reads through, when it has one."""
+        return self._auth.installation_id
+
     # -- PR resolution / reads ---------------------------------------------
 
     @translate_errors
@@ -191,6 +198,25 @@ class GitHubClient:
         )
 
     @translate_errors
+    async def list_check_runs(self, repo_full_name: str, ref: str) -> list[CheckRun]:
+        """List the check runs attached to ``ref``, a pull request's head commit."""
+        cached = self._cache.checks.get((repo_full_name, ref))
+        if cached is not None:
+            return cached
+        owner, repo = split_repo(repo_full_name)
+        self.budget.consume(method="list_check_runs")
+        response = await self._github.rest.checks.async_list_for_ref(
+            owner, repo, ref, per_page=CHECK_RUNS_PER_PAGE
+        )
+        raise_for_status(response, f"check runs for {repo_full_name}@{ref}")
+        runs = [
+            CheckRun(name=run.name, status=run.status, conclusion=run.conclusion)
+            for run in response.parsed_data.check_runs
+        ]
+        self._cache.checks[(repo_full_name, ref)] = runs
+        return runs
+
+    @translate_errors
     async def list_changed_files(self, repo_full_name: str, number: int) -> list[ChangedFile]:
         """List every changed file for a pull request."""
         cached = self._cache.files.get((repo_full_name, number))
@@ -243,14 +269,52 @@ class GitHubClient:
         return await self._repo_reads.list_installation_repositories()
 
     @translate_errors
+    async def installation_permissions(self) -> dict[str, str]:
+        """Return the permissions this client's installation was granted.
+
+        Read with the App's own JWT (``GET /app/installations/{id}``): what an
+        installation may write is an App-side fact, and an installation access
+        token carries what it was granted rather than granting more, so the token
+        itself cannot answer this. Keys are GitHub's permission names and values
+        its levels (``read``/``write``); a scope the installation was not granted
+        is absent. A client built from an installation token alone has no App
+        credentials to ask with, so it raises
+        :class:`~slopolis_core.github.errors.GitHubAuthError`.
+        """
+        if self._app_client is None or self._auth.installation_id is None:
+            raise GitHubAuthError(
+                "installation permissions need the App credentials that a client "
+                "built from an installation token does not carry"
+            )
+        response = await self._app_client.rest.apps.async_get_installation(
+            self._auth.installation_id
+        )
+        raise_for_status(response, "installation permissions")
+        # GitHub reports only the scopes it granted; the model's remaining fields
+        # stay unset, so dumping what was set is exactly the granted set.
+        return {
+            name: level
+            for name, level in response.parsed_data.permissions.model_dump(
+                exclude_unset=True
+            ).items()
+            if isinstance(level, str)
+        }
+
+    @translate_errors
     async def user_can_trigger(
-        self, repo_full_name: str, *, private: bool, user_login: str
+        self,
+        repo_full_name: str,
+        *,
+        private: bool,
+        user_login: str,
+        required: str | None = None,
     ) -> bool:
         """Return whether ``user_login`` may trigger a review (spec overview §4).
 
-        Public repos require **write**; private repos require **read**. Any auth
-        failure fails closed (``False``).
+        Public repos require **write**; private repos require **read**, unless a
+        workspace override (spec 10.10) names the level. Any auth failure fails
+        closed (``False``).
         """
         return await self._repo_reads.user_can_trigger(
-            repo_full_name, private=private, user_login=user_login
+            repo_full_name, private=private, user_login=user_login, required=required
         )

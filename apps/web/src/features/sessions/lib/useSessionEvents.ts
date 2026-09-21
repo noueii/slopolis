@@ -1,7 +1,8 @@
 /**
  * Bridges the session SSE stream into React state with a polling fallback.
  *
- * Live events reach the caller through `onUpdate`. If the stream errors (mock
+ * Live events reach the caller through `onUpdate` (the status projection) and
+ * `onAgentEvent` (the harness event log, spec v2 §7). If the stream errors (mock
  * mode, proxy hiccup, or an environment that cannot hold a long-lived
  * connection) the hook closes the stream and polls `GET /api/sessions/{id}`
  * until the session reaches a terminal status, so the detail view still
@@ -11,7 +12,7 @@
 import { useEffect, useRef, useState } from "react"
 
 import { api } from "@/api/client"
-import type { SessionStatus, TargetStatus } from "@/api/contract"
+import type { AgentEventItem, SessionStatus, TargetStatus } from "@/api/contract"
 import {
   TERMINAL_SESSION_STATUSES,
   subscribeToSession,
@@ -30,8 +31,20 @@ export interface SessionEventUpdate {
 export interface UseSessionEventsOptions {
   /** Called for every status projection; the caller merges it onto its data. */
   onUpdate: (update: SessionEventUpdate) => void
+  /**
+   * Called for every harness event the stream carries, in arrival order. The
+   * polling fallback cannot replay these, so a caller must treat them as
+   * incremental on top of what it already loaded.
+   */
+  onAgentEvent?: (event: AgentEventItem) => void
   /** Set false to stay idle and open no connection. */
   enabled?: boolean
+  /**
+   * Bump to reopen the stream. A terminal status closes it for good, so when
+   * the session is put back in flight (a manual retry) only the caller knows
+   * there is another attempt to follow.
+   */
+  epoch?: number
 }
 
 const POLL_INTERVAL_MS = 2500
@@ -48,11 +61,13 @@ function toUpdate(payload: SessionEventPayload): SessionEventUpdate {
 
 export function useSessionEvents(
   id: string | null,
-  { onUpdate, enabled = true }: UseSessionEventsOptions,
+  { onUpdate, onAgentEvent, enabled = true, epoch = 0 }: UseSessionEventsOptions,
 ): SessionEventsMode {
   const [mode, setMode] = useState<SessionEventsMode>("idle")
   const onUpdateRef = useRef(onUpdate)
   onUpdateRef.current = onUpdate
+  const onAgentEventRef = useRef(onAgentEvent)
+  onAgentEventRef.current = onAgentEvent
 
   useEffect(() => {
     if (!id || !enabled) {
@@ -107,6 +122,14 @@ export function useSessionEvents(
         setMode("live")
         deliver(toUpdate(payload))
       },
+      onAgent: (event) => {
+        // An agent frame proves the stream is healthy, so it also lifts the
+        // view out of polling — but it never ends the stream.
+        if (finished) return
+        stopPolling()
+        setMode("live")
+        onAgentEventRef.current?.(event)
+      },
       onError: () => {
         if (finished) return
         teardown?.()
@@ -119,7 +142,7 @@ export function useSessionEvents(
       stopPolling()
       teardown?.()
     }
-  }, [id, enabled])
+  }, [id, enabled, epoch])
 
   return mode
 }

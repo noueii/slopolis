@@ -1,15 +1,23 @@
 """Synchronous pre-flight validation pipeline (spec 10.3).
 
 Runs on submit, before any session is created. It parses and dedupes links,
-resolves each PR, checks repo coverage and access policy, verifies the
-workspace has an assigned model and a ready credential, performs a single
-cached live model check, and validates ``.codereview.yml``.
+resolves each PR, checks repo coverage and access policy, checks the
+installation may write what publishing needs, verifies the workspace has an
+assigned model and a ready credential, performs a single cached live model
+check, and validates ``.codereview.yml``.
 
 Expected validation failures never raise: they land in the outcome's
 ``invalid``/``notices`` fields. Only programming errors propagate.
 """
 
+from collections.abc import Sequence
+
 from slopolis_core.config.repo_config import RepoConfigError, parse_repo_config
+from slopolis_core.github.permissions import (
+    PUBLISH_SCOPE_LABELS,
+    missing_optional_scopes,
+    missing_required_scopes,
+)
 from slopolis_core.llm.client import LlmError
 from slopolis_core.preflight.models import (
     PreflightOutcome,
@@ -25,6 +33,71 @@ from slopolis_core.preflight.ports import (
 __all__ = ["PreflightService"]
 
 _REPO_CONFIG_PATH = ".codereview.yml"
+
+
+def _access_refusal(full_name: str, required: str | None) -> str:
+    """The refusal notice for a denied trigger, naming what was required.
+
+    ``required`` is the repository's override; when one is in force the notice
+    states it plainly instead of restating the spec rule (spec 10.10).
+    """
+    if required is None:
+        return (
+            f"You lack the required access to {full_name}; "
+            "private repos need read access, public repos need write access."
+        )
+    return (
+        f"You lack the required access to {full_name}; "
+        f"this repository requires {required} access."
+    )
+
+
+def _label_list(scopes: Sequence[str]) -> str:
+    """Name scopes the way GitHub's App settings do, as one clause."""
+    names = [PUBLISH_SCOPE_LABELS[scope] for scope in scopes]
+    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+
+
+def _publish_refusal(full_name: str, missing: Sequence[str]) -> str:
+    """The refusal notice for an installation that cannot publish (spec 10.3).
+
+    Names the scopes the way GitHub's App settings do and states the fix, in the
+    wording the worker's publish backstop uses: a permission revoked between
+    submit and publish must read as the same problem as one missing from the
+    start. ``missing`` arrives in :data:`PUBLISH_SCOPES` order, so the sentence is
+    stable for a given set of scopes.
+    """
+    return (
+        f"The GitHub App installation for {full_name} cannot write: "
+        f"grant {_label_list(missing)} 'Read & write' on the App, "
+        "then approve the update for the installation."
+    )
+
+
+def _check_run_skipped_notice(full_name: str, missing: Sequence[str]) -> str:
+    """The notice for an advisory write a missing grant will skip (spec 10.3).
+
+    Deliberately not a refusal: the check run is advisory (overview §10) and
+    posted last, so the review still reaches the pull request as a comment. The
+    wording says so — the user is giving up the check run, not the review — and
+    still names the scope and the fix, so the loss can be undone deliberately
+    instead of puzzling over a review that never showed up as a check.
+    """
+    listed = _label_list(missing)
+    return (
+        f"The GitHub App installation for {full_name} cannot write {listed}: "
+        "the review will post without a check run. "
+        f"Grant {listed} 'Read & write' on the App, then approve the update for "
+        "the installation to add it."
+    )
+
+
+def _unreadable_publish_refusal(full_name: str) -> str:
+    """The refusal notice when the installation's permissions cannot be read."""
+    return (
+        f"Could not check whether the GitHub App installation can write to "
+        f"{full_name}; publishing cannot be guaranteed. Try again."
+    )
 
 
 class _RunState:
@@ -62,6 +135,7 @@ class _RunContext:
         self,
         *,
         gateway: GitHubGateway,
+        workspace: WorkspaceConfigProvider,
         state: _RunState,
         covered: set[str],
         model_id: str,
@@ -69,6 +143,7 @@ class _RunContext:
         live_check: LiveModelCheck,
     ) -> None:
         self.gateway = gateway
+        self.workspace = workspace
         self.state = state
         self.covered = covered
         self.model_id = model_id
@@ -115,6 +190,7 @@ class PreflightService:
         covered = set(await self._gateway.list_covered_repos())
         context = _RunContext(
             gateway=self._gateway,
+            workspace=self._workspace,
             state=state,
             covered=covered,
             model_id=model_id,
@@ -145,17 +221,20 @@ class PreflightService:
             )
             return
 
+        required = await context.workspace.required_access(full_name)
         has_access = await context.gateway.user_has_access(
             full_name,
             private=reference.repository.private,
             user_login=context.user_login,
+            required=required,
         )
         if not has_access:
             state.invalid.append(url)
-            state.notices.append(
-                f"You lack the required access to {full_name}; "
-                "private repos need read access, public repos need write access."
-            )
+            state.notices.append(_access_refusal(full_name, required))
+            return
+
+        if not await self._check_publish_permissions(full_name, context):
+            state.invalid.append(url)
             return
 
         if not await self._check_live_model(context):
@@ -167,6 +246,34 @@ class PreflightService:
             return
 
         state.valid.append(reference)
+
+    async def _check_publish_permissions(
+        self, full_name: str, context: _RunContext
+    ) -> bool:
+        """Whether the installation may write what publishing needs (spec 10.3).
+
+        Only a scope publishing cannot post the review without refuses the link;
+        a scope it can do without (the advisory check run) becomes a notice, so
+        the user learns what the review will skip instead of losing the
+        submission to it. Runs before the live model check: an installation that
+        cannot post the review must be refused before anything the submission
+        pays for happens. The read is a fact about the installation, so the
+        gateway is free to answer several links of one submission out of one
+        call.
+        """
+        state = context.state
+        permissions = await context.gateway.publish_permissions(full_name)
+        if permissions is None:
+            state.notices.append(_unreadable_publish_refusal(full_name))
+            return False
+        missing = missing_required_scopes(permissions)
+        if missing:
+            state.notices.append(_publish_refusal(full_name, missing))
+            return False
+        skipped = missing_optional_scopes(permissions)
+        if skipped:
+            state.notices.append(_check_run_skipped_notice(full_name, skipped))
+        return True
 
     async def _check_live_model(self, context: _RunContext) -> bool:
         """Run the live model check once per run; reuse the cached result."""

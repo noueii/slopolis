@@ -67,6 +67,28 @@ export interface CreateWorkspaceRequest {
   name: string
 }
 
+/**
+ * Workspace caps and queue limits (spec 10.10). Every field is `null` when
+ * unset, which means "unlimited": a cap is opt-in, so an existing deployment
+ * behaves exactly as it did. A set value is an integer >= 1.
+ */
+export interface WorkspaceSettings {
+  /** Sessions in `queued`/`running` for the workspace. */
+  maxConcurrentSessions: number | null
+  /** Sessions the caller created since 00:00 UTC. */
+  maxSessionsPerUserPerDay: number | null
+  /** Targets of one repository running at the same time. */
+  maxTargetsPerRepo: number | null
+  /** Targets of one installation running at the same time. */
+  maxTargetsPerInstallation: number | null
+}
+
+/**
+ * `PATCH /api/workspaces/settings` body. Omitted fields stay as they are; a
+ * `null` clears a cap back to unlimited.
+ */
+export type WorkspaceSettingsUpdate = Partial<WorkspaceSettings>
+
 /** One pull request within a session. */
 export interface SessionTarget {
   id: string
@@ -78,6 +100,12 @@ export interface SessionTarget {
   /** GitHub head ref for the PR, e.g. `fix/guard-token-refresh`. */
   headBranch: string
   status: TargetStatus
+  /**
+   * What a manual retry will do: `"publish"` reposts the review the last
+   * attempt already produced, `"review"` runs the model again. Absent/null
+   * when the target is not retryable.
+   */
+  retryAction?: "review" | "publish" | null
   findingsCount: number
   tokens: number
   costUsd: number
@@ -108,6 +136,15 @@ export interface ReviewSession {
   costUsd: number
   findingsCount: number
   prompt?: string
+}
+
+/**
+ * `POST /api/sessions/{id}/retry` body (spec 10.5 §Manual retry). An absent or
+ * empty `targetIds` retries every target in a retryable state (`failed`,
+ * `cancelled`); a target the queue already owns is refused, never duplicated.
+ */
+export interface RetrySessionRequest {
+  targetIds?: string[]
 }
 
 export type SessionSort =
@@ -162,6 +199,14 @@ export interface SessionStats {
   costUsd: number
 }
 
+/**
+ * Per-repository override of the triggering access rule (spec 10.10):
+ * `default` = the spec rule (private repos need read, public repos need write);
+ * `read` = loosened (any read access is enough); `write` = tightened (write
+ * access is required).
+ */
+export type RequiredAccess = "default" | "read" | "write"
+
 /** A repository connected through the GitHub App installation (spec 10.1). */
 export interface RepositorySummary {
   id: string
@@ -174,10 +219,26 @@ export interface RepositorySummary {
   lastActivityAt: string
   /** Whether the GitHub App can still read the repository. */
   connected: boolean
+  /**
+   * The workspace's own switch (spec 10.1). A disabled repository stays listed
+   * with its history, but pre-flight refuses its pull requests.
+   */
+  enabled: boolean
+  /** Access policy pre-flight applies to this repository (spec 10.10). */
+  requiredAccess: RequiredAccess
 }
 
 export interface RepositoryListResponse {
   items: RepositorySummary[]
+}
+
+/**
+ * `PATCH /api/repositories/{id}` body. Omitted fields stay as they are; the
+ * two switches are audited independently of one another (spec 10.1 / 10.10).
+ */
+export interface RepositoryUpdate {
+  enabled?: boolean
+  requiredAccess?: RequiredAccess
 }
 
 /** Rolled-up CI status for an open pull request. */
@@ -433,4 +494,214 @@ export type ReviewTemplateInput = Omit<ReviewTemplate, "id" | "updatedAt">
 
 export interface ReviewTemplateListResponse {
   items: ReviewTemplate[]
+}
+
+/**
+ * A BYOK credential held in the workspace vault (spec 10.2). The key itself
+ * never leaves the server — `keyLast4` is all the admin UI ever sees.
+ */
+export interface ProviderCredential {
+  id: string
+  /** Provider family, e.g. `litellm`, or the compatible endpoint's name. */
+  provider: string
+  /** Custom endpoint for OpenAI-compatible providers; `null` for the default. */
+  baseUrl: string | null
+  /** Last four characters of the stored key, for telling keys apart. */
+  keyLast4: string
+  enabled: boolean
+  /** Outcome of the last test-connection call, `null` while never tested. */
+  lastStatus: "ok" | "failed" | null
+  lastCheckedAt: string | null
+  createdAt: string
+}
+
+/** `GET /api/providers`: every credential the workspace holds. */
+export interface ProviderListResponse {
+  items: ProviderCredential[]
+}
+
+/** `POST /api/providers` body; the key is write-only. */
+export interface ProviderInput {
+  provider: string
+  baseUrl?: string | null
+  apiKey: string
+}
+
+/**
+ * `PATCH /api/providers/{id}` body. Omitted fields stay as they are; `apiKey`
+ * is only present when the key is being rotated.
+ */
+export interface ProviderUpdate {
+  baseUrl?: string | null
+  apiKey?: string
+  enabled?: boolean
+}
+
+/**
+ * Result of `POST /api/providers/{id}/test`. A provider being unreachable is a
+ * recorded status, not an API error, so the call still answers 200.
+ */
+export interface ProviderTestResult {
+  status: "ok" | "failed"
+  detail: string | null
+  checkedAt: string
+}
+
+/** One model the workspace can point a role at (spec 10.2). */
+export interface CatalogModel {
+  /** Catalog row id — model ids contain slashes, so rows are addressed by id. */
+  id: string
+  modelId: string
+  provider: string
+  displayName: string | null
+  /** `import` rows came from the provider's model list; `manual` were typed in. */
+  source: "manual" | "import"
+  /** Credential the row was imported through; `null` for manual rows. */
+  credentialId: string | null
+}
+
+/** `GET /api/catalog/models`. */
+export interface CatalogModelListResponse {
+  items: CatalogModel[]
+  /** Model `auto` resolves to — the catalog's first entry — or `null` if empty. */
+  defaultModelId: string | null
+}
+
+/** `POST /api/catalog/models` body; always creates a `manual` row. */
+export interface CatalogModelInput {
+  modelId: string
+  provider: string
+  displayName?: string | null
+}
+
+/** `POST /api/catalog/models/import` body. */
+export interface ModelImportRequest {
+  credentialId: string
+}
+
+/**
+ * `POST /api/catalog/models/import` result. `imported` counts newly created
+ * rows only; models already in the catalog are refreshed, not counted twice.
+ */
+export interface ModelImportResponse {
+  imported: number
+  items: CatalogModel[]
+}
+
+/** One role's model choice; `modelId: null` means `auto` (spec 10.2). */
+export interface RoleAssignment {
+  role: string
+  modelId: string | null
+}
+
+/** `GET /api/catalog/assignments`: the workspace default plus every role. */
+export interface AssignmentResponse {
+  defaultModelId: string | null
+  roles: RoleAssignment[]
+}
+
+/** One dimension's usage roll-up: a model, a repository, or a user (spec 10.9). */
+export interface UsageBreakdown {
+  /** Machine key for the dimension value: model id, repo full name, user id. */
+  key: string
+  label: string
+  tokens: number
+  costUsd: number
+  /** Sessions that contributed at least one token to this bucket. */
+  sessions: number
+}
+
+/** One daily bucket of the usage time series. */
+export interface UsagePoint {
+  /** Calendar day, `YYYY-MM-DD`. */
+  date: string
+  tokens: number
+  costUsd: number
+  sessions: number
+}
+
+/** `GET /api/usage`: totals plus every breakdown the usage page renders. */
+export interface UsageResponse {
+  totalTokens: number
+  totalCostUsd: number
+  totalSessions: number
+  byModel: UsageBreakdown[]
+  byRepository: UsageBreakdown[]
+  /**
+   * Attributed per user: keyed by user id (a handle is not stable across
+   * renames), labeled with the handle, plus an `unattributed` bucket for
+   * records that resolve to no user.
+   */
+  byUser: UsageBreakdown[]
+  /** Daily buckets, oldest first. */
+  series: UsagePoint[]
+}
+
+/** Depth of a run in the harness tree (spec v2 §2). */
+export type AgentRunLevel = "main" | "pr" | "sub"
+
+/** Lifecycle of one agent run; values match `slopolis_core` `AgentStatus`. */
+export type AgentRunStatus =
+  | "pending"
+  | "running"
+  | "done"
+  | "failed"
+  | "cancelled"
+
+/**
+ * One node of a session's run tree (spec v2 §7): the session's `main` run, one
+ * `pr` run per target, and the `sub` runs they spawn.
+ */
+export interface AgentRunNode {
+  id: string
+  sessionId: string
+  /** PR target this run reviews; `null` for session-level work. */
+  targetId: string | null
+  /** Spawning run's id; `null` on a root. */
+  parentRunId: string | null
+  level: AgentRunLevel
+  /** Registry role, e.g. `orchestrator.main` or `logic-reviewer`. */
+  role: string
+  /** Model resolved for the run's role; `null` until it resolves one. */
+  modelId: string | null
+  objective: string
+  status: AgentRunStatus
+  tokens: number
+  costUsd: number
+  startedAt: string | null
+  endedAt: string | null
+  error: string | null
+  children: AgentRunNode[]
+}
+
+/**
+ * `GET /api/sessions/{id}/runs/tree`: roots first — the session's `main` run
+ * when it exists — with children nested under the run that spawned them.
+ */
+export interface AgentRunTreeResponse {
+  runs: AgentRunNode[]
+}
+
+/** One persisted harness event; the source of truth for replay (spec v2 §7). */
+export interface AgentEventItem {
+  id: string
+  runId: string
+  /** Spawning run's id; `null` on the session's main run. */
+  parentRunId: string | null
+  /** Monotonic per run; also the replay cursor. */
+  seq: number
+  /** Event type, e.g. `agent.spawned` or `agent.tool_call`. */
+  type: string
+  /** Shape depends on `type`; secrets are redacted before persisting. */
+  payload: Record<string, unknown>
+  createdAt: string
+}
+
+/**
+ * A page of run events. `nextSeq` is the cursor to pass back as `afterSeq`, or
+ * `null` once the replay has caught up with the run.
+ */
+export interface AgentEventPage {
+  items: AgentEventItem[]
+  nextSeq: number | null
 }

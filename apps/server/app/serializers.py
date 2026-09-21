@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as dt
 from decimal import Decimal
 
+from app.retry_actions import RetryAction
 from app.schemas import (
     CreatedSession,
     DashboardSession,
@@ -67,7 +68,11 @@ def repo_ref(repository: Repository) -> RepositoryRef:
 
 
 def serialize_target(
-    target: SessionTarget, findings_count: int, repository: Repository
+    target: SessionTarget,
+    findings_count: int,
+    repository: Repository,
+    *,
+    retry_action: RetryAction | None,
 ) -> SessionTargetSchema:
     """Map one target with its per-target aggregates."""
     return SessionTargetSchema(
@@ -78,6 +83,7 @@ def serialize_target(
         url=target.url,
         head_branch=target.head_branch,
         status=target_status(target.status),
+        retry_action=retry_action,
         findings_count=findings_count,
         tokens=target.tokens,
         cost_usd=_to_float(target.cost_usd),

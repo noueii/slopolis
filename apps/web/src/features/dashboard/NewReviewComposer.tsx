@@ -166,9 +166,17 @@ export const NewReviewComposer = forwardRef<
         prUrls: selected.map((item) => item.url),
       })
       if (result.valid.length === 0) {
+        // Pre-flight explains itself in `notices`, and a refusal is exactly when
+        // those details matter: the reason may be coverage, access, a parked
+        // repository, a repo config, or the live model check. This used to
+        // assert a coverage problem and then hide the notices — telling the user
+        // the opposite of the truth and burying the one line that said what to
+        // fix.
         setNotices(result.notices)
         setError(
-          "None of these pull requests belong to a repository covered by this workspace.",
+          result.notices.length === 0
+            ? "No pull request passed pre-flight. Check the links and try again."
+            : null,
         )
         setPhase("idle")
         return

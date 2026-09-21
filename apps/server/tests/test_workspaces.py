@@ -7,11 +7,14 @@ workspace-scoped work until then.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
-from slopolis_db.models import User, Workspace
+from sqlalchemy import select
 
-from .conftest import ApiHarness, seed_solo_user
+from slopolis_db.models import AuditLog, User, Workspace
+
+from .conftest import ApiHarness, seed_solo_user, seed_workspace
 
 
 async def test_me_reports_no_workspace_for_a_fresh_account(
@@ -129,10 +132,153 @@ async def test_workspace_scoped_routes_refuse_an_account_without_one(
     harness: ApiHarness = await build_harness(user_id=solo_user_id)
 
     # When they ask for workspace data
-    for path in ("/api/repositories", "/api/dashboard", "/api/sessions", "/api/models"):
+    for path in (
+        "/api/repositories",
+        "/api/dashboard",
+        "/api/sessions",
+        "/api/models",
+        "/api/workspaces/settings",
+    ):
         response = await harness.client.get(path)
 
         # Then every one of them points at the missing workspace instead of
         # returning empty data that looks like an empty account
         assert response.status_code == 409, path
         assert response.json()["error"]["code"] == "no_workspace", path
+
+
+# --- settings (spec 10.10): caps are opt-in, admin-only, and audited ---------
+
+
+async def seed_admin(session_factory: Any) -> uuid.UUID:
+    """Seed one workspace whose member is its admin; return the user id."""
+    async with session_factory() as session:
+        _workspace, user, _repository = await seed_workspace(session)
+        user.is_admin = True
+        await session.commit()
+        return user.id
+
+
+async def test_settings_default_to_unlimited(
+    session_factory: Any, build_harness: Any
+) -> None:
+    # Given an admin of a workspace that never set a cap
+    harness: ApiHarness = await build_harness(user_id=await seed_admin(session_factory))
+
+    # When the settings are read
+    response = await harness.client.get("/api/workspaces/settings")
+
+    # Then every cap is null, which is what "opt-in" means on the wire
+    assert response.status_code == 200
+    assert response.json() == {
+        "maxConcurrentSessions": None,
+        "maxSessionsPerUserPerDay": None,
+        "maxTargetsPerRepo": None,
+        "maxTargetsPerInstallation": None,
+    }
+
+
+async def test_a_partial_settings_patch_audits_only_what_changed(
+    session_factory: Any, build_harness: Any
+) -> None:
+    # Given an admin of a workspace with no caps
+    user_id = await seed_admin(session_factory)
+    harness: ApiHarness = await build_harness(user_id=user_id)
+
+    # When two caps are set and later one of them is cleared
+    patched = await harness.client.patch(
+        "/api/workspaces/settings",
+        json={"maxConcurrentSessions": 3, "maxTargetsPerRepo": 2},
+    )
+    cleared = await harness.client.patch(
+        "/api/workspaces/settings", json={"maxConcurrentSessions": None}
+    )
+
+    # Then the response carries the whole settings shape at each step, with
+    # omitted caps left exactly as they were
+    assert patched.status_code == 200
+    assert patched.json() == {
+        "maxConcurrentSessions": 3,
+        "maxSessionsPerUserPerDay": None,
+        "maxTargetsPerRepo": 2,
+        "maxTargetsPerInstallation": None,
+    }
+    assert cleared.json() == {
+        "maxConcurrentSessions": None,
+        "maxSessionsPerUserPerDay": None,
+        "maxTargetsPerRepo": 2,
+        "maxTargetsPerInstallation": None,
+    }
+
+    # And each change is recorded against the actor, naming only what it changed
+    async with session_factory() as session:
+        audits = list((await session.scalars(select(AuditLog))).all())
+    assert [(audit.action, audit.actor_user_id) for audit in audits] == [
+        ("settings.updated", user_id),
+        ("settings.updated", user_id),
+    ]
+    assert audits[0].detail == {"maxConcurrentSessions": 3, "maxTargetsPerRepo": 2}
+    assert audits[1].detail == {"maxConcurrentSessions": None}
+
+
+async def test_a_settings_patch_that_changes_nothing_is_not_audited(
+    session_factory: Any, build_harness: Any
+) -> None:
+    # Given an admin who already set a cap
+    user_id = await seed_admin(session_factory)
+    harness: ApiHarness = await build_harness(user_id=user_id)
+    await harness.client.patch("/api/workspaces/settings", json={"maxConcurrentSessions": 3})
+
+    # When the same value is sent again
+    response = await harness.client.patch(
+        "/api/workspaces/settings", json={"maxConcurrentSessions": 3}
+    )
+
+    # Then the answer is unchanged and no second audit row was written
+    assert response.status_code == 200
+    assert response.json()["maxConcurrentSessions"] == 3
+    async with session_factory() as session:
+        actions = [
+            audit.action for audit in (await session.scalars(select(AuditLog))).all()
+        ]
+    assert actions == ["settings.updated"]
+
+
+async def test_settings_caps_must_be_positive_integers(
+    session_factory: Any, build_harness: Any
+) -> None:
+    # Given an admin
+    harness: ApiHarness = await build_harness(user_id=await seed_admin(session_factory))
+
+    # When a cap below one is sent
+    for body in ({"maxConcurrentSessions": 0}, {"maxSessionsPerUserPerDay": -1}):
+        response = await harness.client.patch("/api/workspaces/settings", json=body)
+
+        # Then it is a validation failure, not a stored cap
+        assert response.status_code == 422, body
+        assert response.json()["error"]["code"] == "validation_error", body
+
+    # And an unknown key is refused rather than silently ignored
+    unknown = await harness.client.patch("/api/workspaces/settings", json={"maxSessions": 1})
+    assert unknown.status_code == 422
+
+
+async def test_settings_are_admin_only(
+    seeded: Any, session_factory: Any, build_harness: Any
+) -> None:
+    # Given a signed-in workspace member who is not an admin
+    harness: ApiHarness = await build_harness(user_id=seeded.user_id)
+
+    # When they read or write the settings
+    read = await harness.client.get("/api/workspaces/settings")
+    write = await harness.client.patch(
+        "/api/workspaces/settings", json={"maxConcurrentSessions": 1}
+    )
+
+    # Then both are refused with the admin code, and nothing is written
+    assert read.status_code == 403
+    assert read.json()["error"]["code"] == "admin_required"
+    assert write.status_code == 403
+    assert write.json()["error"]["code"] == "admin_required"
+    async with session_factory() as session:
+        assert await session.scalar(select(AuditLog).limit(1)) is None

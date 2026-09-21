@@ -16,8 +16,9 @@ from fastapi import APIRouter, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.deps import DbSessionDep, WorkspaceIdDep
+from app.deps import CurrentUserDep, DbSessionDep, RepoAccessCheckerDep, WorkspaceIdDep
 from app.routers._session_data import (
+    accessible_views,
     elapsed_ms,
     is_live,
     load_sessions,
@@ -57,10 +58,17 @@ _STEPS = (
 async def get_dashboard(
     db: DbSessionDep,
     workspace_id: WorkspaceIdDep,
+    viewer: CurrentUserDep,
+    checker: RepoAccessCheckerDep,
     repo: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=50)] = 12,
 ) -> DashboardData:
-    """Return the scoped dashboard payload."""
+    """Return the scoped dashboard payload, filtered to what the viewer may read.
+
+    The same rule as ``GET /api/sessions`` applies (spec 10.8 §Access): only
+    sessions with at least one readable target, and only those targets — so the
+    summary strip, the live rows, and the history all describe one set.
+    """
     params = DashboardParams(repo=repo or None, limit=limit)
     scope_filter = params.repo
     sessions = await load_sessions(db, workspace_id=workspace_id)
@@ -68,18 +76,23 @@ async def get_dashboard(
     if scope_filter:
         sessions = await _filter_by_repo(db, sessions, scope_filter)
 
+    views = await accessible_views(db, sessions, viewer=viewer, checker=checker)
+    sessions = [session for session in sessions if views[session.id].targets]
+
     sessions.sort(key=lambda session: _created(session), reverse=True)
     scope = scope_filter or _ALL_REPOS
     running_sessions = [session for session in sessions if is_live(session)]
 
     running: list[LiveSession] = []
     for session in running_sessions:
-        running.extend(await _live_entries(db, session, scope_filter))
+        running.extend(
+            await _live_entries(db, session, views[session.id].targets, scope_filter)
+        )
     running.sort(key=lambda entry: entry.started_at, reverse=True)
 
     recent: list[DashboardSession] = []
     for session in sessions[: params.limit]:
-        targets = await serialize_targets(db, session.targets)
+        targets = await serialize_targets(db, views[session.id].targets)
         recent.append(serialize_dashboard_session(session, targets=targets))
 
     return DashboardData(
@@ -134,12 +147,15 @@ async def _repo_ids_for_full_name(
 
 
 async def _live_entries(
-    db: AsyncSession, session: ReviewSession, scope_filter: str | None
+    db: AsyncSession,
+    session: ReviewSession,
+    targets: list[SessionTarget],
+    scope_filter: str | None,
 ) -> list[LiveSession]:
-    """Render each live target of ``session`` as a :class:`LiveSession`."""
-    repos = await repositories_for_targets(db, session.targets)
+    """Render each live target the viewer may read as a :class:`LiveSession`."""
+    repos = await repositories_for_targets(db, targets)
     entries: list[LiveSession] = []
-    for target in session.targets:
+    for target in targets:
         if target.status not in ("queued", "running"):
             continue
         repository = repos.get(target.repository_id)

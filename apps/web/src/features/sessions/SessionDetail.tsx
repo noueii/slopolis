@@ -1,6 +1,14 @@
-import { useEffect, useMemo, useState } from "react"
-import { ArrowLeft, ExternalLink, ShieldCheck } from "lucide-react"
+import { useCallback, useEffect, useMemo, useState } from "react"
+import {
+  ArrowLeft,
+  Clock,
+  ExternalLink,
+  Loader2,
+  RotateCcw,
+  ShieldCheck,
+} from "lucide-react"
 
+import { ApiError, api } from "@/api/client"
 import type {
   ReviewSession,
   SessionStatus,
@@ -10,12 +18,15 @@ import { TERMINAL_SESSION_STATUSES } from "@/api/events"
 import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
 import { Skeleton } from "@/components/ui/skeleton"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { cn } from "@/lib/utils"
+import { RunTreePanel } from "./components/RunTreePanel"
 import { SessionStatusBadge } from "./components/SessionStatusBadge"
 import {
   formatAbsoluteTime,
   formatCost,
   formatDuration,
+  formatRelativeTime,
   formatTokens,
 } from "./lib/format"
 import {
@@ -24,6 +35,7 @@ import {
   type SessionEventsMode,
 } from "./lib/useSessionEvents"
 import { useSession } from "./lib/useSessions"
+import { useRunTree } from "./lib/useRunTree"
 import { SessionsError } from "./SessionsError"
 
 export interface SessionDetailProps {
@@ -37,6 +49,12 @@ const TERMINAL_TARGET_STATUSES: ReadonlySet<TargetStatus> = new Set([
   "cancelled",
   "skipped",
 ])
+
+/** Target statuses a manual retry puts back on the queue (spec 10.5). */
+const RETRYABLE_TARGET_STATUS: Partial<Record<TargetStatus, true>> = {
+  failed: true,
+  cancelled: true,
+}
 
 const MODE_META: Record<
   SessionEventsMode,
@@ -234,12 +252,76 @@ function DetailBody({
 export function SessionDetail({ sessionId, onBack }: SessionDetailProps) {
   const { data, status, error, refetch } = useSession(sessionId)
   const [live, setLive] = useState<SessionEventUpdate | null>(null)
-  const mode = useSessionEvents(sessionId, { onUpdate: setLive })
+  const [tab, setTab] = useState<"summary" | "runs" | null>(null)
+  const [retryEpoch, setRetryEpoch] = useState(0)
+  const [retrying, setRetrying] = useState(false)
+  const [retryError, setRetryError] = useState<string | null>(null)
+  const runTree = useRunTree(sessionId, live?.status)
+  const { refetch: refetchRunTree } = runTree
+  const mode = useSessionEvents(sessionId, {
+    onUpdate: setLive,
+    onAgentEvent: runTree.applyEvent,
+    epoch: retryEpoch,
+  })
 
   const liveStatus = live?.status
   useEffect(() => {
     if (liveStatus && TERMINAL_SESSION_STATUSES.has(liveStatus)) refetch()
   }, [liveStatus, refetch])
+
+  // What the reader sees: the stream's projection outruns the read that
+  // predates it, so the header badge and everything that describes the session
+  // read the same status.
+  const shownStatus: SessionStatus | undefined = liveStatus ?? data?.status
+
+  // The run tree is the session's delegation surface, so it leads once it has
+  // something to show; a session with no runs keeps the summary it always had.
+  const activeTab = tab ?? (runTree.runs.length > 0 ? "runs" : "summary")
+
+  // Whether the action is offered still follows the live status — the server
+  // marks `retryAction` on the snapshot a read returned, which a running target
+  // on the stream has already outgrown. The label follows `retryAction`.
+  const retryableTargets = data
+    ? data.targets.filter(
+        (target) =>
+          RETRYABLE_TARGET_STATUS[
+            liveTargetStatus(live, target.id) ?? target.status
+          ],
+      )
+    : []
+  const retryableCount = retryableTargets.length
+
+  // Every retryable target being a publish retry means no model runs again, so
+  // the action says what it will do: repost the review already on hand (spec
+  // 10.5 §Retrying a run that only failed to publish). Anything else — including
+  // a target the server did not label — is a review retry.
+  const retryPublishesOnly =
+    retryableCount > 0 &&
+    retryableTargets.every((target) => target.retryAction === "publish")
+
+  const handleRetry = useCallback(async () => {
+    if (!data) return
+    setRetrying(true)
+    setRetryError(null)
+    try {
+      await api.retrySession(data.id)
+      // The response is the requeued session, but the hook owns `data`: re-read
+      // it, drop the superseded attempt's projection, and reopen the stream so
+      // the new attempt reports its own status.
+      setLive(null)
+      setRetryEpoch((epoch) => epoch + 1)
+      refetch()
+      refetchRunTree()
+    } catch (cause) {
+      // The server names the refusal (`target_running`, `nothing_to_retry`, the
+      // access rules); its message is the one the user can act on.
+      setRetryError(
+        cause instanceof ApiError ? cause.message : "The retry request failed.",
+      )
+    } finally {
+      setRetrying(false)
+    }
+  }, [data, refetch, refetchRunTree])
 
   return (
     <div className="mx-auto flex w-full max-w-[1100px] animate-fade-up flex-col gap-5 p-6">
@@ -276,14 +358,88 @@ export function SessionDetail({ sessionId, onBack }: SessionDetailProps) {
         <>
           <header className="flex flex-wrap items-center gap-3">
             <h1 className="text-xl font-semibold tracking-tight">{data.name}</h1>
-            <SessionStatusBadge status={live?.status ?? data.status} />
+            <SessionStatusBadge status={shownStatus ?? data.status} />
             <LiveIndicator mode={mode} />
             <span className="font-mono text-xs text-muted-foreground">
               {data.id}
             </span>
+            {retryableCount > 0 ? (
+              <div className="ml-auto flex flex-col items-end gap-1.5">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={retrying}
+                  onClick={() => void handleRetry()}
+                >
+                  {retrying ? (
+                    <Loader2 data-icon="inline-start" className="animate-spin" />
+                  ) : (
+                    <RotateCcw data-icon="inline-start" />
+                  )}
+                  {retrying
+                    ? "Retrying…"
+                    : retryPublishesOnly
+                      ? "Retry publishing"
+                      : "Retry failed targets"}
+                </Button>
+                {retryPublishesOnly ? (
+                  <p className="max-w-xs text-right text-2xs leading-relaxed text-muted-foreground">
+                    The review is already done — no new analysis runs.
+                  </p>
+                ) : null}
+                {retryError ? (
+                  <p
+                    role="alert"
+                    className="max-w-xs text-right text-2xs leading-relaxed text-destructive"
+                  >
+                    {retryError}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
           </header>
           <p className="text-sm text-muted-foreground">{data.title}</p>
-          <DetailBody session={data} live={live} />
+          {shownStatus === "queued" ? (
+            <p
+              role="status"
+              className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-muted-foreground"
+            >
+              <Clock className="size-3.5 shrink-0" />
+              {/* `createdAt` is the only queue timestamp the wire carries: a
+                  session the queue has not touched yet has nothing newer. */}
+              Waiting for a worker — queued{" "}
+              {formatRelativeTime(data.createdAt)}. If it stays queued, check
+              that a worker is running.
+            </p>
+          ) : null}
+          <Tabs
+            value={activeTab}
+            onValueChange={(value) => setTab(value as "summary" | "runs")}
+            className="flex flex-col gap-4"
+          >
+            <TabsList className="h-8 self-start">
+              <TabsTrigger value="summary" className="h-6 px-2.5 text-xs">
+                Summary
+              </TabsTrigger>
+              <TabsTrigger value="runs" className="h-6 px-2.5 text-xs">
+                Run tree
+              </TabsTrigger>
+            </TabsList>
+            <TabsContent value="summary" className="mt-0">
+              <DetailBody session={data} live={live} />
+            </TabsContent>
+            <TabsContent value="runs" className="mt-0">
+              <RunTreePanel
+                sessionId={data.id}
+                runs={runTree.runs}
+                sessionStatus={shownStatus ?? data.status}
+                status={runTree.status}
+                error={runTree.error}
+                liveEvents={runTree.events}
+                onRetry={runTree.refetch}
+              />
+            </TabsContent>
+          </Tabs>
         </>
       ) : null}
     </div>

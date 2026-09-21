@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react"
-import { ArrowLeft, Globe, Inbox, Lock, RefreshCw } from "lucide-react"
+import { ArrowLeft, Globe, Inbox, Info, Lock, RefreshCw } from "lucide-react"
 
 import { cn } from "@/lib/utils"
-import type { SessionSort } from "@/api/contract"
+import type { RequiredAccess, SessionSort } from "@/api/contract"
 import { Button } from "@/components/ui/button"
 import { useRepositories } from "@/features/dashboard/lib/useDashboard"
 import { SessionsError } from "@/features/sessions/SessionsError"
@@ -10,7 +10,10 @@ import { SessionsSkeleton } from "@/features/sessions/SessionsSkeleton"
 import { SessionsTable } from "@/features/sessions/SessionsTable"
 import { SessionsTableCard } from "@/features/sessions/components/SessionsTableCard"
 import { useSessions } from "@/features/sessions/lib/useSessions"
-import { ConnectionBadge } from "./RepositoriesScreen"
+import { AccessBadge, ConnectionBadge } from "./RepositoriesScreen"
+import { RepositoryAccessDialog } from "./components/RepositoryAccessDialog"
+import { ReviewAccessCard } from "./components/ReviewAccessCard"
+import { useRepositoryAccess } from "./lib/useRepositoryAccess"
 
 export interface RepositoryDetailScreenProps {
   fullName: string
@@ -26,16 +29,43 @@ export function RepositoryDetailScreen({
   onOpenSession,
 }: RepositoryDetailScreenProps) {
   const [sort, setSort] = useState<SessionSort>("created_desc")
+  const [confirming, setConfirming] = useState(false)
   const params = useMemo(
     () => ({ repo: fullName, pageSize: PAGE_SIZE, sort }),
     [fullName, sort],
   )
 
   const { data, status, error, refetch } = useSessions(params)
-  const { data: repositories } = useRepositories()
+  const { data: repositories, refetch: refetchRepositories } = useRepositories()
   const repository =
     repositories?.items.find((item) => item.fullName === fullName) ?? null
   const VisibilityIcon = repository?.private ? Lock : Globe
+  const access = useRepositoryAccess()
+
+  /** Enabling needs no confirmation; it reopens something the workspace chose. */
+  async function toggle() {
+    if (repository === null) return
+    if (!repository.enabled) {
+      const updated = await access.run(repository, { enabled: true })
+      if (updated !== null) refetchRepositories()
+      return
+    }
+    setConfirming(true)
+  }
+
+  async function confirmDisable() {
+    if (repository === null) return
+    const updated = await access.run(repository, { enabled: false })
+    if (updated === null) return
+    setConfirming(false)
+    refetchRepositories()
+  }
+
+  async function saveReviewAccess(requiredAccess: RequiredAccess) {
+    if (repository === null) return
+    const updated = await access.run(repository, { requiredAccess })
+    if (updated !== null) refetchRepositories()
+  }
 
   const sessions = data?.items ?? []
   const busy = status === "loading"
@@ -78,21 +108,58 @@ export function RepositoryDetailScreen({
                   <span className="text-muted-foreground/50">·</span>
                   <span className="font-mono">{repository.defaultBranch}</span>
                   <ConnectionBadge connected={repository.connected} />
+                  {repository.enabled ? null : <AccessBadge />}
                 </>
               ) : (
                 <span>Repository details unavailable</span>
               )}
             </div>
           </div>
-          <Button variant="outline" size="sm" onClick={refetch}>
-            <RefreshCw
-              data-icon="inline-start"
-              className={cn(busy && "animate-spin")}
-            />
-            Refresh
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              variant={repository?.enabled === false ? "default" : "outline"}
+              size="sm"
+              disabled={repository === null}
+              onClick={() => void toggle()}
+            >
+              {repository?.enabled === false ? "Enable" : "Disable"}
+            </Button>
+            <Button variant="outline" size="sm" onClick={refetch}>
+              <RefreshCw
+                data-icon="inline-start"
+                className={cn(busy && "animate-spin")}
+              />
+              Refresh
+            </Button>
+          </div>
         </header>
       </div>
+
+      {repository?.enabled === false ? (
+        <div className="flex items-start gap-2.5 rounded-lg border border-dashed border-border bg-muted/30 px-4 py-3">
+          <Info className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+          <p className="text-[13px] leading-relaxed text-muted-foreground">
+            This repository is disabled: pre-flight refuses its pull requests
+            with that reason, so no new review can start from it. The sessions
+            and findings below stay, and enabling it reviews new pull requests
+            again.
+          </p>
+        </div>
+      ) : null}
+
+      {repository !== null ? (
+        <ReviewAccessCard
+          repository={repository}
+          pending={access.pending}
+          onSave={(requiredAccess) => void saveReviewAccess(requiredAccess)}
+        />
+      ) : null}
+
+      {access.error !== null && !confirming ? (
+        <p role="alert" className="text-xs leading-relaxed text-destructive">
+          {access.error}
+        </p>
+      ) : null}
 
       {showSkeleton ? <SessionsSkeleton /> : null}
 
@@ -114,6 +181,16 @@ export function RepositoryDetailScreen({
             onOpenSession={onOpenSession}
           />
         </SessionsTableCard>
+      ) : null}
+
+      {repository !== null && confirming ? (
+        <RepositoryAccessDialog
+          repository={repository}
+          pending={access.pending}
+          error={access.error}
+          onOpenChange={() => setConfirming(false)}
+          onConfirm={() => void confirmDisable()}
+        />
       ) : null}
     </div>
   )

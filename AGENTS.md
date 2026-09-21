@@ -9,9 +9,12 @@ Read `docs/WORKFLOW.md` before contributing.
 
 ## Quick commands
 - `make dev-mock` — web app + standalone mock API (default for UI work)
-- `make dev-api` — web app + real API (once `apps/server` exists)
-- `make dev-worker` — web app only, in-browser mock worker (no server needed)
+- `make dev-all` — real API + **ARQ worker** + web app (a submitted session actually runs)
+- `make dev-api` — web app + real API only; nothing consumes the queue, so sessions stay `queued`
+- `make worker` — the ARQ review worker on its own (needs Redis, the DB, `apps/worker/.env`)
+- `make dev-browser-mock` — web app only, in-browser MSW mock (no server needed)
 - `make mock` / `make api` — run one server on its own
+- `make e2e` — the hermetic review-flow test (no GitHub writes)
 - `cd apps/web && bun install` — install web deps
 
 The web app uses **Bun** as its package manager and dev/build runner. Tests use **Vitest**, run through Bun (e.g. `bunx vitest`); do not use `bun test`.

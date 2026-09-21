@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 
-import { api } from "@/api/client"
+import { api, clearSignInAttempt } from "@/api/client"
 import type { MeResponse, WorkspaceRef } from "@/api/contract"
 
 export interface CurrentUser {
@@ -46,6 +46,9 @@ export function useCurrentUser(): CurrentUser {
   const refresh = useCallback(async () => {
     try {
       const user = await api.getMe()
+      // A session landed, so this tab is no longer "already tried": signing out
+      // later can send the browser to GitHub again.
+      clearSignInAttempt()
       if (!mounted.current) return
       setState({
         user,
@@ -54,7 +57,7 @@ export function useCurrentUser(): CurrentUser {
         isLoading: false,
       })
     } catch {
-      // A failed `/me` is the signed-out state: the shell renders as a guest.
+      // A failed `/me` is the signed-out state: the sign-in gate takes over.
       if (mounted.current) setState(GUEST)
     }
   }, [])

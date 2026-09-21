@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, Boolean, ForeignKey, String
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, LargeBinary, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from slopolis_db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -20,6 +21,12 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     ``workspace_id`` is nullable on purpose: sign-in creates the account, and the
     user then either creates a workspace (becoming its admin) or waits for an
     invitation (spec 10.1, onboarding).
+
+    ``encrypted_github_token`` is the user-to-server access token, sealed with the
+    vault (spec 10.1). It answers "may this member read this repository?", which
+    workspace membership alone cannot (10.8 §Access). Both columns stay ``NULL`` on
+    a deployment with no ``ENCRYPTION_KEY``: sign-in still works, and every
+    per-user repo-access check is then unverifiable.
     """
 
     __tablename__ = "users"
@@ -34,5 +41,11 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     avatar_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    encrypted_github_token: Mapped[bytes | None] = mapped_column(
+        LargeBinary, nullable=True
+    )
+    token_updated_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     workspace: Mapped[Workspace | None] = relationship(back_populates="users")

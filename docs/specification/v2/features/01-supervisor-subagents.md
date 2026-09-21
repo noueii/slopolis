@@ -72,6 +72,7 @@ Built-in roles (all model-bound via `ModelAssignment`, no model names in code):
 |---|---|---|---|
 | `orchestrator.main` | main | `harness.orchestrator` | yes |
 | `orchestrator.pr` | pr | `harness.orchestrator` | yes |
+| `reviewer` | sub | `review` | no |
 | `context-gatherer` | sub | `review.fast` | no |
 | `logic-reviewer` | sub | `review.specialist` | no |
 | `security-reviewer` | sub | `review.security` | no |
@@ -268,6 +269,12 @@ Agent definitions are built-in in V1; workspace-level custom agents come later (
 
 ## 13. Build order
 
+> **Status (2026-09-20):** V1.1 is built and running in the worker. V1.2–V1.4 are **deferred** —
+> the product work below them (the full pre-spawn path: provider config, pre-flight policy, session
+> caps, queue limits) comes first. Until V1.2 lands, the review path stays single-pass per target
+> and the run tree is what V1.1 made observable; `spawn_subagents` exists in the runtime with
+> tests, but no deployed agent calls it.
+
 | Step | Deliverable |
 |---|---|
 | **V1.1** | `agent_run`/`agent_event` schema + persistence; run-tree API + SSE; main orchestrator spawns one PR orchestrator per target; PR orchestrator runs the existing single-pass review as one sub-agent. Observable end-to-end tree. |
@@ -284,3 +291,25 @@ Agent definitions are built-in in V1; workspace-level custom agents come later (
 3. Retry semantics for failed sub-agents: fixed retry count vs model-decided.
 4. Whether the main orchestrator should do more than aggregate (cross-PR synthesis) in V1.
 5. Per-role `max_steps` tuning after first real sessions.
+
+## 15. Implementation notes (V1.1)
+
+§4 (one sub-job per target) and §13 (the main orchestrator spawns one PR orchestrator per target)
+meet like this, and the queue keeps its existing shape:
+
+- The **submit path** creates the session's `main` `AgentRun` (level `main`, one per session) while
+  the session row is created, and enqueues the per-target jobs exactly as today. Enqueue-time
+  creation is what makes the tree exist even when every target job fails to start.
+- Each **target job** creates its own `pr` `AgentRun` with `parent_run_id` = the session's main run
+  and `target_id` set. 1:1 is enforced by the runtime, not the model: a unique constraint on
+  `(session_id, target_id)` for level `pr`, so a retried attempt reuses its run row rather than
+  adding a second orchestrator.
+- A target job **does not call the main orchestrator**; the main run is the session's aggregation
+  point and is finished by the existing post-target session recompute once no target is left
+  running. Cross-PR synthesis beyond aggregation stays deferred (§1).
+- V1.1 spawns no sub-agents yet beyond the PR orchestrator's own reviewer: the PR orchestrator runs
+  the existing single-pass harness (v1 10.6) as one `sub` run, which is what makes the tree
+  observable end-to-end before `spawn_subagents` (V1.2) changes the fan-out.
+- That one `sub` run is the built-in `reviewer` role (§3): level `sub`, model role `review`
+  (the v1 single-pass reviewer), read-only tools, no spawning. V1.2 replaces it with the aspect
+  sub-agents.

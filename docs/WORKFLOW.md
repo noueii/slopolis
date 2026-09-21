@@ -58,11 +58,43 @@ docs/specification/  # versioned specs
 ## Running things
 - Web deps: `cd apps/web && bun install`
 - `make dev-mock` — web app + standalone mock API (default for UI work)
-- `make dev-api` — web app + real API (once `apps/server` exists)
-- `make dev-worker` — web app only, in-browser mock worker (no server needed)
+- `make dev-api` — web app + real API. **No worker**: a submitted session stays `queued` forever
+  until something consumes the queue.
+- `make dev-all` — the whole local stack: real API + **ARQ worker** + web app. Use this when a
+  submitted session has to actually run.
+- `make worker` — just the ARQ worker, in its own shell (`uv run arq worker.main.WorkerSettings`).
+  It needs Redis and the DB from `infra/docker-compose.yml`, and `apps/worker/.env`.
+  **Restart it after pulling**: a worker keeps the code it started with, and a job whose arguments
+  changed (a new job parameter, a renamed function) fails inside ARQ with a `TypeError` that never
+  touches the target — leaving it `queued` with no job. The worker logs a build fingerprint at
+  startup, so compare it with the checkout when a queue looks stuck.
+- `make dev-browser-mock` — web app only, against the in-browser MSW mock; no API, no worker.
+  (Formerly `dev-worker`: that name collided with the ARQ worker, which it is not.)
 - `make dev` — web app only; `MOCK_MODE=server|worker|off`, `/api` proxied for server/off
 - `make mock` / `make api` — run just the mock / real API server
+- Reviewing a session **writes to GitHub**: the worker posts the rolling summary comment, the
+  inline comments, and a check run for each target (`worker/jobs/publish.py`). The hermetic
+  `make e2e` run exercises the same path with fakes and writes nothing.
 - Web tooling: the web app uses **Bun** as its package manager and dev/build runner (`bun install`, `bun run dev`, `bun run build`).
 - Web tests: use **Vitest**, run through Bun (e.g. `bunx vitest`). Do not use `bun test`.
 - Mock vs real: `MOCK_MODE=server` proxies `/api` to the mock API (`:8300`), `off` proxies to the real API (`:8400`), and `worker` serves mocks in-browser with no server. The web dev server runs on `:8000`.
-- Backend and worker commands are added in later phases.
+- Database: `make migrate` applies `packages/db` migrations to the dev database. Nothing migrates at
+  boot (`RUN_MIGRATIONS` is set in some `.env` files but read by no code).
+- Model calls: every model call — pre-flight's live check and the worker's review — runs on the
+  **credential linked to the model** (Providers & Models: the credential a model was imported
+  through), using that credential's base URL and key. `LITELLM_BASE_URL` + `LITELLM_MASTER_KEY`
+  (`apps/server/.env`, `apps/worker/.env`) is the **fallback** for a model with no usable
+  credential, and the only option when `ENCRYPTION_KEY` is unset, since a stored key cannot be
+  decrypted. With neither, reading the app works and a submission is refused with a notice naming
+  the model and both ways out. Base URLs are given **without `/v1`**.
+- The dev database is **shared by every worktree** (one `slopolis-postgres-1` container, one
+  `slopolis` database), so a worktree whose `packages/db/slopolis_db/migrations` diverged from
+  `main` can leave it stamped with a revision this checkout cannot resolve: `alembic current` fails
+  with `Can't locate revision identified by …`, and the server dies on missing columns such as
+  `column users.workspace_id does not exist`. Back up, reset the schema, and migrate:
+
+  ```bash
+  docker exec slopolis-postgres-1 pg_dump -U slopolis -d slopolis --no-owner > /tmp/slopolis-dev.sql
+  docker exec slopolis-postgres-1 psql -U slopolis -d slopolis -c 'drop schema public cascade; create schema public;'
+  make migrate
+  ```

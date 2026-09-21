@@ -4,21 +4,35 @@ v1 is self-hosted and single-tenant, but signing in no longer hands every new
 account a workspace. A user with none lands on the onboarding gate and either
 creates one (becoming its admin) or waits to be invited — the invitation
 mechanism itself is deferred with multi-tenancy (spec §5, Phase 5).
+
+The router also carries the workspace's **settings** (spec 10.10): the caps the
+submit path applies before it spawns any work. They hang off this prefix because
+the caller's workspace is implied by their session, so the surface has one
+workspace prefix rather than two. Reading and writing them is admin-only and
+every change is audited.
 """
 
 from __future__ import annotations
 
 import re
+import uuid
+from typing import Any
 
 from fastapi import APIRouter, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.deps import CurrentUserDep, DbSessionDep
+from app.deps import AdminUserDep, CurrentUserDep, DbSessionDep, WorkspaceIdDep
 from app.errors import ApiError
-from app.schemas import CreateWorkspaceRequest, WorkspaceListResponse, WorkspaceRef
+from app.schemas import (
+    CreateWorkspaceRequest,
+    WorkspaceListResponse,
+    WorkspaceRef,
+    WorkspaceSettings,
+    WorkspaceSettingsUpdate,
+)
 from app.serializers import workspace_ref
-from slopolis_db.models import User, Workspace
+from slopolis_db.models import AuditLog, User, Workspace
 
 __all__ = ["router", "slugify"]
 
@@ -101,3 +115,87 @@ async def create_workspace(
     reference = workspace_ref(workspace)
     assert reference is not None  # just created, so never None
     return reference
+
+
+# --- settings (spec 10.10) --------------------------------------------------
+
+
+@router.get("/workspaces/settings")
+async def get_workspace_settings(
+    db: DbSessionDep, workspace_id: WorkspaceIdDep, _admin: AdminUserDep
+) -> WorkspaceSettings:
+    """Return the workspace's caps; an unset cap is ``null``, i.e. unlimited."""
+    return WorkspaceSettings.model_validate(await _require_workspace(db, workspace_id))
+
+
+@router.patch("/workspaces/settings")
+async def update_workspace_settings(
+    payload: WorkspaceSettingsUpdate,
+    db: DbSessionDep,
+    workspace_id: WorkspaceIdDep,
+    admin: AdminUserDep,
+) -> WorkspaceSettings:
+    """Apply the supplied caps, auditing only the keys that actually changed."""
+    workspace = await _require_workspace(db, workspace_id)
+    changes = _apply_caps(workspace, payload)
+    if not changes:
+        # A PATCH that changes nothing is a read: no write and no audit row, so
+        # re-sending a form is safe.
+        return WorkspaceSettings.model_validate(workspace)
+    _audit(
+        db,
+        workspace_id=workspace_id,
+        actor_id=admin.id,
+        action="settings.updated",
+        detail=changes,
+    )
+    await db.commit()
+    await db.refresh(workspace)
+    return WorkspaceSettings.model_validate(workspace)
+
+
+async def _require_workspace(db: AsyncSession, workspace_id: uuid.UUID) -> Workspace:
+    """Load the caller's workspace row; the id was resolved from their account."""
+    workspace = await db.get(Workspace, workspace_id)
+    assert workspace is not None  # WorkspaceIdDep resolved it from the caller's row
+    return workspace
+
+
+def _apply_caps(workspace: Workspace, payload: WorkspaceSettingsUpdate) -> dict[str, Any]:
+    """Set every cap the body supplied; return the changed keys, wire-named.
+
+    ``model_fields_set`` is what separates "omitted" from "explicitly null" —
+    the value alone cannot, and only an explicit ``null`` clears a cap.
+    """
+    changes: dict[str, Any] = {}
+    for name, field in WorkspaceSettingsUpdate.model_fields.items():
+        if name not in payload.model_fields_set:
+            continue
+        value = getattr(payload, name)
+        if getattr(workspace, name) == value:
+            continue
+        setattr(workspace, name, value)
+        # The audit row speaks the wire names, like every other detail payload.
+        changes[field.alias or name] = value
+    return changes
+
+
+def _audit(
+    db: AsyncSession,
+    *,
+    workspace_id: uuid.UUID,
+    actor_id: uuid.UUID,
+    action: str,
+    detail: dict[str, Any],
+) -> None:
+    """Stage one audit row for the caller to commit with its mutation."""
+    db.add(
+        AuditLog(
+            workspace_id=workspace_id,
+            actor_user_id=actor_id,
+            action=action,
+            target_type="workspace",
+            target_id=workspace_id,
+            detail=detail,
+        )
+    )

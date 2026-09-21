@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict
 __all__ = [
     "AppInstallation",
     "ChangedFile",
+    "CheckRun",
     "GitHubIssue",
     "GitHubPullRequest",
     "GitHubRepository",
@@ -55,6 +56,21 @@ class GitHubRepository(BaseModel):
     default_branch: str
     open_pr_count: int
     last_activity_at: str
+
+
+class CheckRun(BaseModel):
+    """One CI check run attached to a commit — the read side of a CI rollup.
+
+    ``status`` is the run's lifecycle state (`queued`, `in_progress`, `completed`)
+    and ``conclusion`` is set once it completes (`success`, `failure`, `neutral`,
+    `skipped`, `cancelled`, `timed_out`, `action_required`).
+    """
+
+    model_config = _STRICT
+
+    name: str
+    status: str
+    conclusion: str | None = None
 
 
 class GitHubIssue(BaseModel):

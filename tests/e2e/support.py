@@ -105,7 +105,9 @@ class FakeGitHub:
     def __init__(self, *, config_text: str | None = REPO_CONFIG_YML) -> None:
         self.config_text = config_text
         self.resolved_urls: list[str] = []
-        self.checked_access: list[tuple[str, bool, str]] = []
+        #: One entry per access check: the repository, its visibility, the user,
+        #: and the override pre-flight resolved for it (``None`` = spec rule).
+        self.checked_access: list[tuple[str, bool, str, str | None]] = []
 
     # --- app.adapters.github.GitHubGateway port (pre-flight) ----------------
 
@@ -131,10 +133,15 @@ class FakeGitHub:
         return [REPO_FULL_NAME]
 
     async def user_has_access(
-        self, repo_full_name: str, *, private: bool, user_login: str
+        self,
+        repo_full_name: str,
+        *,
+        private: bool,
+        user_login: str,
+        required: str | None = None,
     ) -> bool:
         """The triggering user may review the covered repository."""
-        self.checked_access.append((repo_full_name, private, user_login))
+        self.checked_access.append((repo_full_name, private, user_login, required))
         return repo_full_name == REPO_FULL_NAME
 
     async def read_repo_file(self, repo_full_name: str, path: str) -> str | None:
@@ -142,6 +149,15 @@ class FakeGitHub:
         if repo_full_name == REPO_FULL_NAME and path == REPO_CONFIG_PATH:
             return self.config_text
         return None
+
+    async def publish_permissions(self, repo_full_name: str) -> dict[str, str]:
+        """Report an installation that can write everything publishing needs.
+
+        The fake models a correctly configured App: pre-flight refuses a
+        submission whose installation cannot write (spec 10.3), and this flow is
+        about what happens *after* that gate.
+        """
+        return {"pull_requests": "write", "issues": "write", "checks": "write"}
 
     # --- worker.deps.ContextReader port (review harness) --------------------
 
@@ -246,6 +262,16 @@ class FakePublisher:
     summaries: list[tuple[str, int, str, int | None]] = field(default_factory=list)
     inlines: list[tuple[str, int, list[InlineComment], str]] = field(default_factory=list)
     checks: list[tuple[str, str, str, str, str]] = field(default_factory=list)
+    #: A test sets this to the summary comment an earlier publish left on the
+    #: pull request; ``None`` — the default — is a pull request with none yet.
+    existing_summary_id: int | None = None
+    #: The line comments the pull request already holds, keyed by path and line in
+    #: the order they were posted — what reconciliation adopts (spec 10.7).
+    existing_inline: dict[tuple[str, int], list[int]] = field(default_factory=dict)
+
+    async def find_summary_comment(self, repo_full_name: str, number: int) -> int | None:
+        """Answer with the seeded existing comment, or ``None`` on a first publish."""
+        return self.existing_summary_id
 
     async def upsert_summary_comment(
         self, repo_full_name: str, number: int, body: str, existing_comment_id: int | None
@@ -260,6 +286,17 @@ class FakePublisher:
         """Record the inline comments and return one id per comment."""
         self.inlines.append((repo_full_name, number, comments, commit_id))
         return [201 + index for index in range(len(comments))]
+
+    async def reconcile_inline_comments(
+        self, repo_full_name: str, number: int, comments: list[InlineComment]
+    ) -> list[int | None]:
+        """Adopt a seeded comment per path and line, in the order each was posted."""
+        available = {key: list(ids) for key, ids in self.existing_inline.items()}
+        adopted: list[int | None] = []
+        for comment in comments:
+            listed = available.setdefault((comment.path, comment.line), [])
+            adopted.append(listed.pop(0) if listed else None)
+        return adopted
 
     async def upsert_check_run(
         self,

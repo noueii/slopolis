@@ -68,8 +68,9 @@ async def test_one_pr_session_produces_a_real_review(env: Env) -> None:
         assert target is not None
         target_id = str(target.id)
 
-    # ... and exactly one review_target job was enqueued for (session, target)
-    assert env.pool.jobs == [("review_target", (str(session_id), target_id))]
+    # ... and exactly one review_target job was enqueued for (session, target),
+    # in review mode: a submission never has a review to re-publish
+    assert env.pool.jobs == [("review_target", (str(session_id), target_id, "review"))]
 
     # When the real worker job runs against the same database
     await review_target(env.ctx, str(session_id), target_id)
@@ -131,3 +132,77 @@ async def test_one_pr_session_produces_a_real_review(env: Env) -> None:
 
     # ... and the gateway was asked for the workspace-assigned model, nothing hardcoded
     assert env.llm.models == [MODEL_ID]
+
+
+async def test_a_republish_edits_the_summary_comment(env: Env) -> None:
+    """A pull request that already carries the session's summary gets it updated."""
+    # Given a pull request that an earlier publish already commented on
+    env.publisher.existing_summary_id = 101
+
+    # When the one pasted PR link is queued and the real worker job runs
+    await env.client.post("/api/reviews/preflight", json={"prUrls": [PR_URL]})
+    created = await env.client.post(
+        "/api/sessions",
+        json={"prUrls": [PR_URL], "prompt": "Focus on auth bugs"},
+    )
+    assert created.status_code == 201, created.text
+    session_id = uuid.UUID(created.json()["id"])
+    async with env.db.maker() as session:
+        target = await session.scalar(
+            select(SessionTarget).where(SessionTarget.session_id == session_id)
+        )
+        assert target is not None
+        target_id = str(target.id)
+
+    await review_target(env.ctx, str(session_id), target_id)
+
+    # Then one comment was published, and it was the one already on the pull
+    # request — an edit, not a second summary beside the first
+    assert len(env.publisher.summaries) == 1
+    repo_name, number, _, existing_id = env.publisher.summaries[0]
+    assert (repo_name, number, existing_id) == (REPO_FULL_NAME, PR_NUMBER, 101)
+
+
+async def test_a_republish_adopts_the_line_comments_the_pr_already_has(env: Env) -> None:
+    """A pull request carrying this App's comment for a finding is not commented twice."""
+    # Given a pull request whose finding was already commented on by a publish
+    # that failed before the app recorded the comment
+    env.publisher.existing_inline = {(GROUNDED_PATH, 3): [777]}
+
+    # When the one pasted PR link is queued and the real worker job runs
+    await env.client.post("/api/reviews/preflight", json={"prUrls": [PR_URL]})
+    created = await env.client.post(
+        "/api/sessions",
+        json={"prUrls": [PR_URL], "prompt": "Focus on auth bugs"},
+    )
+    assert created.status_code == 201, created.text
+    session_id = uuid.UUID(created.json()["id"])
+    async with env.db.maker() as session:
+        target = await session.scalar(
+            select(SessionTarget).where(SessionTarget.session_id == session_id)
+        )
+        assert target is not None
+        target_id = str(target.id)
+
+    await review_target(env.ctx, str(session_id), target_id)
+
+    # Then nothing was posted: the comment the pull request already holds is that
+    # finding's comment
+    assert env.publisher.inlines == []
+
+    # ... and the app caught up with GitHub: the finding is marked posted and
+    # linked to the comment that carries it
+    async with env.db.maker() as session:
+        findings = list(
+            (
+                await session.scalars(
+                    select(Finding).where(Finding.target_id == uuid.UUID(target_id))
+                )
+            ).all()
+        )
+        target_row = await session.get(SessionTarget, uuid.UUID(target_id))
+    assert len(findings) == 1
+    assert findings[0].posted is True
+    assert findings[0].github_comment_id == 777
+    assert target_row is not None
+    assert target_row.status == "done"

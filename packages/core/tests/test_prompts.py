@@ -24,6 +24,15 @@ def test_system_prompt_contains_json_contract_and_severities() -> None:
     assert "info, warning, error, critical" in prompt
 
 
+def test_system_prompt_requires_replacement_code_in_suggestion() -> None:
+    """The built-in prompt says `suggestion` is code, never prose."""
+    prompt = compose_system_prompt()
+
+    assert "literal replacement" in prompt
+    assert "no markdown fence" in prompt
+    assert "put that advice in message instead" in prompt
+
+
 def test_review_prompt_layers_instructions_then_session() -> None:
     """Repo instructions precede the session prompt in the composed prompt."""
     repo_config = RepoConfig(

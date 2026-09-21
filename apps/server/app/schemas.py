@@ -9,14 +9,27 @@ FastAPI OpenAPI schema the UI is allowed to depend on.
 from __future__ import annotations
 
 import datetime as dt
+import uuid
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import CAMEL
+from app.retry_actions import RetryAction
 from slopolis_core.domain import SessionStatus, TargetStatus
+from slopolis_db.models.github import RequiredAccess
 
 __all__ = [
+    "AgentEventItem",
+    "AgentEventPage",
+    "AgentRunNode",
+    "AgentRunTreeResponse",
     "ApiErrorBody",
+    "AssignmentResponse",
+    "AssignmentUpdateRequest",
+    "CatalogModelCreateRequest",
+    "CatalogModelListResponse",
+    "CatalogModelRef",
     "CreateReviewRequest",
     "CreatedSession",
     "DashboardData",
@@ -26,26 +39,39 @@ __all__ = [
     "FilterOption",
     "LiveSession",
     "ModelCatalog",
+    "ModelImportRequest",
+    "ModelImportResponse",
     "ModelOption",
     "OpenPullRequest",
     "Paginated",
     "PrReference",
     "PreflightRequest",
     "PreflightResult",
+    "ProviderCreateRequest",
+    "ProviderCredentialRef",
+    "ProviderListResponse",
+    "ProviderTestResult",
+    "ProviderUpdateRequest",
     "PullRequestChecks",
     "RepositoryListResponse",
     "RepositoryPullRequestsResponse",
     "RepositoryRef",
     "RepositorySummary",
+    "RequiredAccess",
+    "RetryAction",
+    "RetryRequest",
     "ReviewPreset",
     "ReviewPresetCatalog",
     "ReviewSession",
+    "RoleAssignmentRef",
     "SessionFilterOptions",
     "SessionListParams",
     "SessionStats",
     "SessionTarget",
     "UserRef",
     "WireModel",
+    "WorkspaceSettings",
+    "WorkspaceSettingsUpdate",
 ]
 
 
@@ -91,6 +117,40 @@ class CreateWorkspaceRequest(WireModel):
     name: str
 
 
+class WorkspaceSettings(WireModel):
+    """The workspace's caps (spec 10.10).
+
+    Every field is ``null`` when unset, which means unlimited: the caps are
+    opt-in, so a deployment that never touches them submits exactly as it did.
+    A set value is an integer >= 1.
+    """
+
+    max_concurrent_sessions: int | None = None
+    max_sessions_per_user_per_day: int | None = None
+    max_targets_per_repo: int | None = None
+    max_targets_per_installation: int | None = None
+
+
+class WorkspaceSettingsUpdate(WireModel):
+    """Body of ``PATCH /api/workspaces/settings``.
+
+    Partial on purpose: an omitted field is left as it is, while an explicit
+    ``null`` clears the cap back to unlimited — the two cannot be told apart
+    from the value alone, so the route reads ``model_fields_set``.
+    """
+
+    model_config = ConfigDict(
+        alias_generator=CAMEL,
+        populate_by_name=True,
+        extra="forbid",
+    )
+
+    max_concurrent_sessions: int | None = Field(default=None, ge=1)
+    max_sessions_per_user_per_day: int | None = Field(default=None, ge=1)
+    max_targets_per_repo: int | None = Field(default=None, ge=1)
+    max_targets_per_installation: int | None = Field(default=None, ge=1)
+
+
 class UserRef(WireModel):
     """A GitHub user referenced by a session."""
 
@@ -125,6 +185,11 @@ class SessionTarget(WireModel):
     url: str
     head_branch: str
     status: TargetStatus
+    #: What a manual retry would do (spec 10.5 §Retrying a run that only failed to
+    #: publish): ``"publish"`` re-posts the review the last attempt already
+    #: produced, ``"review"`` runs the model again. ``None`` means the target is
+    #: not retryable, so there is nothing for the button to promise.
+    retry_action: RetryAction | None = None
     findings_count: int = 0
     tokens: int = 0
     cost_usd: float = 0.0
@@ -226,6 +291,10 @@ class RepositorySummary(WireModel):
     open_pr_count: int
     last_activity_at: dt.datetime
     connected: bool
+    #: The workspace switch: a connected repository can be parked without losing its history.
+    enabled: bool = True
+    #: The access policy pre-flight applies to this repository (spec 10.10).
+    required_access: RequiredAccess = "default"
 
 
 class RepositoryListResponse(WireModel):
@@ -455,6 +524,22 @@ class SessionUpdateRequest(WireModel):
     name: str | None = None
 
 
+class RetryRequest(WireModel):
+    """Body of ``POST /api/sessions/{id}/retry`` (spec 10.5 §Manual retry).
+
+    An absent or empty ``targetIds`` means every target in a retryable state,
+    which is what the detail screen's plain "Retry" sends.
+    """
+
+    model_config = ConfigDict(
+        alias_generator=CAMEL,
+        populate_by_name=True,
+        extra="forbid",
+    )
+
+    target_ids: list[uuid.UUID] | None = None
+
+
 # --- usage ------------------------------------------------------------------
 
 
@@ -485,6 +570,7 @@ class UsageResponse(WireModel):
     total_sessions: int
     by_model: list[UsageBreakdown] = Field(default_factory=list)
     by_repository: list[UsageBreakdown] = Field(default_factory=list)
+    by_user: list[UsageBreakdown] = Field(default_factory=list)
     series: list[UsagePoint] = Field(default_factory=list)
 
 
@@ -503,3 +589,160 @@ class ApiErrorBody(WireModel):
     """Standard error envelope returned on every non-2xx response."""
 
     error: ApiErrorDetail
+
+
+# --- provider & model configuration ----------------------------------------
+
+
+class ProviderCredentialRef(WireModel):
+    """A BYOK credential as the admin screen sees it — never the key itself."""
+
+    id: str
+    provider: str
+    base_url: str | None = None
+    key_last4: str
+    enabled: bool
+    last_status: str | None = None
+    last_checked_at: dt.datetime | None = None
+    created_at: dt.datetime
+
+
+class ProviderListResponse(WireModel):
+    """Every provider credential the workspace holds."""
+
+    items: list[ProviderCredentialRef] = Field(default_factory=list)
+
+
+class ProviderCreateRequest(WireModel):
+    """Body of ``POST /api/providers``; the key is write-only."""
+
+    provider: str
+    base_url: str | None = None
+    api_key: str
+
+
+class ProviderUpdateRequest(WireModel):
+    """Body of ``PATCH /api/providers/{id}``; omitted fields stay as they are."""
+
+    base_url: str | None = None
+    api_key: str | None = None
+    enabled: bool | None = None
+
+
+class ProviderTestResult(WireModel):
+    """Outcome of ``POST /api/providers/{id}/test``.
+
+    An unreachable provider is a recorded status, not an API error, so the
+    response is still 200 with ``status: "failed"``.
+    """
+
+    status: str
+    detail: str | None = None
+    checked_at: dt.datetime
+
+
+class CatalogModelRef(WireModel):
+    """One model in the workspace catalog."""
+
+    id: str
+    model_id: str
+    provider: str
+    display_name: str | None = None
+    source: str
+    credential_id: str | None = None
+
+
+class CatalogModelListResponse(WireModel):
+    """The workspace catalog plus the model ``auto`` resolves to."""
+
+    items: list[CatalogModelRef] = Field(default_factory=list)
+    default_model_id: str | None = None
+
+
+class CatalogModelCreateRequest(WireModel):
+    """Body of ``POST /api/catalog/models``; always creates a ``manual`` row."""
+
+    model_id: str
+    provider: str
+    display_name: str | None = None
+
+
+class ModelImportRequest(WireModel):
+    """Body of ``POST /api/catalog/models/import``."""
+
+    credential_id: str
+
+
+class ModelImportResponse(WireModel):
+    """``imported`` counts newly created rows; refreshed rows are not counted."""
+
+    imported: int
+    items: list[CatalogModelRef] = Field(default_factory=list)
+
+
+class RoleAssignmentRef(WireModel):
+    """One role's model choice; ``modelId: null`` means ``auto``."""
+
+    role: str
+    model_id: str | None = None
+
+
+class AssignmentResponse(WireModel):
+    """The workspace default plus one entry per assignable role."""
+
+    default_model_id: str | None = None
+    roles: list[RoleAssignmentRef] = Field(default_factory=list)
+
+
+class AssignmentUpdateRequest(WireModel):
+    """Body of ``PUT /api/catalog/assignments/{role}``; ``null`` means ``auto``."""
+
+    model_id: str | None = None
+
+
+# --- agent runs (harness V1) ------------------------------------------------
+
+
+class AgentRunNode(WireModel):
+    """One node of a session's run tree (spec v2 §7): main → PR → sub-agent."""
+
+    id: uuid.UUID
+    session_id: uuid.UUID
+    target_id: uuid.UUID | None = None
+    parent_run_id: uuid.UUID | None = None
+    level: str
+    role: str
+    model_id: str | None = None
+    objective: str
+    status: str
+    tokens: int
+    cost_usd: float
+    started_at: dt.datetime | None = None
+    ended_at: dt.datetime | None = None
+    error: str | None = None
+    children: list[AgentRunNode] = Field(default_factory=list)
+
+
+class AgentRunTreeResponse(WireModel):
+    """The roots of a session's run tree; normally just the session's main run."""
+
+    runs: list[AgentRunNode] = Field(default_factory=list)
+
+
+class AgentEventItem(WireModel):
+    """One persisted run event, as the replay endpoint and the SSE stream carry it."""
+
+    id: uuid.UUID
+    run_id: uuid.UUID
+    parent_run_id: uuid.UUID | None = None
+    seq: int
+    type: str
+    payload: dict[str, Any]
+    created_at: dt.datetime
+
+
+class AgentEventPage(WireModel):
+    """A page of a run's events; ``next_seq`` is the cursor for the next call."""
+
+    items: list[AgentEventItem] = Field(default_factory=list)
+    next_seq: int | None = None

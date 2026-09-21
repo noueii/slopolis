@@ -21,6 +21,8 @@ import type {
   RepositoryRef,
   RepositoryPullRequestsResponse,
   RepositorySummary,
+  RepositoryUpdate,
+  RequiredAccess,
   ReviewPresetCatalog,
   ReviewSession,
 } from "@/api/contract"
@@ -76,6 +78,36 @@ function repoId(fullName: string): string {
   return `repo_${fullName.replace(/[^a-z0-9]/gi, "_")}`
 }
 
+/**
+ * Repositories the workspace has switched off (spec 10.1). They stay listed and
+ * keep their history; pre-flight refuses their pull requests. Seeded so the
+ * parked state is visible without clicking anything, and mutable so the mock's
+ * PATCH behaves like the real switch.
+ */
+const parkedRepositories = new Set(
+  REPOS.filter((_repo, index) => index % 5 === 2).map((repo) => repo.fullName),
+)
+
+/** The only values the API accepts for `requiredAccess` (spec 10.10). */
+const REQUIRED_ACCESS_VALUES: readonly RequiredAccess[] = [
+  "default",
+  "read",
+  "write",
+]
+
+/**
+ * Per-repository triggering rules (spec 10.10), keyed by full name. Seeded so
+ * the override is visible without clicking anything: every seventh repository
+ * loosens to read, every third tightens to write, the rest keep the spec rule.
+ * Mutable so the mock's PATCH behaves like the real switch.
+ */
+const requiredAccessByRepo: Record<string, RequiredAccess> = Object.fromEntries(
+  REPOS.map((repo, index) => [
+    repo.fullName,
+    index % 7 === 3 ? "read" : index % 3 === 1 ? "write" : "default",
+  ]),
+)
+
 function buildRepositories(now = Date.now()): RepositorySummary[] {
   return REPOS.map((repo, index) => ({
     id: repoId(repo.fullName),
@@ -84,7 +116,11 @@ function buildRepositories(now = Date.now()): RepositorySummary[] {
     defaultBranch: index % 5 === 0 ? "develop" : "main",
     openPrCount: OPEN_PULL_REQUESTS.get(repo.fullName)?.length ?? 0,
     lastActivityAt: new Date(now - (index + 1) * (37 * 60 * 1000)).toISOString(),
+    // Seeded policies keep the override visible in the mock app: every third
+    // repository tightens to write, every seventh loosens to read.
+    requiredAccess: requiredAccessByRepo[repo.fullName] ?? "default",
     connected: true,
+    enabled: !parkedRepositories.has(repo.fullName),
   }))
 }
 
@@ -290,6 +326,14 @@ function resolvePreflight(prUrls: string[]): PreflightResult {
       continue
     }
 
+    if (parkedRepositories.has(repo.fullName)) {
+      invalid.push(parsed.url)
+      notices.push(
+        `Repository ${repo.fullName} is disabled in slopolis, so its pull requests are not reviewed. Enable it under Repositories to review them again.`,
+      )
+      continue
+    }
+
     const generated = OPEN_PULL_REQUESTS.get(repo.fullName)?.find(
       (pull) => pull.number === parsed.number,
     )
@@ -388,6 +432,68 @@ export const dashboardHandlers = [
     }
     const items = scenarioOf(request) === "empty" ? [] : buildRepositories()
     return HttpResponse.json({ items })
+  }),
+
+  http.patch(`${API_BASE}/repositories/:id`, async ({ request, params }) => {
+    await latency(request)
+    if (scenarioOf(request) === "error") {
+      return errorResponse(
+        500,
+        "repository_update_failed",
+        "Could not update the repository.",
+      )
+    }
+    const body = (await request.json()) as RepositoryUpdate
+    if (body.enabled === undefined && body.requiredAccess === undefined) {
+      return errorResponse(
+        422,
+        "repository_update_empty",
+        "Provide the parked state to set the repository to, its review access rule, or both.",
+      )
+    }
+    if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
+      return errorResponse(
+        422,
+        "enabled_required",
+        "Provide the parked state to set the repository to as a boolean.",
+      )
+    }
+    if (
+      body.requiredAccess !== undefined &&
+      !REQUIRED_ACCESS_VALUES.includes(body.requiredAccess)
+    ) {
+      return errorResponse(
+        422,
+        "required_access_invalid",
+        "Review access must be default, read, or write.",
+      )
+    }
+    const repository = buildRepositories().find(
+      (item) => item.id === String(params.id),
+    )
+    if (!repository) {
+      return errorResponse(
+        404,
+        "repository_not_found",
+        "The repository is not connected to this workspace.",
+      )
+    }
+    if (body.enabled !== undefined) {
+      if (body.enabled) {
+        parkedRepositories.delete(repository.fullName)
+      } else {
+        parkedRepositories.add(repository.fullName)
+      }
+    }
+    if (body.requiredAccess !== undefined) {
+      requiredAccessByRepo[repository.fullName] = body.requiredAccess
+    }
+    // Both switches are read back out of the stores, so the response is what a
+    // later GET serves rather than what this request happened to send.
+    const updated =
+      buildRepositories().find((item) => item.id === repository.id) ??
+      repository
+    return HttpResponse.json(updated)
   }),
 
   http.get(

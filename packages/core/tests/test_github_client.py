@@ -13,19 +13,25 @@ from typing import Any
 import httpx
 import pytest
 import respx
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from githubkit import GitHub, TokenAuthStrategy
+from githubkit.auth import AppAuthStrategy
 from githubkit_schemas.latest.models import (  # pyright: ignore[reportMissingTypeStubs]
+    CheckRun,
     ContentFile,
     DiffEntry,
     FullRepository,
+    Installation,
     PullRequest,
     RepositoryCollaboratorPermission,
+    ReposOwnerRepoCommitsRefCheckRunsGetResponse200,
 )
 from test_github_helpers import fixture
 
 from slopolis_core.github.auth import InstallationAuth
 from slopolis_core.github.client import GitHubClient
-from slopolis_core.github.errors import GitHubNotFoundError
+from slopolis_core.github.errors import GitHubAuthError, GitHubNotFoundError
 from slopolis_core.github.limits import MAX_FILE_BYTES
 
 _BASE = "https://api.github.com"
@@ -33,12 +39,34 @@ _REPO = "acme/widget"
 _OWNER, _NAME = _REPO.split("/")
 _TOKEN = "ghs_test"
 _PULL_URL = "https://github.com/acme/widget/pull/7"
+#: App-JWT reads need a real App id: githubkit caches one JWT per issuer.
+_APP_ID = 5017401
+_INSTALLATION_ID = 555
 
 
 def _client() -> GitHubClient:
     return GitHubClient(
         GitHub(TokenAuthStrategy(_TOKEN)),
         auth=InstallationAuth.from_installation_token(_TOKEN),
+    )
+
+
+def _installation_client() -> GitHubClient:
+    """A client that also holds the App credentials ``from_app`` retains.
+
+    githubkit caches one JWT per issuer in a process-wide cache, so the App id is
+    unique to this module.
+    """
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+    return GitHubClient(
+        GitHub(TokenAuthStrategy(_TOKEN)),
+        auth=InstallationAuth(installation_id=_INSTALLATION_ID, token=_TOKEN),
+        app_client=GitHub(AppAuthStrategy(_APP_ID, pem), rest_api_validate_body=False),
     )
 
 
@@ -178,14 +206,58 @@ async def test_list_changed_paths_returns_ordered_paths(respx_mock: respx.Router
     assert paths == ["a.py", "b.py", "c.py"]
 
 
+@respx.mock(base_url=_BASE)
+async def test_list_check_runs_returns_the_head_commits_runs(
+    respx_mock: respx.Router,
+) -> None:
+    """Given a commit with two check runs, both are returned with their conclusion."""
+    respx_mock.get(f"/repos/{_OWNER}/{_NAME}/commits/headsha/check-runs").mock(
+        return_value=httpx.Response(
+            200,
+            json=fixture(
+                ReposOwnerRepoCommitsRefCheckRunsGetResponse200,
+                total_count=2,
+                check_runs=[
+                    fixture(
+                        CheckRun,
+                        name="ci",
+                        status="completed",
+                        conclusion="failure",
+                    ),
+                    fixture(
+                        CheckRun,
+                        name="lint",
+                        status="completed",
+                        conclusion="success",
+                    ),
+                ],
+            ),
+        )
+    )
+
+    runs = await _client().list_check_runs(_REPO, "headsha")
+
+    assert [(run.name, run.status, run.conclusion) for run in runs] == [
+        ("ci", "completed", "failure"),
+        ("lint", "completed", "success"),
+    ]
+
+
 @pytest.mark.parametrize(
-    ("private", "permission", "expected"),
+    ("private", "permission", "required", "expected"),
     [
-        (False, "read", False),
-        (False, "write", True),
-        (True, "read", True),
-        (True, "none", False),
-        (False, None, False),
+        (False, "read", None, False),
+        (False, "write", None, True),
+        (True, "read", None, True),
+        (True, "none", None, False),
+        (False, None, None, False),
+        # An override loosens a public repo from write to read.
+        (False, "read", "read", True),
+        (False, "none", "read", False),
+        # An override tightens a private repo from read to write.
+        (True, "read", "write", False),
+        (True, "write", "write", True),
+        (True, "admin", "write", True),
     ],
 )
 @respx.mock(base_url=_BASE)
@@ -193,11 +265,59 @@ async def test_user_can_trigger_policy(
     respx_mock: respx.Router,
     private: bool,
     permission: str | None,
+    required: str | None,
     expected: bool,
 ) -> None:
     """Given a privacy/permission pair, the trigger policy matches spec §4."""
     _mock_permission(respx_mock, permission)
 
-    allowed = await _client().user_can_trigger(_REPO, private=private, user_login="alice")
+    allowed = await _client().user_can_trigger(
+        _REPO, private=private, user_login="alice", required=required
+    )
 
     assert allowed is expected
+
+
+@respx.mock(base_url=_BASE)
+async def test_user_can_trigger_rejects_an_unknown_level(
+    respx_mock: respx.Router,
+) -> None:
+    """Given a required level outside the literals, it fails before any call."""
+    with pytest.raises(ValueError, match="required must be"):
+        await _client().user_can_trigger(
+            _REPO, private=False, user_login="alice", required="admin"
+        )
+
+    assert len(respx_mock.calls) == 0
+
+
+@respx.mock(base_url=_BASE)
+async def test_installation_permissions_returns_the_granted_scopes(
+    respx_mock: respx.Router,
+) -> None:
+    """Given an installation granting three scopes, only those are reported."""
+    body = fixture(Installation, id=_INSTALLATION_ID)
+    # GitHub omits what it did not grant, so the payload is not schema-complete.
+    body["permissions"] = {"pull_requests": "write", "issues": "read", "metadata": "read"}
+    respx_mock.get(f"/app/installations/{_INSTALLATION_ID}").mock(
+        return_value=httpx.Response(200, json=body)
+    )
+
+    permissions = await _installation_client().installation_permissions()
+
+    assert permissions == {
+        "pull_requests": "write",
+        "issues": "read",
+        "metadata": "read",
+    }
+
+
+@respx.mock(base_url=_BASE)
+async def test_installation_permissions_without_app_credentials_send_no_request(
+    respx_mock: respx.Router,
+) -> None:
+    """Given a client holding only an installation token, the read is refused."""
+    with pytest.raises(GitHubAuthError, match="installation permissions need"):
+        await _client().installation_permissions()
+
+    assert len(respx_mock.calls) == 0

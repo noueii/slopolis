@@ -195,8 +195,8 @@ class FakeGateway:
         self.permissions = (
             permissions if permissions is not None else dict(WRITE_PERMISSIONS)
         )
-        #: The access override pre-flight asked each repo's check for (spec 10.10).
-        self.access_calls: list[tuple[str, str | None]] = []
+        #: The repositories whose access pre-flight checked (spec 10.2).
+        self.access_calls: list[tuple[str, bool, str]] = []
 
     async def resolve_pr(self, url: str) -> PrReference:
         if url not in self.refs:
@@ -212,9 +212,8 @@ class FakeGateway:
         *,
         private: bool,
         user_login: str,
-        required: str | None = None,
     ) -> bool:
-        self.access_calls.append((repo_full_name, required))
+        self.access_calls.append((repo_full_name, private, user_login))
         return self.access
 
     async def read_repo_file(self, repo_full_name: str, path: str) -> str | None:
@@ -233,14 +232,10 @@ class FakeWorkspace:
         model: tuple[str, str] | None = ("claude-sonnet-4", "Anthropic"),
         credential: bool = True,
         assigned: tuple[str, str] | None = None,
-        access: str | None = None,
     ) -> None:
         self.model = model
         self.credential = credential
         self.assigned = assigned
-        #: The repository access override this workspace reports, if any.
-        self.access = access
-        self.access_calls: list[str] = []
 
     async def default_model(self) -> tuple[str, str] | None:
         return self.model
@@ -250,10 +245,6 @@ class FakeWorkspace:
 
     async def model_assigned(self, role: str) -> tuple[str, str] | None:
         return self.assigned if self.assigned is not None else self.model
-
-    async def required_access(self, repo_full_name: str) -> str | None:
-        self.access_calls.append(repo_full_name)
-        return self.access
 
 
 class FakeAppInstallations:

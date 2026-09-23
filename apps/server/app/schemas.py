@@ -17,7 +17,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.config import CAMEL
 from app.retry_actions import RetryAction
 from slopolis_core.domain import SessionStatus, TargetStatus
-from slopolis_db.models.github import RequiredAccess
 
 __all__ = [
     "AgentEventItem",
@@ -61,7 +60,6 @@ __all__ = [
     "RepositoryListResponse",
     "RepositoryRef",
     "RepositorySummary",
-    "RequiredAccess",
     "RetryAction",
     "RetryRequest",
     "ReviewPreset",
@@ -297,8 +295,6 @@ class RepositorySummary(WireModel):
     connected: bool
     #: The workspace switch: a connected repository can be parked without losing its history.
     enabled: bool = True
-    #: The access policy pre-flight applies to this repository (spec 10.10).
-    required_access: RequiredAccess = "default"
 
 
 class RepositoryListResponse(WireModel):

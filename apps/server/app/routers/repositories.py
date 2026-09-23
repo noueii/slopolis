@@ -27,10 +27,9 @@ import datetime as dt
 import logging
 import uuid
 from collections.abc import Sequence
-from typing import Any
 
 from fastapi import APIRouter, Request
-from pydantic import ConfigDict, model_validator
+from pydantic import ConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,7 +50,6 @@ from app.routers._pull_reads import (
 from app.schemas import (
     RepositoryListResponse,
     RepositorySummary,
-    RequiredAccess,
     WireModel,
 )
 from app.services.github_clients import WorkspaceRepositories
@@ -114,17 +112,7 @@ class RepositoryUpdateRequest(WireModel):
         extra="forbid",
     )
 
-    enabled: bool | None = None
-    #: The access override pre-flight applies (spec 10.10); the three literals
-    #: are the whole vocabulary, so anything else is a 422.
-    required_access: RequiredAccess | None = None
-
-    @model_validator(mode="after")
-    def _at_least_one_switch(self) -> RepositoryUpdateRequest:
-        """Refuse a body that carries no switch at all."""
-        if self.enabled is None and self.required_access is None:
-            raise ValueError("supply enabled and/or requiredAccess")
-        return self
+    enabled: bool
 
 
 @router.patch("/{repository_id}")
@@ -137,15 +125,14 @@ async def update_repository(
     repositories: WorkspaceRepositoriesDep,
     user: CurrentUserDep,
 ) -> RepositorySummary:
-    """Park, re-enable, or re-policy one repository, returning its summary.
+    """Park or re-enable one repository, returning its summary.
 
     Parking is how a workspace stops reviewing a repository GitHub still grants:
     the row — and with it every session and finding in its history — stays, and
-    pre-flight refuses its pull requests. ``requiredAccess`` is the other
-    per-repository decision (spec 10.10): the access rule pre-flight applies to
-    its pull requests. Both switches are audited independently, and a field left
-    as it already is changes nothing (no write, no audit row, same body), so
-    retrying a toggle is safe. Another workspace's id is a 404.
+    pre-flight refuses its pull requests. The transition is audited, and a body
+    naming the state the row already has changes nothing (no write, no audit
+    row, same summary), so retrying a toggle is safe. Another workspace's id is a
+    404.
     """
     row = await db.scalar(
         select(Repository).where(
@@ -160,8 +147,7 @@ async def update_repository(
             "The repository is not connected to this workspace.",
         )
 
-    changed = False
-    if body.enabled is not None and row.enabled != body.enabled:
+    if row.enabled != body.enabled:
         row.enabled = body.enabled
         _audit(
             db,
@@ -171,20 +157,6 @@ async def update_repository(
             target_type="repository",
             target_id=row.id,
         )
-        changed = True
-    if body.required_access is not None and row.required_access != body.required_access:
-        row.required_access = body.required_access
-        _audit(
-            db,
-            workspace_id=workspace_id,
-            actor_id=user.id,
-            action="repository.access_updated",
-            target_type="repository",
-            target_id=row.id,
-            detail={"requiredAccess": row.required_access},
-        )
-        changed = True
-    if changed:
         await db.commit()
         await db.refresh(row)
 
@@ -201,7 +173,6 @@ def _audit(
     action: str,
     target_type: str,
     target_id: uuid.UUID | None = None,
-    detail: dict[str, Any] | None = None,
 ) -> None:
     """Stage one audit row for the caller to commit with its mutation."""
     db.add(
@@ -211,7 +182,6 @@ def _audit(
             action=action,
             target_type=target_type,
             target_id=target_id,
-            detail=detail,
         )
     )
 
@@ -338,49 +308,4 @@ def _summary_from_row(row: Repository, *, open_pr_count: int = 0) -> RepositoryS
         last_activity_at=activity,
         connected=row.connected,
         enabled=row.enabled,
-        required_access=row.required_access,
-    )
-
-
-def _checks_rollup(runs: Sequence[CheckRun]) -> PullRequestChecks:
-    """Roll a head commit's check runs up into the CI hint the picker shows."""
-    passing = sum(1 for run in runs if run.conclusion in _PASSING_CONCLUSIONS)
-    if any(run.conclusion in _FAILING_CONCLUSIONS for run in runs):
-        state = "failing"
-    elif any(run.status != "completed" for run in runs):
-        state = "pending"
-    elif runs:
-        state = "passing"
-    else:
-        state = "none"
-    return PullRequestChecks(state=state, total=len(runs), passing=passing)
-
-
-def _open_pull_request(
-    pull: GitHubPullRequest, *, checks: PullRequestChecks
-) -> OpenPullRequest:
-    """Map one GitHub pull request onto the selection-surface shape."""
-    return OpenPullRequest(
-        id=f"pr_{pull.repo_full_name.replace('/', '_')}_{pull.number}",
-        repository=RepositoryRef(
-            id=f"repo_{pull.repo_full_name.lower().replace('/', '_')}",
-            full_name=pull.repo_full_name,
-            private=pull.private,
-            default_branch=pull.default_branch,
-        ),
-        number=pull.number,
-        title=pull.title,
-        url=pull.url,
-        author=UserRef(
-            id=f"usr_{pull.author_login}",
-            handle=pull.author_login,
-            name=pull.author_login,
-        ),
-        updated_at=pull.updated_at,
-        draft=pull.draft,
-        comments=0,
-        changed_files=pull.changed_files,
-        additions=pull.additions,
-        deletions=pull.deletions,
-        checks=checks,
     )

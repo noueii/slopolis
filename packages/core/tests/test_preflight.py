@@ -52,7 +52,7 @@ class FakeGateway:
         self.covered = covered if covered is not None else ["acme/api", "acme/web"]
         self.access = access
         self.files = files or {}
-        self.access_calls: list[tuple[str, bool, str, str | None]] = []
+        self.access_calls: list[tuple[str, bool, str]] = []
         #: What the installation was granted; fully scoped unless a test says not.
         self.permissions = (
             permissions if permissions is not None else dict(_WRITE_PERMISSIONS)
@@ -74,9 +74,8 @@ class FakeGateway:
         *,
         private: bool,
         user_login: str,
-        required: str | None = None,
     ) -> bool:
-        self.access_calls.append((repo_full_name, private, user_login, required))
+        self.access_calls.append((repo_full_name, private, user_login))
         if self.access is None:
             return True
         return repo_full_name in self.access
@@ -97,11 +96,9 @@ class FakeWorkspace:
         *,
         model: tuple[str, str] | None = ("gpt-4o", "litellm"),
         credential: bool = True,
-        required: dict[str, str] | None = None,
     ) -> None:
         self.model = model
         self.credential = credential
-        self.required = required or {}
 
     async def default_model(self) -> tuple[str, str] | None:
         return self.model
@@ -112,9 +109,6 @@ class FakeWorkspace:
     async def model_assigned(self, role: str) -> tuple[str, str] | None:
         assert role == "review"
         return self.model
-
-    async def required_access(self, repo_full_name: str) -> str | None:
-        return self.required.get(repo_full_name)
 
 
 class FakeLiveCheck:
@@ -198,27 +192,7 @@ async def test_access_denied_is_invalid_with_actionable_notice() -> None:
 
     assert outcome.invalid == [ref.url]
     assert any("private repos need read access" in note for note in outcome.notices)
-    assert gateway.access_calls == [("acme/api", True, _USER, None)]
-
-
-@pytest.mark.parametrize(("private", "required"), [(False, "read"), (True, "write")])
-async def test_access_override_is_passed_and_named(private: bool, required: str) -> None:
-    """Given a repository override, pre-flight passes it and names it on refusal."""
-    ref = _ref(private=private)
-    gateway = FakeGateway(refs={ref.url: ref}, access=set())
-    service, _ = _service(
-        gateway, workspace=FakeWorkspace(required={"acme/api": required})
-    )
-
-    outcome = await service.run(PreflightRequest(pr_urls=[ref.url]), user_login=_USER)
-
-    assert outcome.invalid == [ref.url]
-    assert gateway.access_calls == [("acme/api", private, _USER, required)]
-    assert any(
-        f"this repository requires {required} access" in note
-        for note in outcome.notices
-    )
-    assert not any("private repos need read access" in note for note in outcome.notices)
+    assert gateway.access_calls == [("acme/api", True, _USER)]
 
 
 # --- publish prerequisites (spec 10.3) --------------------------------------

@@ -169,7 +169,6 @@ const connectedRepository = {
   lastActivityAt: "2026-09-21T08:00:00.000Z",
   connected: true,
   enabled: true,
-  requiredAccess: "default" as const,
 }
 
 beforeEach(() => {

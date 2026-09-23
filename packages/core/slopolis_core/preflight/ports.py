@@ -35,7 +35,6 @@ class GitHubGateway(Protocol):
         *,
         private: bool,
         user_login: str,
-        required: str | None = None,
     ) -> bool: ...
 
     async def read_repo_file(self, repo_full_name: str, path: str) -> str | None: ...
@@ -59,21 +58,13 @@ class GitHubGateway(Protocol):
 
 @runtime_checkable
 class WorkspaceConfigProvider(Protocol):
-    """Workspace model assignment, credential state, and access policy."""
+    """Workspace model assignment and credential state."""
 
     async def default_model(self) -> tuple[str, str] | None: ...
 
     async def credential_ready(self) -> bool: ...
 
     async def model_assigned(self, role: str) -> tuple[str, str] | None: ...
-
-    async def required_access(self, repo_full_name: str) -> str | None:
-        """Return the repository's access override, if any.
-
-        ``None`` means the spec rule applies (private repos need read, public
-        repos need write); ``"read"``/``"write"`` overrides it.
-        """
-        ...
 
 
 @runtime_checkable

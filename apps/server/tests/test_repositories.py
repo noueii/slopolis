@@ -436,99 +436,25 @@ async def test_parking_another_workspaces_repository_is_404(
         assert await session.scalar(select(AuditLog).limit(1)) is None
 
 
-# --- the access override (spec 10.10) ---------------------------------------
+# --- the update body --------------------------------------------------------
 
 
-async def test_summaries_carry_the_repository_access_override(
-    seeded: Any, build_harness: Any
-) -> None:
-    # Given a connected repository on the spec rule
-    client = FakeGitHubClient()
-    harness: ApiHarness = await build_harness(
-        user_id=seeded.user_id, github_client=client
-    )
-    listed = await harness.client.get("/api/repositories")
-    assert listed.json()["items"][0]["requiredAccess"] == "default"
-
-    # When the override is tightened to write
-    patched = await harness.client.patch(
-        f"/api/repositories/{seeded.repository_id}", json={"requiredAccess": "write"}
-    )
-
-    # Then the toggle answers with the new policy...
-    assert patched.status_code == 200
-    assert patched.json()["requiredAccess"] == "write"
-    # ...every later listing carries it...
-    again = await harness.client.get("/api/repositories")
-    assert again.json()["items"][0]["requiredAccess"] == "write"
-
-
-async def test_the_access_override_and_the_enable_switch_are_audited_apart(
+async def test_a_body_without_the_switch_is_refused(
     seeded: Any, session_factory: Any, build_harness: Any
 ) -> None:
-    # Given a connected, enabled repository
+    # Given a connected repository
     harness: ApiHarness = await build_harness(user_id=seeded.user_id)
 
-    # When the access override is loosened
+    # When a body omits ``enabled``, which leaves the endpoint nothing to do
     response = await harness.client.patch(
-        f"/api/repositories/{seeded.repository_id}", json={"requiredAccess": "read"}
-    )
-
-    # Then exactly that change is recorded, with its new value, and parking is
-    # left alone
-    assert response.status_code == 200
-    async with session_factory() as session:
-        audits = list((await session.scalars(select(AuditLog))).all())
-        row = await session.get(Repository, seeded.repository_id)
-    assert [(audit.action, audit.target_id) for audit in audits] == [
-        ("repository.access_updated", seeded.repository_id)
-    ]
-    assert audits[0].detail == {"requiredAccess": "read"}
-    assert audits[0].actor_user_id == seeded.user_id
-    assert row is not None and row.required_access == "read" and row.enabled is True
-
-    # And one body may carry both switches, each audited on its own
-    both = await harness.client.patch(
-        f"/api/repositories/{seeded.repository_id}",
-        json={"enabled": False, "requiredAccess": "default"},
-    )
-    assert both.status_code == 200
-    assert both.json()["enabled"] is False
-    assert both.json()["requiredAccess"] == "default"
-    async with session_factory() as session:
-        actions = [
-            audit.action for audit in (await session.scalars(select(AuditLog))).all()
-        ]
-    assert actions == [
-        "repository.access_updated",
-        "repository.disabled",
-        "repository.access_updated",
-    ]
-
-
-async def test_an_unknown_access_override_is_refused(
-    seeded: Any, session_factory: Any, build_harness: Any
-) -> None:
-    # Given a connected repository on the spec rule
-    harness: ApiHarness = await build_harness(user_id=seeded.user_id)
-
-    # When an access value outside the three literals is sent
-    response = await harness.client.patch(
-        f"/api/repositories/{seeded.repository_id}", json={"requiredAccess": "admin"}
-    )
-
-    # Then it is a validation failure...
-    assert response.status_code == 422
-    assert response.json()["error"]["code"] == "validation_error"
-
-    # ...and so is a body carrying neither switch, which has nothing to do
-    empty = await harness.client.patch(
         f"/api/repositories/{seeded.repository_id}", json={}
     )
-    assert empty.status_code == 422
 
-    # ...while the row stays exactly as it was, with nothing audited
+    # Then it is a validation failure, and the row stays exactly as it was,
+    # with nothing audited
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
     async with session_factory() as session:
         row = await session.get(Repository, seeded.repository_id)
-        assert row is not None and row.required_access == "default"
+        assert row is not None and row.enabled is True
         assert await session.scalar(select(AuditLog).limit(1)) is None

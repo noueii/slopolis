@@ -1,7 +1,7 @@
 """Synchronous pre-flight validation pipeline (spec 10.3).
 
 Runs on submit, before any session is created. It parses and dedupes links,
-resolves each PR, checks repo coverage and access policy, checks the
+resolves each PR, checks repo coverage and trigger access, checks the
 installation may write what publishing needs, verifies the workspace has an
 assigned model and a ready credential, performs a single cached live model
 check, and validates ``.codereview.yml``.
@@ -35,20 +35,11 @@ __all__ = ["PreflightService"]
 _REPO_CONFIG_PATH = ".codereview.yml"
 
 
-def _access_refusal(full_name: str, required: str | None) -> str:
-    """The refusal notice for a denied trigger, naming what was required.
-
-    ``required`` is the repository's override; when one is in force the notice
-    states it plainly instead of restating the spec rule (spec 10.10).
-    """
-    if required is None:
-        return (
-            f"You lack the required access to {full_name}; "
-            "private repos need read access, public repos need write access."
-        )
+def _access_refusal(full_name: str) -> str:
+    """The refusal notice for a denied trigger, naming the spec rule."""
     return (
         f"You lack the required access to {full_name}; "
-        f"this repository requires {required} access."
+        "private repos need read access, public repos need write access."
     )
 
 
@@ -221,16 +212,14 @@ class PreflightService:
             )
             return
 
-        required = await context.workspace.required_access(full_name)
         has_access = await context.gateway.user_has_access(
             full_name,
             private=reference.repository.private,
             user_login=context.user_login,
-            required=required,
         )
         if not has_access:
             state.invalid.append(url)
-            state.notices.append(_access_refusal(full_name, required))
+            state.notices.append(_access_refusal(full_name))
             return
 
         if not await self._check_publish_permissions(full_name, context):

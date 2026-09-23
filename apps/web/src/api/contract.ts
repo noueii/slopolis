@@ -199,14 +199,6 @@ export interface SessionStats {
   costUsd: number
 }
 
-/**
- * Per-repository override of the triggering access rule (spec 10.10):
- * `default` = the spec rule (private repos need read, public repos need write);
- * `read` = loosened (any read access is enough); `write` = tightened (write
- * access is required).
- */
-export type RequiredAccess = "default" | "read" | "write"
-
 /** A repository connected through the GitHub App installation (spec 10.1). */
 export interface RepositorySummary {
   id: string
@@ -224,8 +216,6 @@ export interface RepositorySummary {
    * with its history, but pre-flight refuses its pull requests.
    */
   enabled: boolean
-  /** Access policy pre-flight applies to this repository (spec 10.10). */
-  requiredAccess: RequiredAccess
 }
 
 export interface RepositoryListResponse {
@@ -233,12 +223,12 @@ export interface RepositoryListResponse {
 }
 
 /**
- * `PATCH /api/repositories/{id}` body. Omitted fields stay as they are; the
- * two switches are audited independently of one another (spec 10.1 / 10.10).
+ * `PATCH /api/repositories/{id}` body: the parking switch (spec 10.1). A
+ * disabled repository stays listed with its history, but pre-flight refuses its
+ * pull requests.
  */
 export interface RepositoryUpdate {
-  enabled?: boolean
-  requiredAccess?: RequiredAccess
+  enabled: boolean
 }
 
 /** Rolled-up CI status for an open pull request. */

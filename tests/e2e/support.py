@@ -105,9 +105,9 @@ class FakeGitHub:
     def __init__(self, *, config_text: str | None = REPO_CONFIG_YML) -> None:
         self.config_text = config_text
         self.resolved_urls: list[str] = []
-        #: One entry per access check: the repository, its visibility, the user,
-        #: and the override pre-flight resolved for it (``None`` = spec rule).
-        self.checked_access: list[tuple[str, bool, str, str | None]] = []
+        #: One entry per access check: the repository, its visibility, and the
+        #: user pre-flight asked about.
+        self.checked_access: list[tuple[str, bool, str]] = []
 
     # --- app.adapters.github.GitHubGateway port (pre-flight) ----------------
 
@@ -138,10 +138,9 @@ class FakeGitHub:
         *,
         private: bool,
         user_login: str,
-        required: str | None = None,
     ) -> bool:
         """The triggering user may review the covered repository."""
-        self.checked_access.append((repo_full_name, private, user_login, required))
+        self.checked_access.append((repo_full_name, private, user_login))
         return repo_full_name == REPO_FULL_NAME
 
     async def read_repo_file(self, repo_full_name: str, path: str) -> str | None:

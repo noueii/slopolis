@@ -319,14 +319,12 @@ class GitHubClient:
         *,
         private: bool,
         user_login: str,
-        required: str | None = None,
     ) -> bool:
         """Return whether ``user_login`` may trigger a review (spec overview §4).
 
-        Public repos require **write**; private repos require **read**, unless a
-        workspace override (spec 10.10) names the level. Any auth failure fails
-        closed (``False``).
+        Public repos require **write**; private repos require **read**. Any auth
+        failure fails closed (``False``).
         """
         return await self._repo_reads.user_can_trigger(
-            repo_full_name, private=private, user_login=user_login, required=required
+            repo_full_name, private=private, user_login=user_login
         )

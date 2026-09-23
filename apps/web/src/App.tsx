@@ -112,11 +112,7 @@ export default function App() {
   } else if (route.id === "providers") {
     content = <ProvidersScreen />
   } else if (route.id === "settings") {
-    content = (
-      <SettingsScreen
-        onOpenRepositories={() => navigate({ kind: "nav", id: "repositories" })}
-      />
-    )
+    content = <SettingsScreen />
   } else if (route.id === "templates") {
     content = <TemplatesScreen />
   } else {

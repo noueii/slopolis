@@ -304,9 +304,9 @@ export const api = {
   },
 
   /**
-   * Update a repository's workspace switches (spec 10.1 / 10.10): park or
-   * re-enable it, set its access policy override, or both at once. A parked
-   * repository keeps its sessions and findings and is refused at pre-flight.
+   * Update a repository's workspace switch (spec 10.1): park or re-enable it.
+   * A parked repository keeps its sessions and findings and is refused at
+   * pre-flight.
    */
   updateRepository(
     repositoryId: string,

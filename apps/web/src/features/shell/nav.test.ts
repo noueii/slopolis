@@ -13,7 +13,7 @@ describe("nav information architecture", () => {
 
     const workspace = NAV_ITEMS.filter((item) => item.group === "Workspace")
     expect(workspace.map((item) => item.id)).toEqual([
-      "dashboard",
+      "pullRequests",
       "sessions",
       "repositories",
       "usage",

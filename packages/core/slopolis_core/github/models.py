@@ -43,6 +43,9 @@ class GitHubPullRequest(BaseModel):
     additions: int
     deletions: int
     updated_at: str
+    #: When the pull request was opened. The inbox's ``created_desc`` sort orders
+    #: on it (spec v3 §3); empty for a caller that never mapped it.
+    created_at: str = ""
 
 
 class GitHubRepository(BaseModel):

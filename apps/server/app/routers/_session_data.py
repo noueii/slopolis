@@ -2,14 +2,14 @@
 
 Sessions are loaded with their targets, repositories, findings, and triggering
 user in one round trip. This module owns the eager-loading strategy and the
-per-target aggregate computation so the sessions and dashboard routers stay
+per-target aggregate computation so the sessions and inbox routers stay
 focused on shaping responses.
 
 It also owns the per-viewer read filter (spec 10.8 §Access): workspace membership
 does not imply repository access, so every session read narrows its targets to the
 repositories the *viewer* can read. The rule lives here, once, so the session
-list, the dashboard, the session detail, and the run-tree endpoints cannot drift
-apart on who may see what.
+list, the pull-request inbox, the session detail, and the run-tree endpoints
+cannot drift apart on who may see what.
 """
 
 from __future__ import annotations

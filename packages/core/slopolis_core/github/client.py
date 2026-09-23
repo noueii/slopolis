@@ -170,6 +170,7 @@ class GitHubClient:
             additions=pull.additions or 0,
             deletions=pull.deletions or 0,
             updated_at=iso(pull.updated_at),
+            created_at=iso(pull.created_at),
         )
         self._cache.pulls[(repo_full_name, number)] = result
         return result
@@ -215,6 +216,17 @@ class GitHubClient:
         ]
         self._cache.checks[(repo_full_name, ref)] = runs
         return runs
+
+    @translate_errors
+    async def compare_commits(self, repo_full_name: str, base: str, head: str) -> int:
+        """Count the commits between two refs, from their merge base.
+
+        The inbox's staleness column asks how far a review is behind the pull
+        request head (spec v3 §2); a pair GitHub refuses raises
+        :class:`GitHubNotFoundError`, which the caller reports as an unknown
+        distance rather than a failure.
+        """
+        return await self._repo_reads.compare_commits(repo_full_name, base, head)
 
     @translate_errors
     async def list_changed_files(self, repo_full_name: str, number: int) -> list[ChangedFile]:

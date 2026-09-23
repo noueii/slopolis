@@ -471,6 +471,11 @@ async def _publish_attempt(
         repo_config=repo_config,
     )
     job.target.head_branch = plan.pull.head_branch
+    # ``reviewed_sha`` is deliberately left where the review attempt put it: the
+    # head read above is the commit the pull request sits at *now*, which is the
+    # commit this retry anchors its comments to, not the one the findings it is
+    # posting came from. Writing it here would report a stale review as current
+    # the moment someone pushed (spec v3 §2).
     inline = inline_targets(
         plan.result.findings,
         threshold=plan.repo_config.review.severity_threshold,
@@ -846,8 +851,19 @@ async def _persist_and_publish(
     surface the config asked for posted. The caller folds it into the node's
     summary, so a skipped check run is told apart from a publish that never
     happened.
+
+    Only ``_review_attempt`` reaches this function, which is what makes it the
+    one place a target's ``reviewed_sha`` may be written (spec v3 §2): a publish
+    retry posts a review that already exists and only re-reads the pull request
+    for a head to anchor its comments to, so a write from there would claim the
+    review covered commits it never read (see ``_publish_attempt``).
     """
     job.target.head_branch = plan.pull.head_branch
+    # The commit this review was run against, recorded in the same commit as the
+    # findings that came from it: an attempt that never produced a review fails
+    # before this commit and rolls back, so this column only ever names a review
+    # the app can read, and it names the one the row above persists (spec v3 §2).
+    job.target.reviewed_sha = plan.pull.head_sha
     inline = inline_targets(
         plan.result.findings,
         threshold=plan.repo_config.review.severity_threshold,

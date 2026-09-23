@@ -15,8 +15,8 @@ import {
   signInAttempted,
 } from "@/api/client"
 import type {
-  DashboardData,
   MeResponse,
+  PullRequestListResponse,
   ReviewSession,
   WorkspaceRef,
 } from "@/api/contract"
@@ -35,7 +35,7 @@ vi.mock("@/api/client", () => ({
     getMe: vi.fn(),
     listWorkspaces: vi.fn(),
     createWorkspace: vi.fn(),
-    getDashboard: vi.fn(),
+    listPullRequests: vi.fn(),
     listRepositories: vi.fn(),
     listPresets: vi.fn(),
     listModels: vi.fn(),
@@ -47,7 +47,6 @@ vi.mock("@/api/client", () => ({
     getTemplate: vi.fn(),
     createTemplate: vi.fn(),
     updateTemplate: vi.fn(),
-    listRepositoryPullRequests: vi.fn(),
     preflightReview: vi.fn(),
     createReviewSession: vi.fn(),
     getRunTree: vi.fn(),
@@ -86,18 +85,14 @@ const adminUser: MeResponse = {
   workspace,
 }
 
-const emptyDashboard: DashboardData = {
-  scope: "All repositories",
-  summary: {
-    scope: "All repositories",
-    totalSessions: 0,
-    running: 0,
-    failed: 0,
-    spendUsd: 0,
-    tokens: 0,
-  },
-  running: [],
-  recent: [],
+const emptyInbox: PullRequestListResponse = {
+  items: [],
+  page: 1,
+  pageSize: 25,
+  total: 0,
+  totalPages: 0,
+  summary: { total: 0, needsReview: 0, stale: 0, running: 0 },
+  filterOptions: { repositories: [], reviews: [], checks: [] },
   generatedAt: "2026-01-01T00:00:00.000Z",
 }
 
@@ -121,7 +116,7 @@ beforeEach(() => {
   vi.mocked(signInAttempted).mockReturnValue(false)
   vi.mocked(beginSignIn).mockResolvedValue({ started: true })
   vi.mocked(api.getMe).mockResolvedValue(adminUser)
-  vi.mocked(api.getDashboard).mockResolvedValue(emptyDashboard)
+  vi.mocked(api.listPullRequests).mockResolvedValue(emptyInbox)
   vi.mocked(api.listRepositories).mockResolvedValue({ items: [] })
   vi.mocked(api.listPresets).mockResolvedValue({
     defaultPresetId: "default",
@@ -141,7 +136,7 @@ afterEach(() => {
 describe("App navigation and focus intent", () => {
   it("does not expose a New Review nav item", async () => {
     render(<App />)
-    await screen.findByLabelText("Review focus")
+    await screen.findByLabelText("Search pull requests")
 
     expect(screen.queryByRole("button", { name: "New Review" })).toBeNull()
   })
@@ -149,7 +144,7 @@ describe("App navigation and focus intent", () => {
   it("hides the Admin group from non-admins", async () => {
     vi.mocked(api.getMe).mockResolvedValue({ ...adminUser, isAdmin: false })
     render(<App />)
-    await screen.findByLabelText("Review focus")
+    await screen.findByLabelText("Search pull requests")
 
     const sidebar = within(screen.getByRole("complementary"))
     expect(sidebar.getByText("Workspace")).toBeDefined()
@@ -160,23 +155,23 @@ describe("App navigation and focus intent", () => {
 
   it("shows the Admin group to admins", async () => {
     render(<App />)
-    await screen.findByLabelText("Review focus")
+    await screen.findByLabelText("Search pull requests")
 
     const sidebar = within(screen.getByRole("complementary"))
     expect(sidebar.getByText("Admin")).toBeDefined()
     expect(sidebar.getByText("Review templates")).toBeDefined()
   })
 
-  it("focuses the dashboard composer when New review is triggered", async () => {
+  it("focuses the inbox search when New review is triggered", async () => {
     render(<App />)
-    const composer = await screen.findByLabelText("Review focus")
-    expect(document.activeElement).not.toBe(composer)
+    const search = await screen.findByLabelText("Search pull requests")
+    expect(document.activeElement).not.toBe(search)
 
     fireEvent.click(screen.getByRole("button", { name: "New review" }))
 
     await waitFor(
       () => {
-        expect(document.activeElement).toBe(composer)
+        expect(document.activeElement).toBe(search)
       },
       { timeout: 2000 },
     )
@@ -195,7 +190,7 @@ describe("Sign-in gate", () => {
 
     await waitFor(() => expect(beginSignIn).toHaveBeenCalledTimes(1))
     expect(screen.queryByRole("complementary")).toBeNull()
-    expect(screen.queryByLabelText("Review focus")).toBeNull()
+    expect(screen.queryByLabelText("Search pull requests")).toBeNull()
   })
 
   it("leaves a tab that already came back unsigned on the gate", async () => {
@@ -232,7 +227,7 @@ describe("Workspace onboarding gate", () => {
     expect(await screen.findByLabelText("Workspace name")).toBeDefined()
     expect(screen.getByText("@noueii")).toBeDefined()
     expect(screen.getByRole("button", { name: "Check again" })).toBeDefined()
-    expect(screen.queryByLabelText("Review focus")).toBeNull()
+    expect(screen.queryByLabelText("Search pull requests")).toBeNull()
     expect(screen.queryByRole("complementary")).toBeNull()
   })
 
@@ -248,7 +243,7 @@ describe("Workspace onboarding gate", () => {
     fireEvent.change(input, { target: { value: "Acme Labs" } })
     fireEvent.click(screen.getByRole("button", { name: "Create workspace" }))
 
-    await screen.findByLabelText("Review focus")
+    await screen.findByLabelText("Search pull requests")
     expect(api.createWorkspace).toHaveBeenCalledWith("Acme Labs")
     expect(
       within(screen.getByRole("complementary")).getByText("Acme Labs"),
@@ -310,7 +305,7 @@ describe("URL routing", () => {
 
   it("records a sidebar destination in the URL", async () => {
     render(<App />)
-    await screen.findByLabelText("Review focus")
+    await screen.findByLabelText("Search pull requests")
 
     fireEvent.click(
       within(screen.getByRole("complementary")).getByText("Repositories"),
@@ -319,12 +314,12 @@ describe("URL routing", () => {
     await waitFor(() => expect(window.location.pathname).toBe("/repositories"))
   })
 
-  it("falls back to the dashboard for a path nothing owns", async () => {
+  it("falls back to the inbox for a path nothing owns", async () => {
     window.history.replaceState(null, "", "/nope/42")
 
     render(<App />)
 
-    await screen.findByLabelText("Review focus")
+    await screen.findByLabelText("Search pull requests")
     await waitFor(() => expect(window.location.pathname).toBe("/"))
   })
 })

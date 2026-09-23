@@ -5,9 +5,13 @@
 
 import { isMockModeEnabled } from "@/api/client"
 
-import { dashboardHandlers } from "./dashboard"
 import { meHandlers } from "./me"
 import { providersHandlers } from "./providers"
+import {
+  dockHandlers,
+  inboxHandlers,
+  repositoryHandlers,
+} from "./pullRequests"
 import { runsHandlers } from "./runs"
 import { sessionsHandlers } from "./sessions"
 import { templatesHandlers } from "./templates"
@@ -20,7 +24,9 @@ export const featureHandlers = [
   ...workspaceHandlers,
   ...sessionsHandlers,
   ...runsHandlers,
-  ...dashboardHandlers,
+  ...repositoryHandlers,
+  ...inboxHandlers,
+  ...dockHandlers,
   ...usageHandlers,
   ...providersHandlers,
 ]
@@ -32,12 +38,15 @@ export const featureHandlers = [
  */
 export const templatesMockHandlers = [...templatesHandlers]
 
-/** Every handler, used by the standalone mock API server. */
-export const handlers = [...featureHandlers, ...templatesMockHandlers]
+/** Handlers that stay registered whether or not mocks are enabled. */
+export const alwaysOnHandlers = [...templatesMockHandlers]
 
-/** Feature handlers in mock mode; templates-only when talking to the real API. */
+/** Every handler, used by the standalone mock API server. */
+export const handlers = [...featureHandlers, ...alwaysOnHandlers]
+
+/** Feature handlers in mock mode; the unbacked features' handlers otherwise. */
 export function selectHandlers(mockEnabled: boolean) {
-  return mockEnabled ? handlers : templatesMockHandlers
+  return mockEnabled ? handlers : alwaysOnHandlers
 }
 
 /** The handler set the in-browser worker should register for the active mode. */

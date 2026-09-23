@@ -22,10 +22,10 @@ from app.config import AppSettings, get_app_settings
 from app.errors import install_error_handlers
 from app.routers import (
     catalog,
-    dashboard,
     events,
     github_install,
     providers,
+    pull_requests,
     repositories,
     reviews,
     runs,
@@ -178,7 +178,7 @@ def _routers() -> list[APIRouter]:
         catalog.router,
         providers.router,
         repositories.router,
-        dashboard.router,
+        pull_requests.router,
         reviews.router,
         sessions.router,
         events.router,

@@ -13,7 +13,6 @@ from decimal import Decimal
 from app.retry_actions import RetryAction
 from app.schemas import (
     CreatedSession,
-    DashboardSession,
     RepositoryRef,
     UserRef,
     WorkspaceRef,
@@ -31,7 +30,6 @@ __all__ = [
     "build_name",
     "repo_ref",
     "serialize_created_session",
-    "serialize_dashboard_session",
     "serialize_session",
     "serialize_target",
     "user_ref",
@@ -119,29 +117,6 @@ def serialize_session(
         cost_usd=round(total_cost, 6),
         findings_count=total_findings,
         prompt=session.prompt,
-    )
-
-
-def serialize_dashboard_session(
-    session: ReviewSession,
-    *,
-    targets: list[SessionTargetSchema],
-) -> DashboardSession:
-    """Map a session onto the compact dashboard history entry."""
-    return DashboardSession(
-        id=str(session.id),
-        title=session.title,
-        name=session.name,
-        status=session_status(session.status),
-        model=session.model,
-        provider=session.provider,
-        prompt=session.prompt,
-        created_at=session.created_at,
-        finished_at=session.finished_at,
-        targets=targets,
-        target_count=len(targets),
-        findings_count=sum(target.findings_count for target in targets),
-        cost_usd=round(sum(target.cost_usd for target in targets), 6),
     )
 
 

@@ -13,7 +13,7 @@ import type {
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { useModels } from "@/features/dashboard/lib/useDashboard"
+import { useModels } from "@/features/providers/lib/useModels"
 import { HarnessGraph } from "./HarnessGraph"
 import { NodeInspector } from "./NodeInspector"
 import { RulesPanel } from "./RulesPanel"

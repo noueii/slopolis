@@ -1,6 +1,6 @@
 /**
  * Single deterministic dataset shared by every mock handler, so the Sessions
- * list and the Dashboard describe the same sessions.
+ * list and the pull-request inbox describe the same sessions.
  */
 
 import { createDataset } from "./data"

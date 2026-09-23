@@ -88,7 +88,7 @@ describe("RepositoriesScreen", () => {
     })
 
     // The install route redirects on to GitHub; the login route would just
-    // re-authenticate the visitor and drop them back on the dashboard.
+    // re-authenticate the visitor and drop them back on the inbox.
     expect(connect.getAttribute("href")).toBe("/api/github/install")
   })
 

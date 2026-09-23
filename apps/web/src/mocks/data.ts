@@ -136,7 +136,7 @@ function formatShortDate(date: Date): string {
   return `${months[date.getMonth()]} ${date.getDate()}`
 }
 
-function headBranchFromTitle(title: string): string {
+export function headBranchFromTitle(title: string): string {
   const match = title.match(/^([a-z]+)(?:\([^)]*\))?:\s*(.+)$/i)
   const type = (match?.[1] ?? "feat").toLowerCase()
   const subject = match?.[2] ?? title

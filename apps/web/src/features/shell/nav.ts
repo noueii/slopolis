@@ -2,7 +2,6 @@ import {
   BookMarked,
   GitPullRequest,
   KeyRound,
-  LayoutDashboard,
   LayoutList,
   PlugZap,
   Settings,
@@ -12,7 +11,7 @@ import {
 } from "lucide-react"
 
 export type NavId =
-  | "dashboard"
+  | "pullRequests"
   | "sessions"
   | "repositories"
   | "usage"
@@ -35,12 +34,13 @@ export interface NavItem {
 
 export const NAV_ITEMS: NavItem[] = [
   {
-    id: "dashboard",
-    label: "Dashboard",
-    icon: LayoutDashboard,
+    id: "pullRequests",
+    label: "Pull requests",
+    icon: GitPullRequest,
     group: "Workspace",
     audience: "user",
-    description: "Start a review and watch what is running across your repositories.",
+    description:
+      "Open pull requests across your repositories, with what slopolis has reviewed.",
   },
   {
     id: "sessions",

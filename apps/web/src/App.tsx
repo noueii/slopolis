@@ -17,7 +17,7 @@ import {
 import { useWorkspaceOnboarding } from "@/features/onboarding/lib/useWorkspaceOnboarding"
 import { ComingSoonScreen } from "@/features/placeholder/ComingSoonScreen"
 import { ProvidersScreen } from "@/features/providers/ProvidersScreen"
-import { DashboardScreen } from "@/features/dashboard/DashboardScreen"
+import { PullRequestsScreen } from "@/features/pullRequests/PullRequestsScreen"
 import { RepositoriesScreen } from "@/features/repositories/RepositoriesScreen"
 import { RepositoryDetailScreen } from "@/features/repositories/RepositoryDetailScreen"
 import { SessionDetail } from "@/features/sessions/SessionDetail"
@@ -29,7 +29,7 @@ import { UsageScreen } from "@/features/usage/UsageScreen"
 export default function App() {
   const route = useRoute()
   const [scenario, setScenario] = useState<MockScenario>(getMockScenario())
-  const [composerFocusNonce, setComposerFocusNonce] = useState(0)
+  const [searchFocusNonce, setSearchFocusNonce] = useState(0)
   const currentUser = useCurrentUser()
   const onboarding = useWorkspaceOnboarding(currentUser)
   const { user, workspace, isAdmin, isLoading } = currentUser
@@ -48,9 +48,11 @@ export default function App() {
 
   const handleNavigate = (id: NavId) => navigate({ kind: "nav", id })
 
+  // "New review" means the inbox: that is where a review starts now, and the
+  // nonce focuses its search so the shell's action lands somewhere useful.
   const handleNewReview = () => {
-    navigate({ kind: "nav", id: "dashboard" })
-    setComposerFocusNonce((nonce) => nonce + 1)
+    navigate({ kind: "nav", id: "pullRequests" })
+    setSearchFocusNonce((nonce) => nonce + 1)
   }
 
   const handleScenarioChange = (next: MockScenario) => {
@@ -83,12 +85,12 @@ export default function App() {
         onOpenSession={openSession}
       />
     )
-  } else if (route.id === "dashboard") {
+  } else if (route.id === "pullRequests") {
     content = (
-      <DashboardScreen
+      <PullRequestsScreen
         scenario={scenario}
         onOpenSession={openSession}
-        focusComposerNonce={composerFocusNonce}
+        focusSearchNonce={searchFocusNonce}
       />
     )
   } else if (route.id === "sessions") {

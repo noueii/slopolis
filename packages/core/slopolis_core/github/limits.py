@@ -74,6 +74,8 @@ class ReadCache:
     issues: dict[tuple[str, int], GitHubIssue] = field(default_factory=dict)
     open_pulls: dict[str, list[GitHubPullRequest]] = field(default_factory=dict)
     checks: dict[tuple[str, str], list[CheckRun]] = field(default_factory=dict)
+    #: Commits between two refs, keyed ``(repo, base, head)``.
+    compares: dict[tuple[str, str, str], int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

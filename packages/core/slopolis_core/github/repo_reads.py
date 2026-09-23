@@ -125,11 +125,36 @@ class RepoReads:
                 additions=0,
                 deletions=0,
                 updated_at=iso(pull.updated_at),
+                created_at=iso(pull.created_at),
             )
             for pull in response.parsed_data
         ]
         self._cache.open_pulls[repo_full_name] = result
         return result
+
+    @translate_errors
+    async def compare_commits(self, repo_full_name: str, base: str, head: str) -> int:
+        """Count the commits between two refs (``base...head``).
+
+        The three-dot form compares from the merge base, so a head that moved
+        past ``base`` counts exactly the commits it moved — which is what the
+        inbox reports as "reviewed N commits ago" (spec v3 §2). A pair GitHub
+        refuses (a force-pushed or unrelated SHA) raises
+        :class:`GitHubNotFoundError`, so a caller can report an unknown distance
+        instead of failing on it.
+        """
+        cached = self._cache.compares.get((repo_full_name, base, head))
+        if cached is not None:
+            return cached
+        owner, repo = split_repo(repo_full_name)
+        self.budget.consume(method="compare_commits")
+        response = await self._github.rest.repos.async_compare_commits(
+            owner, repo, f"{base}...{head}"
+        )
+        raise_for_status(response, f"commits between {base} and {head} in {repo_full_name}")
+        total = response.parsed_data.total_commits
+        self._cache.compares[(repo_full_name, base, head)] = total
+        return total
 
     @translate_errors
     async def list_installation_repositories(self) -> list[GitHubRepository]:

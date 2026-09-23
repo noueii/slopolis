@@ -252,8 +252,8 @@ export interface PullRequestChecks {
 
 /**
  * An open pull request discovered for a connected repository. This is the
- * primary selection surface for New Review (spec 10.1 / 10.4); pasting a URL
- * remains a secondary affordance that resolves to the same shape.
+ * primary selection surface for a review (spec v3 §1); pasting a URL remains a
+ * secondary affordance that resolves to the same shape.
  */
 export interface OpenPullRequest {
   id: string
@@ -262,6 +262,9 @@ export interface OpenPullRequest {
   title: string
   url: string
   author: UserRef
+  headBranch: string
+  /** Commit the PR head points at; compared against a review's own SHA. */
+  headSha: string
   updatedAt: string
   draft: boolean
   comments: number
@@ -271,84 +274,86 @@ export interface OpenPullRequest {
   checks: PullRequestChecks
 }
 
-/** Open pull requests for one connected repository. */
-export interface RepositoryPullRequestsResponse {
-  repository: RepositorySummary
-  /** Open PRs, most recently updated first. */
-  pullRequests: OpenPullRequest[]
-}
+/** Whether a review is running, current, or behind the PR head (spec v3 §2). */
+export type PullRequestReviewState =
+  | "never"
+  | "queued"
+  | "running"
+  | "reviewed"
+  | "failed"
 
-/** A session target that is still executing (spec 10.5 / 10.8). */
-export interface LiveSession {
-  id: string
-  name: string
-  status: Extract<SessionStatus, "queued" | "running">
-  repository: RepositoryRef
-  number: number
-  /** `owner/name#123` convenience label. */
-  prLabel: string
-  /** Short, agent-assigned review title; the row's primary label. */
-  title: string
-  /** Canonical GitHub URL for the pull request. */
-  url: string
-  /** GitHub head ref for the PR, e.g. `fix/guard-token-refresh`. */
-  headBranch: string
-  model: string
-  provider: string
-  /** Whole-session completion, 0–100. */
-  progress: number
-  /** Human-readable current step, e.g. `Scanning diff (3/5 files)`. */
-  step: string
-  startedAt: string
-  /** Elapsed wall-clock time at response time; the UI may keep ticking. */
-  elapsedMs: number
-}
-
-/** Aggregates for the dashboard analytics strip (spec 10.9 usage). */
-export interface DashboardSummary {
-  /** Echoes the active scope, e.g. `All repositories` or `acme/api-gateway`. */
-  scope: string
-  totalSessions: number
-  running: number
-  failed: number
-  spendUsd: number
-  /** Total tokens attributed across the scope. */
-  tokens: number
-}
-
-/** Compact history entry rendered as a conversation row (spec 10.8). */
-export interface DashboardSession {
-  id: string
-  /** Short, agent-assigned review title, e.g. `Guard token refresh skew`. */
-  title: string
-  name: string
-  status: SessionStatus
-  model: string
-  provider: string
-  prompt?: string
-  createdAt: string
-  finishedAt?: string
-  targets: SessionTarget[]
-  targetCount: number
+/** What slopolis knows about an open pull request's latest review. */
+export interface PullRequestReview {
+  state: PullRequestReviewState
+  /** Session holding this PR's latest review; `null` when never reviewed. */
+  sessionId: string | null
+  /** Head SHA the last completed review covered; `null` when never reviewed. */
+  reviewedSha: string | null
+  /**
+   * Commits pushed since `reviewedSha`: `0` when the review covers the current
+   * head, a positive count when it is behind, and `null` when the head has moved
+   * but the distance is unknown. Never a guess — a fabricated count would read
+   * as fact in the row.
+   */
+  commitsSinceReview: number | null
   findingsCount: number
-  costUsd: number
+  /** Whole-target progress 0–100 while `queued`/`running`. */
+  progress: number | null
+  /** Current step while `queued`/`running`, e.g. `Scanning diff (3/5 files)`. */
+  step: string | null
+  reviewedAt: string | null
 }
 
-export interface DashboardData {
-  scope: string
-  summary: DashboardSummary
-  /** Only `queued`/`running` sessions, newest first. */
-  running: LiveSession[]
-  /** Recent sessions in scope, newest first. */
-  recent: DashboardSession[]
-  generatedAt: string
+/** One row of the pull-request inbox. */
+export interface PullRequestListItem extends OpenPullRequest {
+  review: PullRequestReview
 }
 
-export interface DashboardParams {
+/** `reviewed` with `commitsSinceReview > 0` — a review behind the PR head. */
+export type PullRequestReviewFilter = PullRequestReviewState | "stale"
+
+export type PullRequestSort =
+  | "updated_desc"
+  | "size_desc"
+  | "staleness_desc"
+  | "created_desc"
+
+export interface PullRequestListParams {
+  /** Free-text search across title, repository, PR number and author. */
+  q?: string
   /** Repository full name, or omitted for every connected repository. */
   repo?: string
-  /** Max history entries to return. */
-  limit?: number
+  review?: PullRequestReviewFilter
+  checks?: PullRequestChecks["state"]
+  /** Draft PRs are hidden unless this is set (spec v3 §3). */
+  includeDrafts?: boolean
+  page?: number
+  pageSize?: number
+  sort?: PullRequestSort
+}
+
+/** Backlog totals for the inbox header (spec v3 §3). */
+export interface PullRequestSummary {
+  total: number
+  needsReview: number
+  stale: number
+  running: number
+}
+
+export interface PullRequestFilterOptions {
+  repositories: FilterOption[]
+  reviews: FilterOption[]
+  checks: FilterOption[]
+}
+
+/**
+ * `GET /api/pull-requests`: the inbox page plus everything the filter bar and
+ * header need, so one request fills the whole screen.
+ */
+export interface PullRequestListResponse extends Paginated<PullRequestListItem> {
+  summary: PullRequestSummary
+  filterOptions: PullRequestFilterOptions
+  generatedAt: string
 }
 
 /** One PR resolved from a pasted link. */

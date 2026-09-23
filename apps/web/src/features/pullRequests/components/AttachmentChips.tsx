@@ -4,7 +4,7 @@ import { Badge } from "@/components/ui/badge"
 import {
   formatBytes,
   type AttachmentItem,
-} from "@/features/dashboard/lib/useAttachments"
+} from "@/features/pullRequests/lib/useAttachments"
 
 export interface AttachmentChipsProps {
   items: AttachmentItem[]

@@ -3,8 +3,9 @@
 Owns the network sequence: rolling summary comment, inline comments, and the
 check run, honoring the repo config's output toggles. Each line comment is
 reconciled against what the pull request already holds and stamped the moment it
-exists, so a run that dies mid-publish neither stacks a second copy of a
-comment nor leaves the app reading it as unposted.
+exists — with the comment id GitHub assigned and the hunk it returned for it — so
+a run that dies mid-publish neither stacks a second copy of a comment nor leaves
+the app reading it as unposted.
 
 Callers must have committed the findings and usage this publishes *before*
 calling here: publishing is the one step that can be refused by a permission the
@@ -20,7 +21,7 @@ from dataclasses import dataclass
 
 from slopolis_core.config.repo_config import RepoConfig
 from slopolis_core.github.errors import GitHubError
-from slopolis_core.github.models import InlineComment
+from slopolis_core.github.models import InlineComment, ReviewComment
 from slopolis_core.review.harness import ReviewResult
 from worker.deps import Publisher
 from worker.jobs.publishing import (
@@ -57,15 +58,22 @@ class InlinePost:
     ``source_index`` addresses the finding in the list that was published, which
     is what lets a caller stamp the row a comment belongs to even when some of
     this publish's comments were adopted rather than posted (spec 10.7).
+
+    ``diff_hunk`` is GitHub's own hunk for that comment — the text its UI renders
+    above the comment — carried through from whichever comment this publish
+    ended up with, so the stamp can record the code the finding is about.
+    ``None`` when GitHub returned no hunk for the comment.
     """
 
     source_index: int
     comment_id: int
+    diff_hunk: str | None
 
 
-#: Records that a finding's comment exists, called the moment it does — adopted
-#: or freshly posted. The caller commits inside it: an uncommitted link does not
-#: survive the rollback a later failure ends the attempt with.
+#: Records that a finding's comment exists, with GitHub's own hunk for it, called
+#: the moment it does — adopted or freshly posted. The caller commits inside it:
+#: an uncommitted link does not survive the rollback a later failure ends the
+#: attempt with.
 StampInline = Callable[[InlinePost], Awaitable[None]]
 
 
@@ -75,7 +83,8 @@ class PublishOutcome:
 
     summary_comment_id: int | None
     #: Every finding whose comment is on the pull request now, with the id it
-    #: carries there — whether this publish posted it or adopted it.
+    #: carries there and GitHub's hunk for it — whether this publish posted the
+    #: comment or adopted it.
     inline_posts: list[InlinePost]
     check_run_id: int | None
     #: Why the check run was not posted, when GitHub refused it. Its own field
@@ -152,30 +161,40 @@ async def _publish_inline(
     """Get every finding's line comment onto the pull request, stamping as it goes.
 
     One comment per call, not one call for all of them: ``post_inline_comments``
-    returns its ids only when every comment in its list was accepted, so a
-    refusal on a later comment would discard the ids of the ones already on the
-    pull request — exactly the link this is here to keep. Each comment is stamped
-    the moment its id exists, and whatever this App already has at the same path
-    and line is adopted instead of posted (spec 10.7 §Publishing is idempotent
-    per finding).
+    returns its comments only when every comment in its list was accepted, so a
+    refusal on a later comment would discard the comments already on the pull
+    request — exactly the link this is here to keep. Each comment is stamped the
+    moment it exists, with the id and the hunk GitHub gave it, and whatever this
+    App already has at the same path and line is adopted instead of posted
+    (spec 10.7 §Publishing is idempotent per finding).
     """
     comments = [target.comment for target in plan.inline]
     adopted = await _reconcile(publisher, plan, comments)
     posts: list[InlinePost] = []
-    for target, adopted_id in zip(plan.inline, adopted, strict=True):
-        comment_id = (
-            adopted_id
-            if adopted_id is not None
+    for target, adopted_comment in zip(plan.inline, adopted, strict=True):
+        posted = (
+            adopted_comment
+            if adopted_comment is not None
             else await _post_one(publisher, plan, target.comment)
         )
-        post = InlinePost(source_index=target.source_index, comment_id=comment_id)
+        post = InlinePost(
+            source_index=target.source_index,
+            comment_id=posted.id,
+            diff_hunk=posted.diff_hunk,
+        )
         await stamp(post)
         posts.append(post)
     return posts
 
 
-async def _post_one(publisher: Publisher, plan: PublishPlan, comment: InlineComment) -> int:
-    """Post one line comment and return the id GitHub gave it."""
+async def _post_one(
+    publisher: Publisher, plan: PublishPlan, comment: InlineComment
+) -> ReviewComment:
+    """Post one line comment and return it as GitHub holds it.
+
+    One comment per call, so the returned comment is the first — and only — one
+    in the list.
+    """
     created = await publisher.post_inline_comments(
         plan.repo_full_name, plan.number, [comment], plan.head_sha
     )
@@ -184,7 +203,7 @@ async def _post_one(publisher: Publisher, plan: PublishPlan, comment: InlineComm
 
 async def _reconcile(
     publisher: Publisher, plan: PublishPlan, comments: list[InlineComment]
-) -> list[int | None]:
+) -> list[ReviewComment | None]:
     """The comment that already carries each finding, or ``None`` to post one.
 
     A refused read is not a refused review. Reconciliation only prevents

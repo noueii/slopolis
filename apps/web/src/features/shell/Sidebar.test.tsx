@@ -16,7 +16,7 @@ describe("Sidebar role gating", () => {
   it("hides the Admin group from non-admins", () => {
     render(
       <Sidebar
-        active="dashboard"
+        active="pullRequests"
         onNavigate={vi.fn()}
         isAdmin={false}
         workspace={workspace}
@@ -34,7 +34,7 @@ describe("Sidebar role gating", () => {
   it("shows the Admin group to admins", () => {
     render(
       <Sidebar
-        active="dashboard"
+        active="pullRequests"
         onNavigate={vi.fn()}
         isAdmin
         workspace={workspace}
@@ -61,7 +61,7 @@ describe("Sidebar role gating", () => {
     const active = screen.getByRole("button", { name: "Sessions" })
     expect(active.getAttribute("aria-current")).toBe("page")
     expect(
-      screen.getByRole("button", { name: "Dashboard" }).getAttribute("aria-current"),
+      screen.getByRole("button", { name: "Pull requests" }).getAttribute("aria-current"),
     ).toBeNull()
   })
 
@@ -69,7 +69,7 @@ describe("Sidebar role gating", () => {
     const onNavigate = vi.fn()
     render(
       <Sidebar
-        active="dashboard"
+        active="pullRequests"
         onNavigate={onNavigate}
         isAdmin={false}
         workspace={workspace}
@@ -84,7 +84,7 @@ describe("Sidebar role gating", () => {
 describe("Sidebar workspace identity", () => {
   it("shows the workspace reported by /me", () => {
     render(
-      <Sidebar active="dashboard" onNavigate={vi.fn()} isAdmin workspace={workspace} />,
+      <Sidebar active="pullRequests" onNavigate={vi.fn()} isAdmin workspace={workspace} />,
     )
 
     expect(screen.getByText("Acme Labs")).toBeDefined()
@@ -93,7 +93,7 @@ describe("Sidebar workspace identity", () => {
 
   it("shows no workspace identity, and no switcher, without a workspace", () => {
     render(
-      <Sidebar active="dashboard" onNavigate={vi.fn()} isAdmin={false} workspace={null} />,
+      <Sidebar active="pullRequests" onNavigate={vi.fn()} isAdmin={false} workspace={null} />,
     )
 
     expect(screen.queryByText("Acme Labs")).toBeNull()

@@ -24,6 +24,7 @@ from worker.jobs.review_target import review_target
 from worker.jobs.slots import SLOT_WAIT_FOREVER, SlotGate
 from worker_fakes import (
     CATALOG_MODEL,
+    DIFF_HUNK,
     FINDING_PATH,
     HEAD_BRANCH,
     HEAD_SHA,
@@ -38,6 +39,7 @@ from worker_seed import Harness, build_harness, seed_and_build
 
 from slopolis_core.domain import TargetStatus
 from slopolis_core.github.errors import GitHubAuthError, GitHubError, GitHubRateLimitError
+from slopolis_core.github.models import GitHubPullRequest
 from slopolis_core.llm.models import ChatMessage, CompletionResult
 from slopolis_db.models import (
     AgentEventRow,
@@ -101,6 +103,11 @@ _SHORT_WAIT_CONFIG = WorkerConfig(
 
 _SECOND_PR = 43
 
+#: The commit a pull request moved to after a review of ``HEAD_SHA``: the push
+#: that makes a review stale, and the one a publish retry must not report as the
+#: commit its review covered.
+_PUSHED_SHA = "pushed-after-review"
+
 
 class _GatedLlm(FakeLlm):
     """FakeLlm that parks every review inside its single model call.
@@ -134,6 +141,23 @@ class _GatedLlm(FakeLlm):
             )
         finally:
             self.active -= 1
+
+
+class _MovingHeadReader(FakeReader):
+    """A reader whose pull request sits at whatever ``head_sha`` a test sets.
+
+    A push that lands after a review is the case the reviewed commit exists for,
+    so a publish retry's read has to be able to disagree with the read the review
+    itself ran against.
+    """
+
+    def __init__(self, head_sha: str = HEAD_SHA) -> None:
+        super().__init__()
+        self.head_sha = head_sha
+
+    async def get_pull_request(self, repo_full_name: str, number: int) -> GitHubPullRequest:
+        pull = await super().get_pull_request(repo_full_name, number)
+        return pull.model_copy(update={"head_sha": self.head_sha})
 
 
 async def _until(predicate: Callable[[], bool], *, timeout: float = 5.0) -> None:
@@ -287,8 +311,12 @@ async def test_happy_path_persists_and_publishes(session_factory: SessionFactory
     assert findings[3].severity == "error"
     assert findings[3].posted is True
     assert findings[3].github_comment_id == 201
+    # ... with the hunk GitHub returned for that comment, which is what the app
+    # renders above it; the finding with no comment has none
+    assert findings[3].diff_hunk == DIFF_HUNK
     assert findings[None].posted is False
     assert findings[None].github_comment_id is None
+    assert findings[None].diff_hunk is None
 
     # ... the summary carries the session link, status, and usage line
     assert len(h.seed.publisher.summaries) == 1
@@ -676,7 +704,9 @@ async def test_publish_throttled_retries_and_drops_the_failed_attempts_findings(
     assert (await _session(h)).status == "done"
 
 
-async def _throttled_publish(session_factory: SessionFactory, *, findings: str) -> Harness:
+async def _throttled_publish(
+    session_factory: SessionFactory, *, findings: str, reader: FakeReader | None = None
+) -> Harness:
     """Run the review whose publish GitHub throttled away, leaving it unposted.
 
     The last permitted try fails permanently at the publish, which is the state a
@@ -685,6 +715,7 @@ async def _throttled_publish(session_factory: SessionFactory, *, findings: str) 
     """
     h = await seed_and_build(
         session_factory,
+        reader=reader,
         publisher=FakePublisher(fail_with=_THROTTLED),
         llm=FakeLlm([findings]),
         config=WorkerConfig(WORKER_MAX_TRIES=1, WORKER_RETRY_BACKOFF_S=1),
@@ -882,6 +913,76 @@ async def test_a_throttled_publish_retry_keeps_the_review_for_the_next_try(
     assert len(await _usage(h)) == 1
 
 
+async def test_a_review_records_the_commit_it_covered(
+    session_factory: SessionFactory,
+) -> None:
+    # Given a queued target whose pull request sits at HEAD_SHA and no review has
+    # covered it yet
+    reader = _MovingHeadReader()
+    h = await seed_and_build(session_factory, reader=reader, llm=FakeLlm([_FINDINGS_JSON]))
+    assert (await _target(h)).reviewed_sha is None
+
+    # When the job reviews that pull request
+    await _run(h)
+
+    # Then the target names the commit that review was run against, which is what
+    # the inbox compares against the pull request's current head to tell a current
+    # review from a stale one (spec v3 §2)
+    assert (await _target(h)).reviewed_sha == HEAD_SHA
+
+
+async def test_a_publish_retry_keeps_the_commit_the_review_covered(
+    session_factory: SessionFactory,
+) -> None:
+    # Given a review of HEAD_SHA whose publish GitHub throttled away, leaving the
+    # target failed with that review still unposted
+    reader = _MovingHeadReader()
+    h = await _throttled_publish(session_factory, findings=_FINDINGS_JSON, reader=reader)
+    assert (await _target(h)).reviewed_sha == HEAD_SHA
+
+    # When the pull request moves on and the target is retried in publish mode,
+    # which re-reads the pull request for the head its comments anchor to
+    reader.head_sha = _PUSHED_SHA
+    h.seed.publisher.fail_with = None
+    await _requeue_target(h)
+    await _run(h, mode="publish")
+
+    # Then the retry posted the review against the new head without claiming to
+    # have reviewed it: the findings it posted are still the ones from HEAD_SHA, so
+    # naming _PUSHED_SHA here would report a stale review as current
+    assert h.seed.publisher.inlines[0][3] == _PUSHED_SHA
+    assert (await _target(h)).reviewed_sha == HEAD_SHA
+    assert (await _target(h)).status == "done"
+
+
+async def test_a_failed_attempt_leaves_the_recorded_commit_alone(
+    session_factory: SessionFactory,
+) -> None:
+    # Given a target that records the commit its completed review covered, with
+    # the pull request since pushed to a newer one
+    reader = _MovingHeadReader()
+    h = await seed_and_build(
+        session_factory,
+        reader=reader,
+        llm=FakeLlm([_FINDINGS_JSON]),
+        config=WorkerConfig(WORKER_MAX_TRIES=1, WORKER_RETRY_BACKOFF_S=1),
+        job_try=1,
+    )
+    await _run(h)
+    reader.head_sha = _PUSHED_SHA
+    assert (await _target(h)).reviewed_sha == HEAD_SHA
+
+    # When the target is reviewed again and the attempt fails before its review
+    # produced anything (the fake has no text left to return)
+    await _requeue_target(h)
+    await _run(h)
+
+    # Then the failure left the column alone: it names a review whose findings the
+    # app can read, never an attempt that read the code and stopped
+    assert (await _target(h)).status == "failed"
+    assert (await _target(h)).reviewed_sha == HEAD_SHA
+
+
 async def test_repo_cap_keeps_one_target_running_at_a_time(
     session_factory: SessionFactory,
 ) -> None:
@@ -1056,12 +1157,15 @@ async def test_publish_adopts_the_comment_that_is_already_there(
     assert posted[0].line == 5
 
     # ... and both findings are stamped: the adopted one with the comment that was
-    # already on the pull request, the posted one with its own new id
+    # already on the pull request, the posted one with its own new id — each with
+    # the hunk GitHub holds for that comment
     findings = {row.line: row for row in await _findings(h)}
     assert findings[3].posted is True
     assert findings[3].github_comment_id == 777
+    assert findings[3].diff_hunk == DIFF_HUNK
     assert findings[5].posted is True
     assert findings[5].github_comment_id == 201
+    assert findings[5].diff_hunk == DIFF_HUNK
     assert (await _target(h)).status == "done"
 
 

@@ -18,7 +18,7 @@ from githubkit import GitHub, TokenAuthStrategy
 
 from slopolis_core.github._mapping import raise_for_status, split_repo
 from slopolis_core.github.errors import GitHubError
-from slopolis_core.github.models import InlineComment
+from slopolis_core.github.models import InlineComment, ReviewComment
 from slopolis_core.github.transport import translate_errors
 
 __all__ = ["CHECK_RUN_NAME", "SUMMARY_MARKER", "CheckConclusion", "GitHubPublisher"]
@@ -67,6 +67,9 @@ class _ExistingComment:
     path: str
     line: int | None
     body: str
+    #: GitHub's own hunk for the comment, carried so an adopted comment reaches
+    #: the caller with the same text a freshly posted one does.
+    diff_hunk: str | None
 
 
 class GitHubPublisher:
@@ -168,10 +171,17 @@ class GitHubPublisher:
         number: int,
         comments: list[InlineComment],
         commit_id: str,
-    ) -> list[int]:
-        """Post one review comment per finding; return the created ids."""
+    ) -> list[ReviewComment]:
+        """Post one review comment per finding; return them as GitHub holds them.
+
+        One :class:`ReviewComment` per posted comment: the id is what the caller
+        stamps the finding with, and the hunk is what its comment is rendered
+        from, so both are read off the comment GitHub created rather than
+        assumed — the hunk is GitHub's own text for the line it anchored the
+        comment to (spec 10.7).
+        """
         ref = _RepoRef.of(repo_full_name, number)
-        created: list[int] = []
+        created: list[ReviewComment] = []
         for comment in comments:
             response = await self._github.rest.pulls.async_create_review_comment(
                 ref.owner,
@@ -186,7 +196,8 @@ class GitHubPublisher:
                 },
             )
             raise_for_status(response, f"inline comment on {comment.path}:{comment.line}")
-            created.append(response.parsed_data.id)
+            posted = response.parsed_data
+            created.append(ReviewComment(id=posted.id, diff_hunk=posted.diff_hunk))
         return created
 
     @translate_errors
@@ -195,14 +206,15 @@ class GitHubPublisher:
         repo_full_name: str,
         number: int,
         comments: list[InlineComment],
-    ) -> list[int | None]:
+    ) -> list[ReviewComment | None]:
         """The comment that already carries each of ``comments``, index-aligned.
 
         A run can die between posting a line comment and recording it, so before
         posting, this reads what the pull request already holds: a review comment
         on the same ``path`` and ``line`` written by this publisher's own App *is*
-        that finding's comment, and its id is returned instead of a second copy of
-        it. ``None`` means the comment is genuinely new and must be posted.
+        that finding's comment, and it is returned instead of a second copy of it —
+        with GitHub's own hunk for it, the text the app renders the comment from.
+        ``None`` means the comment is genuinely new and must be posted.
 
         The matching rule, and what it cannot do:
 
@@ -235,7 +247,7 @@ class GitHubPublisher:
         for existing in await self._list_own_review_comments(ref):
             available.setdefault((existing.path, existing.line), []).append(existing)
 
-        adopted: list[int | None] = []
+        adopted: list[ReviewComment | None] = []
         for comment in comments:
             candidates = available.get((comment.path, comment.line))
             if not candidates:
@@ -244,7 +256,7 @@ class GitHubPublisher:
             match = candidates.pop(0)
             if match.body != comment.body:
                 await self._repair_review_comment(ref, match.id, comment.body)
-            adopted.append(match.id)
+            adopted.append(ReviewComment(id=match.id, diff_hunk=match.diff_hunk))
         return adopted
 
     @translate_errors
@@ -273,6 +285,7 @@ class GitHubPublisher:
                         path=comment.path,
                         line=line if isinstance(line, int) else None,
                         body=comment.body,
+                        diff_hunk=comment.diff_hunk,
                     )
                 )
             if len(page_comments) < _COMMENT_PAGE_SIZE:

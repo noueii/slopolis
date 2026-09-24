@@ -4,7 +4,35 @@
 - The Check Run **fails when findings reach error or critical**, otherwise succeeds.
 - Reported severity defaults to **warning and above**, configurable per repo.
 - Findings include GitHub `suggestion` blocks where a fix is safely applicable; findings that cannot map to a diff line appear in the summary.
-- The app renders every finding and links it to its GitHub location.
+- The app renders every finding and links it to its GitHub location (§What the app shows).
+
+## What the app shows
+
+The review's comments are readable without leaving the app: the session page lists each target's
+findings under that pull request (spec 10.8), and each one is rendered as the comment it is.
+
+- A finding reads like its comment on the pull request: the file and line it cites, the login the
+  comment is posted as (`<slug>[bot]`, from the deployment's configured `GITHUB_APP_SLUG`), when the
+  app wrote it, the body, and — where the fix is code — the literal replacement in a block labelled
+  `suggestion`, the way GitHub renders one.
+- **The code the comment sits on** is shown above it, as GitHub shows it: the hunk GitHub returned for
+  that comment, with the hunk header, both line-number gutters, the `+`/`-` markers, and the commented
+  line marked. The text is **GitHub's own** (`diff_hunk`), stored when the comment is written rather
+  than recomputed, so the app cannot drift from what the reviewer saw; a comment posted before the app
+  recorded hunks renders without one.
+- A posted finding links to its comment's permalink — the pull request page anchored at the comment,
+  `https://github.com/{owner}/{repo}/pull/{n}#discussion_r{comment_id}`, which is the URL GitHub's own
+  `html_url` carries. The reader can land on the exact thread and reply there.
+- A finding with no comment says so rather than wearing a comment's header. It has none in three cases:
+  it could not map to a diff line, or fell below the repo's severity threshold (both go into the summary
+  comment), or the publish was refused — which fails the target and names the scope.
+- Both facts come from **what the app recorded**, never from a fresh read of the pull request: the link
+  is the stored comment id, and the time is the moment the publisher stamped that comment — which is why
+  a publish retry dates the comment, not the review. Rendering a session costs no GitHub call at all,
+  so an unnamed author (no `GITHUB_APP_SLUG` configured) is left unnamed rather than looked up.
+- **What it is not:** a mirror of the pull request's thread. Replies, reactions, other people's edits,
+  and the rolling summary comment itself are not in the app — the app renders the comments it recorded
+  posting, and the summary comment's id is not stored.
 
 ## A refused check run is not a failed review
 

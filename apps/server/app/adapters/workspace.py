@@ -1,10 +1,9 @@
 """``preflight.ports.WorkspaceConfigProvider`` implemented from the database.
 
-Reads the workspace's model assignment, model catalog, credential rows, and the
-repository access override to answer the questions pre-flight asks: which model
-is assigned, is a credential ready, what is the workspace default, what access
-does one repository require, and which credential serves a model. All queries are
-scoped to a single workspace id resolved once per request.
+Reads the workspace's model assignment, model catalog, and credential rows to
+answer the questions pre-flight asks: which model is assigned, is a credential
+ready, what is the workspace default, and which credential serves a model. All
+queries are scoped to a single workspace id resolved once per request.
 """
 
 from __future__ import annotations
@@ -16,18 +15,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.live_check import ModelCredential
 from slopolis_core.vault import SecretVault
-from slopolis_db.models import ModelAssignment, ModelCatalog, ProviderCredential, Repository
+from slopolis_db.models import ModelAssignment, ModelCatalog, ProviderCredential
 
 __all__ = ["WorkspaceConfigAdapter"]
 
 _REVIEW_ROLE = "review"
 
-#: ``repositories.required_access`` value meaning "apply the spec rule".
-_DEFAULT_ACCESS = "default"
-
 
 class WorkspaceConfigAdapter:
-    """Workspace model assignment, credential state, and access policy, backed by the DB."""
+    """Workspace model assignment and credential state, backed by the DB."""
 
     def __init__(
         self,
@@ -121,23 +117,6 @@ class WorkspaceConfigAdapter:
             api_key=self._vault.open(credential.encrypted_api_key),
             key_last4=credential.key_last4,
         )
-
-    async def required_access(self, repo_full_name: str) -> str | None:
-        """Return the repository's access override, or ``None`` for the spec rule.
-
-        ``None`` covers both "no override stored" and "the workspace holds no
-        row for this repository": either way pre-flight applies the default rule,
-        and only a stored ``read``/``write`` changes what is required.
-        """
-        override = await self._db.scalar(
-            select(Repository.required_access).where(
-                Repository.workspace_id == self._workspace_id,
-                Repository.full_name == repo_full_name,
-            )
-        )
-        if override is None or override == _DEFAULT_ACCESS:
-            return None
-        return override
 
     async def _assignment(self, role: str) -> ModelAssignment | None:
         """Fetch the assignment row for ``role`` in this workspace."""

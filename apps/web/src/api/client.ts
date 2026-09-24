@@ -18,8 +18,6 @@ import type {
   CreateReviewRequest,
   CreateWorkspaceRequest,
   CreatedSession,
-  DashboardData,
-  DashboardParams,
   MeResponse,
   ModelCatalog,
   ModelImportRequest,
@@ -32,8 +30,9 @@ import type {
   ProviderListResponse,
   ProviderTestResult,
   ProviderUpdate,
+  PullRequestListParams,
+  PullRequestListResponse,
   RepositoryListResponse,
-  RepositoryPullRequestsResponse,
   RepositorySummary,
   RepositoryUpdate,
   RetrySessionRequest,
@@ -305,9 +304,9 @@ export const api = {
   },
 
   /**
-   * Update a repository's workspace switches (spec 10.1 / 10.10): park or
-   * re-enable it, set its access policy override, or both at once. A parked
-   * repository keeps its sessions and findings and is refused at pre-flight.
+   * Update a repository's workspace switch (spec 10.1): park or re-enable it.
+   * A parked repository keeps its sessions and findings and is refused at
+   * pre-flight.
    */
   updateRepository(
     repositoryId: string,
@@ -316,15 +315,6 @@ export const api = {
     return request<RepositorySummary>(
       `/repositories/${encodeURIComponent(repositoryId)}`,
       { method: "PATCH", body: JSON.stringify(body) },
-    )
-  },
-
-  listRepositoryPullRequests(
-    fullName: string,
-  ): Promise<RepositoryPullRequestsResponse> {
-    const [owner, name] = fullName.split("/")
-    return request<RepositoryPullRequestsResponse>(
-      `/repositories/${encodeURIComponent(owner ?? "")}/${encodeURIComponent(name ?? "")}/pulls`,
     )
   },
 
@@ -361,12 +351,25 @@ export const api = {
     })
   },
 
-  getDashboard(params: DashboardParams = {}): Promise<DashboardData> {
+  /**
+   * The pull-request inbox (spec v3 §6): open PRs across every connected
+   * repository, each carrying what slopolis knows about its latest review,
+   * plus the filter options and backlog totals the header renders.
+   */
+  listPullRequests(
+    params: PullRequestListParams = {},
+  ): Promise<PullRequestListResponse> {
     const query = buildQuery({
+      q: params.q || undefined,
       repo: params.repo || undefined,
-      limit: params.limit,
+      review: params.review || undefined,
+      checks: params.checks || undefined,
+      drafts: params.includeDrafts ? "1" : undefined,
+      page: params.page,
+      pageSize: params.pageSize,
+      sort: params.sort,
     })
-    return request<DashboardData>(`/dashboard${query}`)
+    return request<PullRequestListResponse>(`/pull-requests${query}`)
   },
 
   preflightReview(body: PreflightRequest): Promise<PreflightResult> {

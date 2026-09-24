@@ -183,6 +183,7 @@ class EventType(StrEnum):
     TOOL_CALL = "agent.tool_call"    # tool name + args (redacted)
     TOOL_RESULT = "agent.tool_result"
     MESSAGE = "agent.message"        # assistant text/reasoning summary
+    TURN = "agent.turn"              # one real gateway call: messages, raw response, usage
     FINDING = "agent.finding"
     COMPLETED = "agent.completed"
     FAILED = "agent.failed"
@@ -286,7 +287,11 @@ Agent definitions are built-in in V1; workspace-level custom agents come later (
 
 ## 14. Open questions
 
-1. Event granularity for `STEP`/`MESSAGE`: store a summary or the full model turn? (Storage vs diagnosability.)
+1. **Event granularity for `STEP`/`MESSAGE` — resolved: store both, at two grains.** `STEP`/`MESSAGE`
+   keep their redacted summaries (they are the tree's readable activity log); the full model turn is
+   its own `agent.turn` event — the request messages as sent, the raw response, and usage — emitted
+   at the LLM seam and attributed to the calling run. See
+   [`03-turn-transcripts.md`](./03-turn-transcripts.md).
 2. Should sub-agents share a repo-context cache to cut tokens, or stay isolated for independence?
 3. Retry semantics for failed sub-agents: fixed retry count vs model-decided.
 4. Whether the main orchestrator should do more than aggregate (cross-PR synthesis) in V1.

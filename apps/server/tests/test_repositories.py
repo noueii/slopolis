@@ -1,4 +1,4 @@
-"""Connected repositories and open pull requests."""
+"""Connected repositories: the listing, its switches, and its access rule."""
 
 from __future__ import annotations
 
@@ -6,11 +6,11 @@ import asyncio
 from typing import Any
 
 import pytest
-from app.routers import repositories
+from app.routers import _pull_reads
 from sqlalchemy import select
 
 from slopolis_core.github.errors import GitHubError
-from slopolis_core.github.models import CheckRun, GitHubPullRequest
+from slopolis_core.github.models import GitHubPullRequest
 from slopolis_db.models import AuditLog, Repository
 
 from .conftest import (
@@ -97,123 +97,11 @@ async def test_list_repositories_reports_open_pull_counts(
     assert items[0]["openPrCount"] == 1
 
 
-async def test_list_repository_pulls_returns_open_prs(
-    seeded: Any, build_harness: Any
-) -> None:
-    # Given a repository whose listing omits the numbers, as GitHub's does
-    listed = _pull("acme/api", 42, "Add guard")
-    detail = listed.model_copy(
-        update={"changed_files": 5, "additions": 76, "deletions": 0}
-    )
-    client = FakeGitHubClient(
-        {"acme/api": [listed]},
-        details={("acme/api", 42): detail},
-        checks={
-            ("acme/api", "abc123"): [
-                CheckRun(name="ci", status="completed", conclusion="failure"),
-                CheckRun(name="lint", status="completed", conclusion="success"),
-            ]
-        },
-    )
-    harness: ApiHarness = await build_harness(
-        user_id=seeded.user_id, github_client=client
-    )
-
-    # When the repo's pull requests are listed
-    response = await harness.client.get("/api/repositories/acme/api/pulls")
-
-    # Then the PR carries the single-PR read's numbers and its CI rollup
-    assert response.status_code == 200
-    body = response.json()
-    assert body["repository"]["fullName"] == "acme/api"
-    assert body["repository"]["openPrCount"] == 1
-    pull = body["pullRequests"][0]
-    assert pull["number"] == 42
-    assert (pull["changedFiles"], pull["additions"], pull["deletions"]) == (5, 76, 0)
-    assert pull["checks"] == {"state": "failing", "total": 2, "passing": 1}
-
-
-async def test_list_repository_pulls_unknown_repo_is_404(
-    seeded: Any, build_harness: Any
-) -> None:
-    # Given a workspace that does not own the requested repo
-    harness: ApiHarness = await build_harness(user_id=seeded.user_id)
-
-    # When an unknown repo's pulls are requested
-    response = await harness.client.get("/api/repositories/acme/unknown/pulls")
-
-    # Then a 404 with the standard error envelope is returned
-    assert response.status_code == 404
-    assert response.json()["error"]["code"] == "repository_not_found"
-
-
-async def test_list_repositories_serves_a_repeat_mount_from_the_cache(
-    seeded: Any, build_harness: Any
-) -> None:
-    # Given a repository whose open count GitHub reports
-    client = CountingGitHubClient({"acme/api": [_pull("acme/api", 42, "Add guard")]})
-    harness: ApiHarness = await build_harness(
-        user_id=seeded.user_id, github_client=client
-    )
-
-    # When the picker is mounted twice inside the TTL
-    first = await harness.client.get("/api/repositories")
-    second = await harness.client.get("/api/repositories")
-
-    # Then GitHub was read once and both mounts saw the same payload
-    assert client.calls == ["list_open_pull_requests:acme/api"]
-    assert second.json() == first.json()
-
-
-async def test_list_repository_pulls_serves_a_repeat_mount_from_the_cache(
-    seeded: Any, build_harness: Any
-) -> None:
-    # Given a repository whose single-PR reads carry its diff size and CI state
-    listed = _pull("acme/api", 42, "Add guard")
-    detail = listed.model_copy(
-        update={"changed_files": 5, "additions": 76, "deletions": 0}
-    )
-    client = CountingGitHubClient(
-        {"acme/api": [listed]},
-        details={("acme/api", 42): detail},
-        checks={
-            ("acme/api", "abc123"): [
-                CheckRun(name="ci", status="completed", conclusion="failure"),
-                CheckRun(name="lint", status="completed", conclusion="success"),
-            ]
-        },
-    )
-    harness: ApiHarness = await build_harness(
-        user_id=seeded.user_id, github_client=client
-    )
-
-    # When the same repository's pulls are listed twice inside the TTL
-    first = await harness.client.get("/api/repositories/acme/api/pulls")
-    reads = list(client.calls)
-    second = await harness.client.get("/api/repositories/acme/api/pulls")
-
-    # Then the first listing cost the listing read plus one read per PR detail
-    assert reads == [
-        "list_open_pull_requests:acme/api",
-        "get_pull_request:acme/api#42",
-        "list_check_runs:acme/api@abc123",
-    ]
-    # ...the second asked GitHub nothing...
-    assert client.calls == reads
-    # ...and both mounts saw the same payload
-    assert second.json() == first.json()
-    assert first.json()["pullRequests"][0]["checks"] == {
-        "state": "failing",
-        "total": 2,
-        "passing": 1,
-    }
-
-
 async def test_list_repositories_re_reads_once_the_cache_expires(
     seeded: Any, build_harness: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Given a cache TTL short enough to watch expire
-    monkeypatch.setattr(repositories, "_PULL_CACHE_TTL_SECONDS", 0.2)
+    monkeypatch.setattr(_pull_reads, "PULL_CACHE_TTL_SECONDS", 0.2)
     client = CountingGitHubClient({"acme/api": [_pull("acme/api", 42, "Add guard")]})
     harness: ApiHarness = await build_harness(
         user_id=seeded.user_id, github_client=client
@@ -229,29 +117,6 @@ async def test_list_repositories_re_reads_once_the_cache_expires(
         "list_open_pull_requests:acme/api",
         "list_open_pull_requests:acme/api",
     ]
-    assert second.json() == first.json()
-
-
-async def test_list_repository_pulls_re_reads_once_the_cache_expires(
-    seeded: Any, build_harness: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Given a cache TTL short enough to watch expire
-    monkeypatch.setattr(repositories, "_PULL_CACHE_TTL_SECONDS", 0.2)
-    client = CountingGitHubClient(
-        {"acme/api": [_pull("acme/api", 42, "Add guard")]},
-        checks={("acme/api", "abc123"): []},
-    )
-    harness: ApiHarness = await build_harness(
-        user_id=seeded.user_id, github_client=client
-    )
-    first = await harness.client.get("/api/repositories/acme/api/pulls")
-    await asyncio.sleep(0.25)
-
-    # When the same repository's pulls are listed again after the TTL
-    second = await harness.client.get("/api/repositories/acme/api/pulls")
-
-    # Then the per-PR reads happen again and the payload is unchanged
-    assert len(client.calls) == 6
     assert second.json() == first.json()
 
 
@@ -316,44 +181,6 @@ async def test_list_repositories_reads_each_installation_with_its_own_client(
     assert registry.minted == [555, 777]
 
 
-async def test_list_repository_pulls_reads_through_the_repositorys_installation(
-    seeded: Any, session_factory: Any, build_harness: Any
-) -> None:
-    # Given a repository granted by the workspace's second installation
-    async with session_factory() as session:
-        await add_installation(
-            session,
-            seeded.workspace_id,
-            installation_id=777,
-            account_login="widgets",
-            repositories=["widgets/app"],
-        )
-    acme = CountingGitHubClient(installation_id=555)
-    widgets = CountingGitHubClient(
-        {"widgets/app": [_pull("widgets/app", 7, "Add widget")]},
-        checks={("widgets/app", "abc123"): []},
-        installation_id=777,
-    )
-    registry = FakeInstallationClients({555: acme, 777: widgets})
-    harness: ApiHarness = await build_harness(
-        user_id=seeded.user_id, github_clients=registry
-    )
-
-    # When that repository's pull requests are listed
-    response = await harness.client.get("/api/repositories/widgets/app/pulls")
-
-    # Then the read went to its installation's client and to no other
-    assert response.status_code == 200
-    assert response.json()["repository"]["openPrCount"] == 1
-    assert widgets.calls == [
-        "list_open_pull_requests:widgets/app",
-        "get_pull_request:widgets/app#7",
-        "list_check_runs:widgets/app@abc123",
-    ]
-    assert acme.calls == []
-    assert registry.minted == [777]
-
-
 async def test_a_repository_whose_installation_cannot_mint_still_lists(
     seeded: Any, session_factory: Any, build_harness: Any
 ) -> None:
@@ -388,10 +215,6 @@ async def test_a_repository_whose_installation_cannot_mint_still_lists(
     # installation's count is served from the cache)...
     assert acme.calls == ["list_open_pull_requests:acme/api"]
     assert registry.minted == [555, 777, 555, 777]
-    # ...and asking it for the pull requests is the missing-client failure
-    unreadable = await harness.client.get("/api/repositories/widgets/app/pulls")
-    assert unreadable.status_code == 503
-    assert unreadable.json()["error"]["code"] == "github_not_configured"
 
 
 async def test_a_workspace_with_no_installation_lists_rows_without_live_counts(
@@ -408,10 +231,6 @@ async def test_a_workspace_with_no_installation_lists_rows_without_live_counts(
     items = response.json()["items"]
     assert [item["fullName"] for item in items] == ["acme/api"]
     assert items[0]["openPrCount"] == 0
-    # And reading that repository is the missing-client failure, as before
-    pulls = await harness.client.get("/api/repositories/acme/api/pulls")
-    assert pulls.status_code == 503
-    assert pulls.json()["error"]["code"] == "github_not_configured"
 
 
 async def test_an_installation_added_while_the_process_runs_is_read(
@@ -511,7 +330,7 @@ async def test_reads_stay_bounded_across_installations(
     # Then every repository was read, never more than the bound at once —
     # installations share one budget instead of multiplying it
     assert len(response.json()["items"]) == 9
-    assert tracker.peak == repositories._MAX_CONCURRENT_READS  # pyright: ignore[reportPrivateUsage]
+    assert tracker.peak == _pull_reads.MAX_CONCURRENT_READS
 
 
 async def test_parking_a_repository_keeps_it_listed_and_audited(
@@ -617,102 +436,25 @@ async def test_parking_another_workspaces_repository_is_404(
         assert await session.scalar(select(AuditLog).limit(1)) is None
 
 
-# --- the access override (spec 10.10) ---------------------------------------
+# --- the update body --------------------------------------------------------
 
 
-async def test_summaries_carry_the_repository_access_override(
-    seeded: Any, build_harness: Any
-) -> None:
-    # Given a connected repository on the spec rule
-    client = FakeGitHubClient()
-    harness: ApiHarness = await build_harness(
-        user_id=seeded.user_id, github_client=client
-    )
-    listed = await harness.client.get("/api/repositories")
-    assert listed.json()["items"][0]["requiredAccess"] == "default"
-
-    # When the override is tightened to write
-    patched = await harness.client.patch(
-        f"/api/repositories/{seeded.repository_id}", json={"requiredAccess": "write"}
-    )
-
-    # Then the toggle answers with the new policy...
-    assert patched.status_code == 200
-    assert patched.json()["requiredAccess"] == "write"
-    # ...every later listing carries it...
-    again = await harness.client.get("/api/repositories")
-    assert again.json()["items"][0]["requiredAccess"] == "write"
-    # ...and so does the repository inside the pulls response
-    pulls = await harness.client.get("/api/repositories/acme/api/pulls")
-    assert pulls.json()["repository"]["requiredAccess"] == "write"
-
-
-async def test_the_access_override_and_the_enable_switch_are_audited_apart(
+async def test_a_body_without_the_switch_is_refused(
     seeded: Any, session_factory: Any, build_harness: Any
 ) -> None:
-    # Given a connected, enabled repository
+    # Given a connected repository
     harness: ApiHarness = await build_harness(user_id=seeded.user_id)
 
-    # When the access override is loosened
+    # When a body omits ``enabled``, which leaves the endpoint nothing to do
     response = await harness.client.patch(
-        f"/api/repositories/{seeded.repository_id}", json={"requiredAccess": "read"}
-    )
-
-    # Then exactly that change is recorded, with its new value, and parking is
-    # left alone
-    assert response.status_code == 200
-    async with session_factory() as session:
-        audits = list((await session.scalars(select(AuditLog))).all())
-        row = await session.get(Repository, seeded.repository_id)
-    assert [(audit.action, audit.target_id) for audit in audits] == [
-        ("repository.access_updated", seeded.repository_id)
-    ]
-    assert audits[0].detail == {"requiredAccess": "read"}
-    assert audits[0].actor_user_id == seeded.user_id
-    assert row is not None and row.required_access == "read" and row.enabled is True
-
-    # And one body may carry both switches, each audited on its own
-    both = await harness.client.patch(
-        f"/api/repositories/{seeded.repository_id}",
-        json={"enabled": False, "requiredAccess": "default"},
-    )
-    assert both.status_code == 200
-    assert both.json()["enabled"] is False
-    assert both.json()["requiredAccess"] == "default"
-    async with session_factory() as session:
-        actions = [
-            audit.action for audit in (await session.scalars(select(AuditLog))).all()
-        ]
-    assert actions == [
-        "repository.access_updated",
-        "repository.disabled",
-        "repository.access_updated",
-    ]
-
-
-async def test_an_unknown_access_override_is_refused(
-    seeded: Any, session_factory: Any, build_harness: Any
-) -> None:
-    # Given a connected repository on the spec rule
-    harness: ApiHarness = await build_harness(user_id=seeded.user_id)
-
-    # When an access value outside the three literals is sent
-    response = await harness.client.patch(
-        f"/api/repositories/{seeded.repository_id}", json={"requiredAccess": "admin"}
-    )
-
-    # Then it is a validation failure...
-    assert response.status_code == 422
-    assert response.json()["error"]["code"] == "validation_error"
-
-    # ...and so is a body carrying neither switch, which has nothing to do
-    empty = await harness.client.patch(
         f"/api/repositories/{seeded.repository_id}", json={}
     )
-    assert empty.status_code == 422
 
-    # ...while the row stays exactly as it was, with nothing audited
+    # Then it is a validation failure, and the row stays exactly as it was,
+    # with nothing audited
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
     async with session_factory() as session:
         row = await session.get(Repository, seeded.repository_id)
-        assert row is not None and row.required_access == "default"
+        assert row is not None and row.enabled is True
         assert await session.scalar(select(AuditLog).limit(1)) is None

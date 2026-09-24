@@ -3,7 +3,7 @@
  *
  * Every screen the shell can show has a path, and the session detail's path is
  * the permalink spec 10.8 requires (`/sessions/{id}`): a link pasted in a PR
- * comment or a chat has to open the session, not the dashboard. The app is a
+ * comment or a chat has to open the session, not the inbox. The app is a
  * single-page shell, so this is not a router library — it is the mapping from
  * `location.pathname` to the screen state the shell already kept in `useState`,
  * plus the one hook that keeps them in step.
@@ -18,7 +18,7 @@ import type { NavId } from "@/features/shell/nav"
 
 /** Path of each sidebar destination; the compiler enforces full coverage. */
 export const NAV_PATHS = {
-  dashboard: "/",
+  pullRequests: "/",
   sessions: "/sessions",
   repositories: "/repositories",
   usage: "/usage",
@@ -32,7 +32,7 @@ const NAV_BY_PATH: Record<string, NavId> = Object.fromEntries(
   Object.entries(NAV_PATHS).map(([id, path]) => [path, id as NavId]),
 )
 
-const DASHBOARD: Route = { kind: "nav", id: "dashboard" }
+const INBOX: Route = { kind: "nav", id: "pullRequests" }
 
 /** The screen the shell renders for a URL. */
 export type Route =
@@ -49,7 +49,7 @@ export type Route =
  */
 export function parsePath(pathname: string): Route | null {
   const parts = pathname.split("/").filter((part) => part.length > 0)
-  if (parts.length === 0) return DASHBOARD
+  if (parts.length === 0) return INBOX
 
   const decoded = parts.map((part) => {
     try {
@@ -114,7 +114,7 @@ function snapshot(): string {
 /**
  * The current route, kept in step with the address bar.
  *
- * A path nothing owns (a stale link, a typo) falls back to the dashboard and
+ * A path nothing owns (a stale link, a typo) falls back to the inbox and
  * rewrites the URL, so a reload does not repeat the miss.
  */
 export function useRoute(): Route {
@@ -122,8 +122,8 @@ export function useRoute(): Route {
   const route = parsePath(path)
 
   useEffect(() => {
-    if (parsePath(path) === null) navigate(DASHBOARD, { replace: true })
+    if (parsePath(path) === null) navigate(INBOX, { replace: true })
   }, [path])
 
-  return route ?? DASHBOARD
+  return route ?? INBOX
 }

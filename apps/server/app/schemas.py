@@ -10,14 +10,13 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import CAMEL
 from app.retry_actions import RetryAction
-from slopolis_core.domain import SessionStatus, TargetStatus
-from slopolis_db.models.github import RequiredAccess
+from slopolis_core.domain import SessionStatus, Severity, TargetStatus
 
 __all__ = [
     "AgentEventItem",
@@ -32,12 +31,8 @@ __all__ = [
     "CatalogModelRef",
     "CreateReviewRequest",
     "CreatedSession",
-    "DashboardData",
-    "DashboardParams",
-    "DashboardSession",
-    "DashboardSummary",
     "FilterOption",
-    "LiveSession",
+    "Finding",
     "ModelCatalog",
     "ModelImportRequest",
     "ModelImportResponse",
@@ -53,11 +48,19 @@ __all__ = [
     "ProviderTestResult",
     "ProviderUpdateRequest",
     "PullRequestChecks",
+    "PullRequestChecksState",
+    "PullRequestFilterOptions",
+    "PullRequestListItem",
+    "PullRequestListParams",
+    "PullRequestListResponse",
+    "PullRequestReview",
+    "PullRequestReviewFilter",
+    "PullRequestReviewState",
+    "PullRequestSort",
+    "PullRequestSummary",
     "RepositoryListResponse",
-    "RepositoryPullRequestsResponse",
     "RepositoryRef",
     "RepositorySummary",
-    "RequiredAccess",
     "RetryAction",
     "RetryRequest",
     "ReviewPreset",
@@ -175,6 +178,35 @@ class MeResponse(UserRef):
 # --- sessions ---------------------------------------------------------------
 
 
+class Finding(WireModel):
+    """One review finding the harness produced for a target (spec 10.6).
+
+    ``comment_url`` is the GitHub comment this finding was posted as, and is
+    ``null`` when it never got one: no diff line to anchor a comment to, a
+    severity below the repository's threshold (those are summarized instead), or
+    a publish that was refused or failed. The UI reads it to link a finding back
+    to where it landed on the pull request.
+    """
+
+    path: str
+    line: int | None = None
+    severity: Severity
+    category: str
+    message: str
+    suggestion: str | None = None
+    comment_url: str | None = None
+    #: The login the comment is posted as (``"<slug>[bot]"``), non-null exactly
+    #: when the finding has a comment — the same condition as ``comment_url``.
+    author: str | None = None
+    #: When the app wrote that comment, non-null under the same condition.
+    posted_at: dt.datetime | None = None
+    #: GitHub's own hunk for that comment — the ``@@ … @@`` header and its lines,
+    #: exactly the text GitHub renders above the comment — so the app can show the
+    #: code a finding is about. Non-null under the same condition as the rest of
+    #: the comment fields; null for a comment posted before the app recorded hunks.
+    diff_hunk: str | None = None
+
+
 class SessionTarget(WireModel):
     """One pull request within a session, with per-target aggregates."""
 
@@ -191,6 +223,10 @@ class SessionTarget(WireModel):
     #: not retryable, so there is nothing for the button to promise.
     retry_action: RetryAction | None = None
     findings_count: int = 0
+    #: The findings themselves, most severe first. Only the session detail read
+    #: fills this; the list leaves it ``null``, because a page of sessions must
+    #: not carry every finding of every session.
+    findings: list[Finding] | None = None
     tokens: int = 0
     cost_usd: float = 0.0
     duration_ms: int | None = None
@@ -293,8 +329,6 @@ class RepositorySummary(WireModel):
     connected: bool
     #: The workspace switch: a connected repository can be parked without losing its history.
     enabled: bool = True
-    #: The access policy pre-flight applies to this repository (spec 10.10).
-    required_access: RequiredAccess = "default"
 
 
 class RepositoryListResponse(WireModel):
@@ -303,10 +337,24 @@ class RepositoryListResponse(WireModel):
     items: list[RepositorySummary]
 
 
+# --- pull-request inbox (spec v3) -------------------------------------------
+
+#: The review states a row can report (spec v3 §2).
+PullRequestReviewState = Literal["never", "queued", "running", "reviewed", "failed"]
+#: ``stale`` refines ``reviewed``: a review that is behind the pull request head.
+PullRequestReviewFilter = Literal[
+    "never", "queued", "running", "reviewed", "stale", "failed"
+]
+#: The CI rollup states a row can carry.
+PullRequestChecksState = Literal["passing", "failing", "pending", "none"]
+#: The orders the inbox accepts (spec v3 §3).
+PullRequestSort = Literal["updated_desc", "size_desc", "staleness_desc", "created_desc"]
+
+
 class PullRequestChecks(WireModel):
     """Rolled-up CI status for an open pull request."""
 
-    state: str
+    state: PullRequestChecksState
     total: int
     passing: int
 
@@ -320,6 +368,9 @@ class OpenPullRequest(WireModel):
     title: str
     url: str
     author: UserRef
+    head_branch: str
+    #: Commit the pull request head points at; a review is compared against it.
+    head_sha: str
     updated_at: str
     draft: bool
     comments: int
@@ -329,77 +380,61 @@ class OpenPullRequest(WireModel):
     checks: PullRequestChecks
 
 
-class RepositoryPullRequestsResponse(WireModel):
-    """Open pull requests for one connected repository."""
-
-    repository: RepositorySummary
-    pull_requests: list[OpenPullRequest]
+# --- pull-request inbox (spec v3) -------------------------------------------
 
 
-# --- dashboard --------------------------------------------------------------
+class PullRequestReview(WireModel):
+    """What slopolis knows about an open pull request's latest review.
 
+    ``commitsSinceReview`` is ``0`` when the review covers the current head, a
+    positive count when it is behind, and ``null`` when the head has moved but
+    the commits between the two SHAs could not be counted — an unknown distance,
+    never an invented one.
+    """
 
-class LiveSession(WireModel):
-    """A session target that is still queued or running."""
-
-    id: str
-    name: str
-    status: SessionStatus
-    repository: RepositoryRef
-    number: int
-    pr_label: str
-    title: str
-    url: str
-    head_branch: str
-    model: str
-    provider: str
-    progress: int
-    step: str
-    started_at: dt.datetime
-    elapsed_ms: int
-
-
-class DashboardSummary(WireModel):
-    """Aggregates for the dashboard analytics strip."""
-
-    scope: str
-    total_sessions: int
-    running: int
-    failed: int
-    spend_usd: float
-    tokens: int
-
-
-class DashboardSession(WireModel):
-    """Compact history entry rendered as a conversation row."""
-
-    id: str
-    title: str
-    name: str
-    status: SessionStatus
-    model: str
-    provider: str
-    prompt: str | None = None
-    created_at: dt.datetime
-    finished_at: dt.datetime | None = None
-    targets: list[SessionTarget] = Field(default_factory=list)
-    target_count: int = 0
+    state: PullRequestReviewState
+    session_id: str | None = None
+    reviewed_sha: str | None = None
+    commits_since_review: int | None = 0
     findings_count: int = 0
-    cost_usd: float = 0.0
+    progress: int | None = None
+    step: str | None = None
+    reviewed_at: dt.datetime | None = None
 
 
-class DashboardData(WireModel):
-    """Everything the Dashboard home needs in one response."""
+class PullRequestListItem(OpenPullRequest):
+    """One row of the pull-request inbox."""
 
-    scope: str
-    summary: DashboardSummary
-    running: list[LiveSession] = Field(default_factory=list)
-    recent: list[DashboardSession] = Field(default_factory=list)
-    generated_at: dt.datetime
+    review: PullRequestReview
 
 
-class DashboardParams(WireModel):
-    """Query parameters accepted by ``GET /api/dashboard``."""
+class PullRequestSummary(WireModel):
+    """Backlog totals for the inbox header (spec v3 §3)."""
+
+    total: int
+    #: Never reviewed plus reviewed-but-behind.
+    needs_review: int
+    stale: int
+    #: Queued plus running.
+    running: int
+
+
+class PullRequestFilterOptions(WireModel):
+    """Every filter dimension the inbox offers, counted over its whole row set."""
+
+    repositories: list[FilterOption] = Field(default_factory=list)
+    reviews: list[FilterOption] = Field(default_factory=list)
+    checks: list[FilterOption] = Field(default_factory=list)
+
+
+class PullRequestListParams(WireModel):
+    """Query parameters accepted by ``GET /api/pull-requests`` (spec v3 §6).
+
+    ``extra="forbid"`` turns a typo like ``page_size=5`` into a 422 instead of a
+    silently ignored filter. ``page`` and ``pageSize`` are clamped rather than
+    refused: a stale page number left over from a filter change answers with the
+    last page instead of an error.
+    """
 
     model_config = ConfigDict(
         alias_generator=CAMEL,
@@ -407,8 +442,28 @@ class DashboardParams(WireModel):
         extra="forbid",
     )
 
+    q: str | None = None
     repo: str | None = None
-    limit: int = Field(default=12, ge=1, le=50)
+    review: PullRequestReviewFilter | None = None
+    checks: PullRequestChecksState | None = None
+    #: Drafts are hidden unless this is set; the client sends ``drafts=1``.
+    drafts: bool = False
+    page: int = 1
+    page_size: int = 25
+    sort: PullRequestSort = "updated_desc"
+
+
+class PullRequestListResponse(WireModel):
+    """``GET /api/pull-requests``: the page plus what the header and bar need."""
+
+    items: list[PullRequestListItem] = Field(default_factory=list)
+    page: int
+    page_size: int
+    total: int
+    total_pages: int
+    summary: PullRequestSummary
+    filter_options: PullRequestFilterOptions
+    generated_at: dt.datetime
 
 
 # --- preflight + create -----------------------------------------------------

@@ -50,9 +50,7 @@ function renderComposer() {
         prompt=""
         onPromptChange={vi.fn()}
         onRemove={vi.fn()}
-        onAdd={vi.fn()}
         onClear={vi.fn()}
-        onOpenPicker={vi.fn()}
         preset="default"
         onPresetChange={vi.fn()}
         presetCatalog={presets}

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -13,12 +13,6 @@ from slopolis_db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 if TYPE_CHECKING:
     from slopolis_db.models.workspace import Workspace
-
-#: The access policies a repository can be held to (spec 10.10): ``default`` is
-#: the spec rule (private repos need read, public repos need write), ``read``
-#: loosens it, ``write`` tightens it. The one vocabulary the column, the wire
-#: schema, and the pre-flight override all name.
-type RequiredAccess = Literal["default", "read", "write"]
 
 
 class GitHubInstallation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -66,16 +60,6 @@ class Repository(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     #: grants the repository, ``enabled`` says this workspace still reviews it.
     #: A parked row keeps its sessions and findings and is refused at pre-flight.
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    #: Per-repository override of the triggering access rule (spec 10.10):
-    #: ``default`` applies the spec rule (private needs read, public needs
-    #: write), ``read`` loosens it, ``write`` tightens it. It lives on the row
-    #: rather than in a global table because it is a property of this repository.
-    required_access: Mapped[RequiredAccess] = mapped_column(
-        String(20),
-        nullable=False,
-        default="default",
-        server_default="default",
-    )
     last_activity_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,

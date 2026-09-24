@@ -134,7 +134,7 @@ async def test_workspace_scoped_routes_refuse_an_account_without_one(
     # When they ask for workspace data
     for path in (
         "/api/repositories",
-        "/api/dashboard",
+        "/api/pull-requests",
         "/api/sessions",
         "/api/models",
         "/api/workspaces/settings",

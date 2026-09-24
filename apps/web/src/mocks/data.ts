@@ -7,6 +7,7 @@
  */
 
 import type {
+  Finding,
   RepositoryRef,
   ReviewSession,
   Severity,
@@ -93,6 +94,84 @@ export const PR_TITLES = [
   "feat: workspace model assignment defaults to auto",
 ]
 
+/**
+ * Findings the mock serves. The pools stay small so every shape a finding
+ * takes is visible in the dataset, and are grouped by category so a message
+ * never reads off-topic beside its chip.
+ */
+const FINDING_PATHS = [
+  "src/queue/worker.py",
+  "src/auth/tokens.py",
+  "src/api/sessions.py",
+  "src/db/session_repository.py",
+  "apps/worker/slopolis_worker/review_target.py",
+  "packages/core/slopolis_core/publish/github.py",
+  "apps/web/src/features/sessions/SessionDetail.tsx",
+  "tests/e2e/test_review_flow.py",
+]
+
+const FINDING_MESSAGES: Record<string, string[]> = {
+  security: [
+    "The webhook body is parsed before the signature is checked, so a forged delivery can requeue a target.",
+    "The token is compared with `==`, which leaks its length through timing.",
+  ],
+  performance: [
+    "Each finding opens its own session; the loop issues one query per row.",
+    "The diff is re-read for every sub-agent instead of being loaded once per target.",
+  ],
+  correctness: [
+    "`finishedAt` is set from the start time, so a retried session reports the failed attempt's duration.",
+    "The page count is computed from the unpaged rows, so the last page is one short.",
+  ],
+  reliability: [
+    "A transient provider error ends the target instead of being retried.",
+    "The stream is closed without a final frame, so a client that reconnects loses the last status.",
+  ],
+  maintainability: [
+    "This branch duplicates the retry rules the queue already owns.",
+    "The helper takes five positional booleans; a caller can transpose two of them silently.",
+  ],
+  tests: [
+    "The retry path is only covered through the happy case, so the refusal is untested.",
+    "The fixture pins the summary wording instead of the behavior it stands for.",
+  ],
+}
+
+const FINDING_CATEGORIES = Object.keys(FINDING_MESSAGES)
+
+/**
+ * Literal replacement code, kept with the category it answers so a suggestion
+ * always reads as a fix for the message above it.
+ */
+const FINDING_SUGGESTIONS: Record<string, string[]> = {
+  security: [
+    "if not hmac.compare_digest(signature, expected):\n    raise SignatureError(\"signature mismatch\")",
+  ],
+  performance: [
+    "rows = await session.execute(\n    select(Finding).where(Finding.target_id.in_(target_ids))\n)",
+  ],
+  correctness: [
+    "finished_at = started_at + timedelta(milliseconds=duration_ms)",
+  ],
+  reliability: [
+    "for attempt in range(MAX_ATTEMPTS):\n    try:\n        return await provider.complete(prompt)\n    except TransientError:\n        await asyncio.sleep(backoff(attempt))",
+  ],
+  maintainability: [
+    "def retryable(target: SessionTarget) -> bool:\n    return target.status in RETRYABLE_STATUSES",
+  ],
+  tests: [
+    "with pytest.raises(RetryRefused):\n    await retry(session, target_ids=[running.id])",
+  ],
+}
+
+/** Most findings are worth reading; few stop a merge on their own. */
+const FINDING_SEVERITY_WEIGHTS: Array<[Severity, number]> = [
+  ["info", 0.3],
+  ["warning", 0.34],
+  ["error", 0.24],
+  ["critical", 0.12],
+]
+
 function mulberry32(seed: number) {
   let state = seed
   return () => {
@@ -136,7 +215,7 @@ function formatShortDate(date: Date): string {
   return `${months[date.getMonth()]} ${date.getDate()}`
 }
 
-function headBranchFromTitle(title: string): string {
+export function headBranchFromTitle(title: string): string {
   const match = title.match(/^([a-z]+)(?:\([^)]*\))?:\s*(.+)$/i)
   const type = (match?.[1] ?? "feat").toLowerCase()
   const subject = match?.[2] ?? title
@@ -250,6 +329,8 @@ function retriedSession(now: number): ReviewSession {
 
 export interface MockDataset {
   sessions: ReviewSession[]
+  /** A target's findings, keyed by target id (the detail read's payload). */
+  findings: Record<string, Finding[]>
   generatedAt: number
   filterOptions: SessionFilterOptions
   stats: SessionStats
@@ -415,10 +496,177 @@ export function createDataset(now = Date.now()): MockDataset {
   )
   return {
     sessions,
+    findings: buildFindings(sessions),
     generatedAt: now,
     filterOptions: buildFilterOptions(sessions),
     stats: buildStats(sessions),
   }
+}
+
+/**
+ * The findings every target carries, built in a pass of its own: the session
+ * loop's draw sequence is what the rest of the mock stack joins against, so
+ * nothing here may draw from its generator.
+ */
+function buildFindings(sessions: ReviewSession[]): Record<string, Finding[]> {
+  const rand = mulberry32(0x4f1d1a95)
+  const findings: Record<string, Finding[]> = {}
+
+  for (const session of sessions) {
+    for (const target of session.targets) {
+      findings[target.id] = Array.from(
+        { length: target.findingsCount },
+        (_, index) => {
+          const category =
+            FINDING_CATEGORIES[Math.floor(rand() * FINDING_CATEGORIES.length)]
+          const messages = FINDING_MESSAGES[category]
+          const suggestions = FINDING_SUGGESTIONS[category]
+          const severity = pickWeighted(rand, FINDING_SEVERITY_WEIGHTS)
+          // A minority cite no line. Those can only ever be summarised, which
+          // is the case the UI has to render without a comment link.
+          const line = rand() < 0.2 ? null : 1 + Math.floor(rand() * 320)
+          // Only a `done` target posted anything, and only what the
+          // publisher's default `warning` threshold and a diff line let it
+          // post inline; the rest went into the summary comment. The comment
+          // link, the login it is posted as and the time it was written all
+          // hang off that one answer, so they can never disagree.
+          const posted = postedInline(target, severity, line)
+          // Hoisted so the hunk can read them; the draws stay in the order
+          // they were taken in.
+          const path =
+            FINDING_PATHS[Math.floor(rand() * FINDING_PATHS.length)]
+          const message = messages[Math.floor(rand() * messages.length)]
+          const suggestion =
+            rand() < 0.45
+              ? suggestions[Math.floor(rand() * suggestions.length)]
+              : null
+          return {
+            path,
+            line,
+            severity,
+            category,
+            message,
+            suggestion,
+            commentUrl: posted
+              ? `https://github.com/${target.repository.fullName}/pull/${target.number}#discussion_r${commentId(target.id, index)}`
+              : null,
+            // The app's own login, read from its configured slug rather than
+            // looked up — rendering a session costs no GitHub call.
+            author: posted ? "slopolis-dev[bot]" : null,
+            // The publisher stamps the comment's time in the same write that
+            // records it, so a posted finding dates from the session's finish.
+            postedAt: posted ? (session.finishedAt ?? session.createdAt) : null,
+            diffHunk:
+              posted && line !== null
+                ? findingDiffHunk(path, line, suggestion)
+                : null,
+          } satisfies Finding
+        },
+      ).sort(bySeverityThenLocation)
+    }
+  }
+
+  return findings
+}
+
+/**
+ * The order the API promises (spec 10.8): most severe first, then file order.
+ * The mock has to serve the same order the server does, or a design reviewed
+ * against it would be reviewed against a list that does not exist.
+ */
+function bySeverityThenLocation(a: Finding, b: Finding): number {
+  const severity =
+    SEVERITY_ORDER.indexOf(b.severity) - SEVERITY_ORDER.indexOf(a.severity)
+  if (severity !== 0) return severity
+  if (a.path !== b.path) return a.path < b.path ? -1 : 1
+  if ((a.line ?? 0) !== (b.line ?? 0)) return (a.line ?? 0) - (b.line ?? 0)
+  if (a.message === b.message) return 0
+  return a.message < b.message ? -1 : 1
+}
+
+const POSTING_THRESHOLD: Severity = "warning"
+
+/** Whether the publisher put this finding on a diff line (spec 10.7). */
+function postedInline(
+  target: SessionTarget,
+  severity: Severity,
+  line: number | null,
+): boolean {
+  return (
+    target.status === "done" &&
+    line !== null &&
+    SEVERITY_ORDER.indexOf(severity) >= SEVERITY_ORDER.indexOf(POSTING_THRESHOLD)
+  )
+}
+
+/**
+ * A GitHub comment id for a permalink. Derived from the target and the
+ * finding's position rather than drawn, so a link stays stable however the
+ * pools are reordered.
+ */
+function commentId(targetId: string, index: number): number {
+  let hash = 0
+  for (let i = 0; i < targetId.length; i += 1) {
+    hash = (hash * 31 + targetId.charCodeAt(i)) | 0
+  }
+  return 2_400_000_000 + (Math.abs(hash) % 90_000) * 100 + index
+}
+
+/**
+ * The code a generated hunk surrounds its change with. Deliberately generic:
+ * the mock cites files across several languages, and the hunk only has to read
+ * as the code around the finding. All of it sits one level in, so the added
+ * line can join it without changing the block's shape.
+ */
+const HUNK_CONTEXT_LINES = [
+  "    target = self._targets.get(target_id)",
+  "    if target is None:",
+  "        return None",
+  "    started = time.monotonic()",
+  "    await self._queue.put(target)",
+  "    return TargetStatus.DONE",
+  "    for attempt in range(MAX_ATTEMPTS):",
+  "    session = await self._sessions.get(session_id)",
+]
+
+/**
+ * The hunk GitHub prints above a posted comment: the `@@` header, a couple of
+ * context lines, and a `+` line whose new line number is the finding's own —
+ * so the card highlights the row the comment is anchored to. The suggestion is
+ * the replacement for that line, so its first line is what the hunk adds.
+ *
+ * Derived from the finding rather than drawn from the dataset's generator,
+ * whose sequence the rest of the mock joins against.
+ */
+function findingDiffHunk(
+  path: string,
+  line: number,
+  suggestion: string | null,
+): string {
+  const base = (line * 7 + path.length) % HUNK_CONTEXT_LINES.length
+  // A change near the top of the file has fewer lines above it, exactly as
+  // GitHub prints it — the header still lands the added line on `line`.
+  const lead = Math.min(2, line - 1)
+  const before = [
+    HUNK_CONTEXT_LINES[base],
+    HUNK_CONTEXT_LINES[(base + 1) % HUNK_CONTEXT_LINES.length],
+  ].slice(0, lead)
+  const after = HUNK_CONTEXT_LINES[(base + 3) % HUNK_CONTEXT_LINES.length]
+  const replacement = (suggestion ?? "return retryable(target)").split("\n")[0]
+  // The replacement joins the block the context lines sit in.
+  const added = `    ${replacement.trimStart()}`
+  const start = line - before.length
+  const context = before.length + 1
+  const body = [
+    ...before.map((text) => ` ${text}`),
+    `+${added}`,
+    ` ${after}`,
+  ]
+
+  return [
+    `@@ -${start},${context} +${start},${context + 1} @@`,
+    ...body,
+  ].join("\n")
 }
 
 function buildFilterOptions(sessions: ReviewSession[]): SessionFilterOptions {

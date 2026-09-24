@@ -78,6 +78,9 @@ class EventType(StrEnum):
     TOOL_CALL = "agent.tool_call"
     TOOL_RESULT = "agent.tool_result"
     MESSAGE = "agent.message"
+    #: One real gateway call: the request messages, the raw response, and what it
+    #: cost. The only event that carries a transcript rather than a digest.
+    TURN = "agent.turn"
     FINDING = "agent.finding"
     COMPLETED = "agent.completed"
     FAILED = "agent.failed"

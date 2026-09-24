@@ -22,7 +22,7 @@ REQUIRED_PATHS: tuple[str, ...] = (
     "/api/sessions/{session_id}/retry",
     "/api/sessions/{session_id}/events",
     "/api/reviews/preflight",
-    "/api/dashboard",
+    "/api/pull-requests",
     "/api/repositories",
     "/api/repositories/{repository_id}",
     "/api/models",
@@ -38,8 +38,15 @@ CAMEL_PROPS: dict[str, str] = {
     "triggeredBy": "ReviewSession",
     "targetCount": "ReviewSession",
     "findingsCount": "SessionTarget",
+    "commentUrl": "Finding",
+    "diffHunk": "Finding",
+    "postedAt": "Finding",
     "pageSize": "Paginated",
     "isAdmin": "UserRef",
+    "headSha": "PullRequestListItem",
+    "commitsSinceReview": "PullRequestReview",
+    "needsReview": "PullRequestSummary",
+    "totalPages": "PullRequestListResponse",
 }
 
 

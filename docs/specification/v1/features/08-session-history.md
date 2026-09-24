@@ -3,6 +3,11 @@
 - Permalink: `/sessions/{id}`. Access requires **read access to any involved repo**; the page only shows content from repos the viewer can access.
 - Live updates stream over **SSE**.
 - Session detail exposes: status, progress steps, per-PR results, findings, model used, tokens/cost, a readable activity log, and **raw model/tool request-response payloads** (visible only to authorized viewers).
+- Findings are listed **per target**, under that pull request, most severe first and then by path and
+  line, each rendered as the comment it is — the code hunk it sits on, author, time, body, suggestion —
+  and linking the comment it posted, or saying so when it has none (spec 10.7 §What the app shows).
+- Findings ride the **detail read only**: `GET /api/sessions/{id}` carries them, `GET /api/sessions`
+  carries `null`, because a page of sessions must not ship every finding of every session.
 - The session list filters by **repo, user, status, and date**.
 - Retention is **indefinite** in the MVP.
 

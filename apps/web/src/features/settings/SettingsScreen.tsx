@@ -25,14 +25,6 @@ import {
   useWorkspaceSettingsMutation,
 } from "./lib/useWorkspaceSettings"
 
-export interface SettingsScreenProps {
-  /**
-   * Sends the admin to the repositories list, which owns the per-repository
-   * access policy. Omitted when that route cannot be reached.
-   */
-  onOpenRepositories?: () => void
-}
-
 /** Per-field labels and copy, keyed by cap so the two cannot drift apart. */
 const CAP_TEXT: Record<CapKey, { label: string; description: string }> = {
   maxConcurrentSessions: {
@@ -59,13 +51,13 @@ const CAP_TEXT: Record<CapKey, { label: string; description: string }> = {
 
 /**
  * The workspace admin surface (spec 10.10): the caps submissions and the queue
- * are held to, and where the remaining access decisions are made.
+ * are held to.
  *
  * Every value here is pre-spawn — a gate the submit path applies before a
  * session exists, or a bound the queue applies to jobs already queued — so
  * nothing on this screen changes what a review does once it runs.
  */
-export function SettingsScreen({ onOpenRepositories }: SettingsScreenProps) {
+export function SettingsScreen() {
   const { data, status, error, refetch } = useWorkspaceSettings()
   const mutation = useWorkspaceSettingsMutation(refetch)
   const [draft, setDraft] = useState<CapDraft | null>(null)
@@ -116,9 +108,9 @@ export function SettingsScreen({ onOpenRepositories }: SettingsScreenProps) {
           </p>
           <h1 className="text-xl font-semibold tracking-tight">Settings</h1>
           <p className="max-w-2xl text-sm text-muted-foreground">
-            Workspace policy, caps, and access control. Every cap is opt-in: a
-            blank field means unlimited, so a workspace that sets none submits
-            exactly as it did before the caps existed.
+            Workspace policy and caps. Every cap is opt-in: a blank field means
+            unlimited, so a workspace that sets none submits exactly as it did
+            before the caps existed.
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={refetch}>
@@ -226,34 +218,13 @@ export function SettingsScreen({ onOpenRepositories }: SettingsScreenProps) {
       {form !== null && !failed ? (
         <Card>
           <CardHeader>
-            <CardTitle>Access control</CardTitle>
+            <CardTitle>Membership</CardTitle>
             <CardDescription className="max-w-3xl">
-              Who may start a review in this workspace. Both switches live on the
-              thing they describe rather than in a table here.
+              Who belongs to this workspace. The only item here is deferred, so
+              nothing on this card changes who can sign in yet.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
-            <div className="flex flex-wrap items-start justify-between gap-3 rounded-md border border-border px-4 py-3">
-              <div className="flex flex-col gap-1">
-                <h3 className="text-sm font-medium">Repository access policy</h3>
-                <p className="max-w-2xl text-xs leading-relaxed text-muted-foreground">
-                  What a repository&apos;s pull requests must be able to do is set
-                  per repository, not in a global table: <code>default</code>{" "}
-                  follows the rule (private repositories need read, public ones
-                  need write), <code>read</code> loosens it, and{" "}
-                  <code>write</code> tightens it. Set it on the repository&apos;s
-                  own row, beside the switch that parks it — a loosened public
-                  repository and a tightened private one are properties of that
-                  repository.
-                </p>
-              </div>
-              {onOpenRepositories ? (
-                <Button variant="outline" size="sm" onClick={onOpenRepositories}>
-                  Open repositories
-                </Button>
-              ) : null}
-            </div>
-
             <div className="flex flex-wrap items-start justify-between gap-3 rounded-md border border-border px-4 py-3">
               <div className="flex flex-col gap-1">
                 <h3 className="flex items-center gap-2 text-sm font-medium">

@@ -22,6 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps import (
+    AppSettingsDep,
     ArqPoolDep,
     CurrentUserDep,
     DbSessionDep,
@@ -203,6 +204,7 @@ async def get_session(
     workspace_id: WorkspaceIdDep,
     viewer: CurrentUserDep,
     checker: RepoAccessCheckerDep,
+    settings: AppSettingsDep,
 ) -> ReviewSessionSchema:
     """Return one session with only the targets and findings the viewer may read.
 
@@ -212,7 +214,15 @@ async def get_session(
     session = await _require_session(db, session_id, workspace_id)
     view = await require_session_access(db, session, viewer=viewer, checker=checker)
     triggered_by = await _triggered_by(db, session)
-    targets = await serialize_targets(db, view.targets)
+    # The author login comes from configuration, never a GitHub lookup: reading a
+    # session must not reach GitHub (spec 10.7 §What the app shows), so a
+    # deployment that has not set ``GITHUB_APP_SLUG`` shows the finding without
+    # naming its author.
+    slug = settings.core.github_app_slug
+    app_login = f"{slug}[bot]" if slug else None
+    targets = await serialize_targets(
+        db, view.targets, with_findings=True, app_login=app_login
+    )
     return serialize_session(session, triggered_by=triggered_by, targets=targets)
 
 

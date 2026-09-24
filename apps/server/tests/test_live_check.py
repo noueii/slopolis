@@ -574,7 +574,6 @@ class PreflightGitHub:
         *,
         private: bool,
         user_login: str,
-        required: str | None = None,
     ) -> bool:
         return True
 

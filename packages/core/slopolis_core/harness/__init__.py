@@ -4,6 +4,7 @@ Public surface is re-exported here so importers depend on
 ``slopolis_core.harness`` rather than the internal module layout.
 """
 
+from slopolis_core.harness.context import RunRef, bind_run, current_run
 from slopolis_core.harness.events import (
     CallbackSink,
     CollectingSink,
@@ -80,6 +81,7 @@ __all__ = [
     "ModelResolver",
     "Policy",
     "RunNode",
+    "RunRef",
     "RunStore",
     "Scope",
     "StaticResolver",
@@ -90,6 +92,8 @@ __all__ = [
     "ToolSpec",
     "UnknownRoleError",
     "agent_spec",
+    "bind_run",
+    "current_run",
     "model_roles",
     "redact",
 ]

@@ -60,6 +60,7 @@ from slopolis_core.harness import (
     agent_spec,
 )
 from slopolis_core.llm.client import LlmClient
+from slopolis_core.llm.recording import RecordingLlmClient
 from slopolis_core.review.harness import ReviewHarness, ReviewResult
 from slopolis_core.settings import get_settings
 from slopolis_db.models import Finding, SessionTargetRun
@@ -71,7 +72,7 @@ from worker.deps import (
 )
 from worker.errors import PermanentTargetError, UnknownModeError
 from worker.jobs import persistence
-from worker.jobs.agent_runs import RunRecorder, RunRef
+from worker.jobs.agent_runs import RunRecorder, RunRef, TurnEventSink
 from worker.jobs.loading import LoadOutcome, TargetJob, load_target
 from worker.jobs.model_selection import ResolvedModel, resolve_model
 from worker.jobs.publish import InlinePost, PublishPlan, publish
@@ -471,6 +472,11 @@ async def _publish_attempt(
         repo_config=repo_config,
     )
     job.target.head_branch = plan.pull.head_branch
+    # ``reviewed_sha`` is deliberately left where the review attempt put it: the
+    # head read above is the commit the pull request sits at *now*, which is the
+    # commit this retry anchors its comments to, not the one the findings it is
+    # posting came from. Writing it here would report a stale review as current
+    # the moment someone pushed (spec v3 §2).
     inline = inline_targets(
         plan.result.findings,
         threshold=plan.repo_config.review.severity_threshold,
@@ -634,11 +640,18 @@ async def _run_reviewer(
     performed as the reviewer agent's single model turn, so the run tree gets a
     real node with its own steps, findings, and terminal event. The turn returns
     the harness's raw text and usage, which is what the runtime records.
+
+    The client is wrapped so every call the harness makes is recorded as an
+    ``agent.turn`` on this run (spec v2 11.3): the prompt the model was actually
+    sent is the harness's, not the transcript the runtime hands its turn, so the
+    recording has to sit at the client, below both.
     """
     outcome = _TurnOutcome()
     runtime = AgentRuntime(
         llm=_ReviewTurn(
-            harness=review.build_harness(clients.reader, llm),
+            harness=review.build_harness(
+                clients.reader, RecordingLlmClient(llm, TurnEventSink(tree.recorder))
+            ),
             model=model,
             job=job,
             repo_config=repo_config,
@@ -846,8 +859,19 @@ async def _persist_and_publish(
     surface the config asked for posted. The caller folds it into the node's
     summary, so a skipped check run is told apart from a publish that never
     happened.
+
+    Only ``_review_attempt`` reaches this function, which is what makes it the
+    one place a target's ``reviewed_sha`` may be written (spec v3 §2): a publish
+    retry posts a review that already exists and only re-reads the pull request
+    for a head to anchor its comments to, so a write from there would claim the
+    review covered commits it never read (see ``_publish_attempt``).
     """
     job.target.head_branch = plan.pull.head_branch
+    # The commit this review was run against, recorded in the same commit as the
+    # findings that came from it: an attempt that never produced a review fails
+    # before this commit and rolls back, so this column only ever names a review
+    # the app can read, and it names the one the row above persists (spec v3 §2).
+    job.target.reviewed_sha = plan.pull.head_sha
     inline = inline_targets(
         plan.result.findings,
         threshold=plan.repo_config.review.severity_threshold,
@@ -889,6 +913,11 @@ async def _publish_review(
     async def stamp(post: InlinePost) -> None:
         """Record one finding's comment the moment that comment exists (spec 10.7).
 
+        The link and the hunk GitHub returned with it are written together, in one
+        commit, because they describe one fact: a finding whose row carries the
+        comment id but no hunk could not be rendered the way GitHub renders it,
+        and the hunk is not recoverable afterwards.
+
         The commit is the point of it: the failure path begins with a rollback,
         so an uncommitted link would be rolled back too and the app would show a
         finding as unposted while its comment sat on the pull request — which is
@@ -897,6 +926,7 @@ async def _publish_review(
         row = rows[post.source_index]
         row.posted = True
         row.github_comment_id = post.comment_id
+        row.diff_hunk = post.diff_hunk
         await db.commit()
 
     outcome = await publish(

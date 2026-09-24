@@ -2,8 +2,8 @@
 
 Two layers are covered here: the checker itself — three-way verdicts, the TTL
 cache, token resolution — and the read paths that consume it, which must narrow
-the session list, the dashboard, and the session detail to the repositories the
-*viewer* can read rather than the ones the installation can.
+the session list, the pull-request inbox, and the session detail to the
+repositories the *viewer* can read rather than the ones the installation can.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from slopolis_core.cache import TTLCache
+from slopolis_core.github.models import GitHubPullRequest
 from slopolis_core.settings import get_settings
 from slopolis_db.models import (
     Finding,
@@ -35,13 +36,47 @@ from slopolis_db.models import (
     Workspace,
 )
 
-from .conftest import ApiHarness, add_installation, seed_session
+from .conftest import ApiHarness, FakeGitHubClient, add_installation, seed_session
 
 _API_PATH = "/repos/acme/api"
 _HIDDEN_PATH = "/repos/acme/hidden"
 _API_URL = f"https://api.github.com{_API_PATH}"
 _MASTER_KEY = base64.b64encode(b"repo-access-tests-master-key-material").decode()
 _ROTATED_KEY = base64.b64encode(b"a-rotated-master-key-material-enough").decode()
+
+
+def inbox_client(*full_names: str) -> FakeGitHubClient:
+    """A GitHub fake listing one open pull request per named repository.
+
+    The inbox reads GitHub for the rows it filters, so the tests that use it as a
+    read path need a listing to filter: the repository access rule is what decides
+    whether those rows come back.
+    """
+    return FakeGitHubClient(
+        {
+            full_name: [
+                GitHubPullRequest(
+                    repo_full_name=full_name,
+                    private=False,
+                    number=7,
+                    title=f"fix: {full_name} change",
+                    url=f"https://github.com/{full_name}/pull/7",
+                    head_branch="fix/branch",
+                    base_branch="main",
+                    head_sha="abc123",
+                    default_branch="main",
+                    body="",
+                    author_login="octocat",
+                    draft=False,
+                    changed_files=3,
+                    additions=40,
+                    deletions=7,
+                    updated_at="2026-01-01T00:00:00Z",
+                )
+            ]
+            for full_name in full_names
+        }
+    )
 
 
 # --- fixtures and doubles ---------------------------------------------------
@@ -402,19 +437,21 @@ async def test_a_member_with_access_sees_the_session_everywhere(
     reader_id = await add_member(session_factory, seeded.workspace_id)
     probe = FakeRepoProbe({"acme/api": True})
     harness: ApiHarness = await build_harness(
-        user_id=reader_id, repo_access=make_checker(probe)
+        user_id=reader_id,
+        repo_access=make_checker(probe),
+        github_client=inbox_client("acme/api"),
     )
 
-    # When the list, the dashboard, and the detail are read
+    # When the list, the inbox, and the detail are read
     listing = await harness.client.get("/api/sessions")
-    dashboard = await harness.client.get("/api/dashboard")
+    inbox = await harness.client.get("/api/pull-requests")
     detail = await harness.client.get(f"/api/sessions/{seeded.session_id}")
 
     # Then the session and its target are visible on all three
     assert listing.json()["total"] == 1
     assert listing.json()["items"][0]["targets"][0]["repository"]["fullName"] == "acme/api"
-    assert dashboard.json()["summary"]["totalSessions"] == 1
-    assert dashboard.json()["running"][0]["prLabel"] == "acme/api#7"
+    assert inbox.json()["total"] == 1
+    assert inbox.json()["items"][0]["review"]["sessionId"] == str(seeded.session_id)
     assert detail.status_code == 200
     assert detail.json()["targetCount"] == 1
 
@@ -426,20 +463,23 @@ async def test_a_member_without_access_sees_nothing(
     reader_id = await add_member(session_factory, seeded.workspace_id)
     probe = FakeRepoProbe({"acme/api": False})
     harness: ApiHarness = await build_harness(
-        user_id=reader_id, repo_access=make_checker(probe)
+        user_id=reader_id,
+        repo_access=make_checker(probe),
+        github_client=inbox_client("acme/api"),
     )
 
-    # When they read the list, the dashboard, and the detail
+    # When they read the list, the inbox, and the detail
     listing = await harness.client.get("/api/sessions")
-    dashboard = await harness.client.get("/api/dashboard")
+    inbox = await harness.client.get("/api/pull-requests")
     detail = await harness.client.get(f"/api/sessions/{seeded.session_id}")
 
-    # Then the session is hidden, and the detail reads as absent
+    # Then the session is hidden, the inbox has no row for it, and the detail
+    # reads as absent
     assert listing.json()["total"] == 0
     assert listing.json()["items"] == []
-    assert dashboard.json()["summary"]["totalSessions"] == 0
-    assert dashboard.json()["recent"] == []
-    assert dashboard.json()["running"] == []
+    assert inbox.json()["total"] == 0
+    assert inbox.json()["items"] == []
+    assert inbox.json()["summary"]["total"] == 0
     assert detail.status_code == 404
     assert detail.json()["error"]["code"] == "session_not_found"
     assert probe.calls == [("gho_reader", "acme/api")]
@@ -564,15 +604,17 @@ async def test_filtering_by_a_repository_does_not_grant_access_to_it(
     reader_id = await add_member(session_factory, seeded.workspace_id)
     probe = FakeRepoProbe({"acme/api": True, "acme/hidden": False})
     harness: ApiHarness = await build_harness(
-        user_id=reader_id, repo_access=make_checker(probe)
+        user_id=reader_id,
+        repo_access=make_checker(probe),
+        github_client=inbox_client("acme/api", "acme/hidden"),
     )
 
-    # When the list and the dashboard are scoped to that repository
+    # When the list and the inbox are scoped to that repository
     listing = await harness.client.get("/api/sessions", params={"repo": "acme/hidden"})
-    dashboard = await harness.client.get("/api/dashboard", params={"repo": "acme/hidden"})
+    inbox = await harness.client.get("/api/pull-requests", params={"repo": "acme/hidden"})
 
     # Then asking for it by name still returns nothing
     assert listing.json()["total"] == 0
     assert listing.json()["items"] == []
-    assert dashboard.json()["summary"]["totalSessions"] == 0
-    assert dashboard.json()["recent"] == []
+    assert inbox.json()["total"] == 0
+    assert inbox.json()["items"] == []

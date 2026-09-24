@@ -100,6 +100,19 @@ async def test_one_pr_session_produces_a_real_review(env: Env) -> None:
     assert findings[0].posted is True
     assert findings[0].github_comment_id == 201
 
+    # ... and the finding is readable under its target from the session detail
+    # read, linked to the comment the publisher posted it as
+    detail = await env.client.get(f"/api/sessions/{session_id}")
+    assert detail.status_code == 200
+    detail_findings = detail.json()["targets"][0]["findings"]
+    assert len(detail_findings) == 1
+    assert detail_findings[0]["path"] == GROUNDED_PATH
+    assert detail_findings[0]["commentUrl"] == (
+        f"https://github.com/{REPO_FULL_NAME}/pull/{PR_NUMBER}#discussion_r201"
+    )
+    assert detail_findings[0]["postedAt"] is not None
+    assert detail_findings[0]["diffHunk"] == env.publisher.inline_hunk
+
     # ... exactly one usage record for the model the assignment resolved
     assert len(usage) == 1
     assert usage[0].model_id == MODEL_ID
@@ -110,6 +123,36 @@ async def test_one_pr_session_produces_a_real_review(env: Env) -> None:
     assert target_row.status == "done"
     assert session_row is not None
     assert session_row.status == "done"
+
+    # ... and the review's model call is readable over the run-tree API: the
+    # reviewer node carries one turn holding the prompt the model was actually
+    # sent (the harness's composed prompt), not the transcript the runtime hands
+    # its turn and the harness ignores (spec v2 11.3)
+    tree = await env.client.get(f"/api/sessions/{session_id}/runs/tree")
+    assert tree.status_code == 200
+    nodes: dict[str, dict[str, object]] = {}
+
+    def _collect(rows: list[dict[str, object]]) -> None:
+        for row in rows:
+            nodes[str(row["level"])] = row
+            _collect(row.get("children") or [])  # type: ignore[arg-type]
+
+    _collect(tree.json()["runs"])
+    assert set(nodes) == {"main", "pr", "sub"}
+    events = await env.client.get(
+        f"/api/sessions/{session_id}/runs/{nodes['sub']['id']}/events"
+    )
+    assert events.status_code == 200
+    turns = [item for item in events.json()["items"] if item["type"] == "agent.turn"]
+    assert len(turns) == 1
+    turn = turns[0]
+    assert turn["runId"] == nodes["sub"]["id"]
+    assert turn["payload"]["model_id"] == MODEL_ID
+    assert turn["payload"]["truncated"] is False
+    sent = turn["payload"]["messages"]
+    assert [message["role"] for message in sent] == ["user"]
+    assert "Focus on auth bugs" in sent[0]["content"]
+    assert "diff --git" in sent[0]["content"]
 
     # ... the publisher got the summary, only the grounded inline, and a failing check
     assert len(env.publisher.summaries) == 1

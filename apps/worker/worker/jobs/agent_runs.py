@@ -35,7 +35,9 @@ from slopolis_core.harness import (
     HarnessLevel,
     RunStore,
     agent_spec,
+    current_run,
 )
+from slopolis_core.llm.recording import TurnRecord, turn_payload
 from slopolis_db.models import AgentEventRow, AgentRun, ReviewSession, SessionTarget
 
 __all__ = [
@@ -43,6 +45,7 @@ __all__ = [
     "DatabaseRunStore",
     "RunRecorder",
     "RunRef",
+    "TurnEventSink",
     "finish_session_main_run",
 ]
 
@@ -519,6 +522,27 @@ class RunRecorder:
                 },
             )
         return run_ids
+
+
+class TurnEventSink:
+    """Writes a model call as an ``agent.turn`` event on the run that made it.
+
+    The call is attributed through the ambient run the core runtime publishes, not
+    through the caller: the reviewer run's turn is made by the review harness,
+    which is several frames below the loop that owns the run, and it is that
+    composed prompt a reader wants (spec v2 11.3). A call made outside any run —
+    the pre-flight live check — has no run to belong to and is not recorded.
+    """
+
+    def __init__(self, recorder: RunRecorder) -> None:
+        self._recorder = recorder
+
+    async def __call__(self, turn: TurnRecord) -> None:
+        """Emit the turn on the current run, or drop it when there is none."""
+        ref = current_run()
+        if ref is None:
+            return
+        await self._recorder.emit(ref.run_id, EventType.TURN, turn_payload(turn))
 
 
 def _text(value: uuid.UUID | None) -> str | None:

@@ -26,6 +26,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from slopolis_core.findings import Finding, FindingsParseError, parse_findings
+from slopolis_core.harness.context import RunRef, bind_run
 from slopolis_core.harness.events import EventBus
 from slopolis_core.harness.registry import (
     BUILT_IN_AGENTS,
@@ -485,8 +486,20 @@ class AgentRuntime:
         )
 
         state = _RunState()
-        await self._drive(spec, state, ctx, task)
-        return await self._finish(state, ctx)
+        # The run is published while it executes so a model call that originates
+        # below this loop — the review harness composing its own prompt — can say
+        # which run it belongs to (spec v2 11.3).
+        ref = RunRef(
+            run_id=run_id,
+            session_id=session_id,
+            target_id=target_id,
+            level=spec.level,
+            role=spec.name,
+            model_id=choice.model_id,
+        )
+        with bind_run(ref):
+            await self._drive(spec, state, ctx, task)
+            return await self._finish(state, ctx)
 
     async def _drive(
         self, spec: AgentSpec, state: _RunState, ctx: _RunContext, task: str

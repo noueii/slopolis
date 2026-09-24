@@ -89,6 +89,55 @@ export interface WorkspaceSettings {
  */
 export type WorkspaceSettingsUpdate = Partial<WorkspaceSettings>
 
+/**
+ * One review finding on a pull request (spec 10.6). `suggestion` is a literal
+ * replacement for the cited line(s), so it renders as code, not as advice.
+ * `commentUrl`, `author` and `postedAt` are all non-null exactly when the
+ * finding posted an inline comment — one `posted` flag on the row decides the
+ * three together, so they can never disagree.
+ */
+export interface Finding {
+  /** Repository-relative path of the cited file, e.g. `src/queue/worker.py`. */
+  path: string
+  /** Line in the PR's head revision, or `null` when the finding cites none. */
+  line: number | null
+  severity: Severity
+  /** What the finding is about, e.g. `security`, `performance`. */
+  category: string
+  message: string
+  /** Literal replacement code for the cited line(s), or `null` for none. */
+  suggestion: string | null
+  /**
+   * Permalink to the inline comment this finding posted on the pull request,
+   * or `null` when it posted none: a finding with no diff line, one below the
+   * repository's severity threshold, and a refused or failed publish all go
+   * into the rolling summary comment instead.
+   */
+  commentUrl: string | null
+  /**
+   * The login the comment is posted as, e.g. `slopolis-dev[bot]`, read from
+   * the configured `GITHUB_APP_SLUG` rather than looked up: rendering a
+   * session costs no GitHub call (spec 10.7). `null` when the finding posted
+   * nothing, and also when no slug is configured — the UI then does not name
+   * an author.
+   */
+  author: string | null
+  /**
+   * When the app wrote the comment, not when the review ran: the finding row's
+   * `updated_at`, which the publisher stamps in the same write that records
+   * `posted` and `github_comment_id` — so a retry that posts the comment later
+   * moves it. `null` when the finding posted nothing.
+   */
+  postedAt: string | null
+  /**
+   * GitHub's own hunk text for the comment: the `@@ -a,b +c,d @@` header
+   * followed by lines each prefixed `+`, `-` or a space — exactly what GitHub
+   * prints above a review comment, so the card shows the code the comment is
+   * about. `null` when the finding posted nothing.
+   */
+  diffHunk: string | null
+}
+
 /** One pull request within a session. */
 export interface SessionTarget {
   id: string
@@ -107,6 +156,12 @@ export interface SessionTarget {
    */
   retryAction?: "review" | "publish" | null
   findingsCount: number
+  /**
+   * The target's findings, most severe first. Only `GET /api/sessions/{id}`
+   * fills them — the list leaves this null, since a page of sessions would
+   * otherwise carry every finding of every session.
+   */
+  findings?: Finding[] | null
   tokens: number
   costUsd: number
   durationMs?: number
@@ -199,14 +254,6 @@ export interface SessionStats {
   costUsd: number
 }
 
-/**
- * Per-repository override of the triggering access rule (spec 10.10):
- * `default` = the spec rule (private repos need read, public repos need write);
- * `read` = loosened (any read access is enough); `write` = tightened (write
- * access is required).
- */
-export type RequiredAccess = "default" | "read" | "write"
-
 /** A repository connected through the GitHub App installation (spec 10.1). */
 export interface RepositorySummary {
   id: string
@@ -224,8 +271,6 @@ export interface RepositorySummary {
    * with its history, but pre-flight refuses its pull requests.
    */
   enabled: boolean
-  /** Access policy pre-flight applies to this repository (spec 10.10). */
-  requiredAccess: RequiredAccess
 }
 
 export interface RepositoryListResponse {
@@ -233,12 +278,12 @@ export interface RepositoryListResponse {
 }
 
 /**
- * `PATCH /api/repositories/{id}` body. Omitted fields stay as they are; the
- * two switches are audited independently of one another (spec 10.1 / 10.10).
+ * `PATCH /api/repositories/{id}` body: the parking switch (spec 10.1). A
+ * disabled repository stays listed with its history, but pre-flight refuses its
+ * pull requests.
  */
 export interface RepositoryUpdate {
-  enabled?: boolean
-  requiredAccess?: RequiredAccess
+  enabled: boolean
 }
 
 /** Rolled-up CI status for an open pull request. */
@@ -252,8 +297,8 @@ export interface PullRequestChecks {
 
 /**
  * An open pull request discovered for a connected repository. This is the
- * primary selection surface for New Review (spec 10.1 / 10.4); pasting a URL
- * remains a secondary affordance that resolves to the same shape.
+ * primary selection surface for a review (spec v3 §1); pasting a URL remains a
+ * secondary affordance that resolves to the same shape.
  */
 export interface OpenPullRequest {
   id: string
@@ -262,6 +307,9 @@ export interface OpenPullRequest {
   title: string
   url: string
   author: UserRef
+  headBranch: string
+  /** Commit the PR head points at; compared against a review's own SHA. */
+  headSha: string
   updatedAt: string
   draft: boolean
   comments: number
@@ -271,84 +319,86 @@ export interface OpenPullRequest {
   checks: PullRequestChecks
 }
 
-/** Open pull requests for one connected repository. */
-export interface RepositoryPullRequestsResponse {
-  repository: RepositorySummary
-  /** Open PRs, most recently updated first. */
-  pullRequests: OpenPullRequest[]
-}
+/** Whether a review is running, current, or behind the PR head (spec v3 §2). */
+export type PullRequestReviewState =
+  | "never"
+  | "queued"
+  | "running"
+  | "reviewed"
+  | "failed"
 
-/** A session target that is still executing (spec 10.5 / 10.8). */
-export interface LiveSession {
-  id: string
-  name: string
-  status: Extract<SessionStatus, "queued" | "running">
-  repository: RepositoryRef
-  number: number
-  /** `owner/name#123` convenience label. */
-  prLabel: string
-  /** Short, agent-assigned review title; the row's primary label. */
-  title: string
-  /** Canonical GitHub URL for the pull request. */
-  url: string
-  /** GitHub head ref for the PR, e.g. `fix/guard-token-refresh`. */
-  headBranch: string
-  model: string
-  provider: string
-  /** Whole-session completion, 0–100. */
-  progress: number
-  /** Human-readable current step, e.g. `Scanning diff (3/5 files)`. */
-  step: string
-  startedAt: string
-  /** Elapsed wall-clock time at response time; the UI may keep ticking. */
-  elapsedMs: number
-}
-
-/** Aggregates for the dashboard analytics strip (spec 10.9 usage). */
-export interface DashboardSummary {
-  /** Echoes the active scope, e.g. `All repositories` or `acme/api-gateway`. */
-  scope: string
-  totalSessions: number
-  running: number
-  failed: number
-  spendUsd: number
-  /** Total tokens attributed across the scope. */
-  tokens: number
-}
-
-/** Compact history entry rendered as a conversation row (spec 10.8). */
-export interface DashboardSession {
-  id: string
-  /** Short, agent-assigned review title, e.g. `Guard token refresh skew`. */
-  title: string
-  name: string
-  status: SessionStatus
-  model: string
-  provider: string
-  prompt?: string
-  createdAt: string
-  finishedAt?: string
-  targets: SessionTarget[]
-  targetCount: number
+/** What slopolis knows about an open pull request's latest review. */
+export interface PullRequestReview {
+  state: PullRequestReviewState
+  /** Session holding this PR's latest review; `null` when never reviewed. */
+  sessionId: string | null
+  /** Head SHA the last completed review covered; `null` when never reviewed. */
+  reviewedSha: string | null
+  /**
+   * Commits pushed since `reviewedSha`: `0` when the review covers the current
+   * head, a positive count when it is behind, and `null` when the head has moved
+   * but the distance is unknown. Never a guess — a fabricated count would read
+   * as fact in the row.
+   */
+  commitsSinceReview: number | null
   findingsCount: number
-  costUsd: number
+  /** Whole-target progress 0–100 while `queued`/`running`. */
+  progress: number | null
+  /** Current step while `queued`/`running`, e.g. `Scanning diff (3/5 files)`. */
+  step: string | null
+  reviewedAt: string | null
 }
 
-export interface DashboardData {
-  scope: string
-  summary: DashboardSummary
-  /** Only `queued`/`running` sessions, newest first. */
-  running: LiveSession[]
-  /** Recent sessions in scope, newest first. */
-  recent: DashboardSession[]
-  generatedAt: string
+/** One row of the pull-request inbox. */
+export interface PullRequestListItem extends OpenPullRequest {
+  review: PullRequestReview
 }
 
-export interface DashboardParams {
+/** `reviewed` with `commitsSinceReview > 0` — a review behind the PR head. */
+export type PullRequestReviewFilter = PullRequestReviewState | "stale"
+
+export type PullRequestSort =
+  | "updated_desc"
+  | "size_desc"
+  | "staleness_desc"
+  | "created_desc"
+
+export interface PullRequestListParams {
+  /** Free-text search across title, repository, PR number and author. */
+  q?: string
   /** Repository full name, or omitted for every connected repository. */
   repo?: string
-  /** Max history entries to return. */
-  limit?: number
+  review?: PullRequestReviewFilter
+  checks?: PullRequestChecks["state"]
+  /** Draft PRs are hidden unless this is set (spec v3 §3). */
+  includeDrafts?: boolean
+  page?: number
+  pageSize?: number
+  sort?: PullRequestSort
+}
+
+/** Backlog totals for the inbox header (spec v3 §3). */
+export interface PullRequestSummary {
+  total: number
+  needsReview: number
+  stale: number
+  running: number
+}
+
+export interface PullRequestFilterOptions {
+  repositories: FilterOption[]
+  reviews: FilterOption[]
+  checks: FilterOption[]
+}
+
+/**
+ * `GET /api/pull-requests`: the inbox page plus everything the filter bar and
+ * header need, so one request fills the whole screen.
+ */
+export interface PullRequestListResponse extends Paginated<PullRequestListItem> {
+  summary: PullRequestSummary
+  filterOptions: PullRequestFilterOptions
+  generatedAt: string
 }
 
 /** One PR resolved from a pasted link. */
@@ -704,4 +754,27 @@ export interface AgentEventItem {
 export interface AgentEventPage {
   items: AgentEventItem[]
   nextSeq: number | null
+}
+
+/**
+ * One request message inside an `agent.turn` event. `role` is the gateway's
+ * role for the message: `system`, `user`, `assistant`, or `tool`.
+ */
+export interface AgentTurnMessage {
+  role: string
+  content: string
+}
+
+/**
+ * The prompt/response pair an `agent.turn` event carries (spec v2 11.3): the
+ * exact messages the run sent to the gateway and the raw completion it got
+ * back, so a prompt can be improved from what was really sent rather than from
+ * a redacted digest. Both sides are clipped at the server's 200,000-character
+ * cap; `truncated` says the stored copy lost text. `response` is `null` when
+ * the call recorded no completion text.
+ */
+export interface AgentTurnTranscript {
+  messages: AgentTurnMessage[]
+  response: string | null
+  truncated: boolean
 }

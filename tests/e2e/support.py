@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 
 from slopolis_core.context import PrContext
 from slopolis_core.github.errors import GitHubNotFoundError
-from slopolis_core.github.models import GitHubPullRequest, InlineComment
+from slopolis_core.github.models import GitHubPullRequest, InlineComment, ReviewComment
 from slopolis_core.llm.models import ChatMessage, CompletionResult
 from slopolis_core.preflight.models import PrReference, RepositoryRef
 
@@ -105,9 +105,9 @@ class FakeGitHub:
     def __init__(self, *, config_text: str | None = REPO_CONFIG_YML) -> None:
         self.config_text = config_text
         self.resolved_urls: list[str] = []
-        #: One entry per access check: the repository, its visibility, the user,
-        #: and the override pre-flight resolved for it (``None`` = spec rule).
-        self.checked_access: list[tuple[str, bool, str, str | None]] = []
+        #: One entry per access check: the repository, its visibility, and the
+        #: user pre-flight asked about.
+        self.checked_access: list[tuple[str, bool, str]] = []
 
     # --- app.adapters.github.GitHubGateway port (pre-flight) ----------------
 
@@ -138,10 +138,9 @@ class FakeGitHub:
         *,
         private: bool,
         user_login: str,
-        required: str | None = None,
     ) -> bool:
         """The triggering user may review the covered repository."""
-        self.checked_access.append((repo_full_name, private, user_login, required))
+        self.checked_access.append((repo_full_name, private, user_login))
         return repo_full_name == REPO_FULL_NAME
 
     async def read_repo_file(self, repo_full_name: str, path: str) -> str | None:
@@ -268,6 +267,10 @@ class FakePublisher:
     #: The line comments the pull request already holds, keyed by path and line in
     #: the order they were posted — what reconciliation adopts (spec 10.7).
     existing_inline: dict[tuple[str, int], list[int]] = field(default_factory=dict)
+    #: The hunk GitHub returns with every comment this fake posts or adopts — the
+    #: text its own UI renders above a review comment, which the app stores so it
+    #: can show the code a finding is about (spec 10.7).
+    inline_hunk: str = "@@ -1,4 +1,5 @@\n import os\n+MAX = 10\n context"
 
     async def find_summary_comment(self, repo_full_name: str, number: int) -> int | None:
         """Answer with the seeded existing comment, or ``None`` on a first publish."""
@@ -282,20 +285,27 @@ class FakePublisher:
 
     async def post_inline_comments(
         self, repo_full_name: str, number: int, comments: list[InlineComment], commit_id: str
-    ) -> list[int]:
-        """Record the inline comments and return one id per comment."""
+    ) -> list[ReviewComment]:
+        """Record the inline comments and return one comment per finding."""
         self.inlines.append((repo_full_name, number, comments, commit_id))
-        return [201 + index for index in range(len(comments))]
+        return [
+            ReviewComment(id=201 + index, diff_hunk=self.inline_hunk)
+            for index in range(len(comments))
+        ]
 
     async def reconcile_inline_comments(
         self, repo_full_name: str, number: int, comments: list[InlineComment]
-    ) -> list[int | None]:
+    ) -> list[ReviewComment | None]:
         """Adopt a seeded comment per path and line, in the order each was posted."""
         available = {key: list(ids) for key, ids in self.existing_inline.items()}
-        adopted: list[int | None] = []
+        adopted: list[ReviewComment | None] = []
         for comment in comments:
             listed = available.setdefault((comment.path, comment.line), [])
-            adopted.append(listed.pop(0) if listed else None)
+            adopted.append(
+                ReviewComment(id=listed.pop(0), diff_hunk=self.inline_hunk)
+                if listed
+                else None
+            )
         return adopted
 
     async def upsert_check_run(

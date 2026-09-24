@@ -8,7 +8,11 @@
  * cannot make the pane look broken.
  */
 
-import type { AgentEventItem } from "@/api/contract"
+import type {
+  AgentEventItem,
+  AgentTurnMessage,
+  AgentTurnTranscript,
+} from "@/api/contract"
 import { formatCost, formatTokens } from "./format"
 
 export type RunEventTone = "neutral" | "info" | "success" | "warning" | "danger"
@@ -19,6 +23,12 @@ export interface RunEventView {
   /** One line of prose built from allow-listed fields. */
   detail: string
   tone: RunEventTone
+  /**
+   * Parsed `agent.turn` transcript, when this event carries one. `null` for
+   * every other event type, and for a turn payload this build cannot read —
+   * the row then falls back to its one-line digest.
+   */
+  transcript?: AgentTurnTranscript | null
 }
 
 const MAX_DIGEST_FIELDS = 3
@@ -58,6 +68,33 @@ function digest(payload: Record<string, unknown>): string {
     }
   }
   return parts.length > 0 ? parts.join(" · ") : "No details recorded."
+}
+
+/**
+ * Read an `agent.turn` payload's transcript defensively. A worker newer or
+ * older than this build may shape the payload differently, and a turn that
+ * cannot be read must not break the pane: anything unexpected yields `null`,
+ * and the row still renders its one-line digest.
+ */
+function turnTranscript(
+  payload: Record<string, unknown>,
+): AgentTurnTranscript | null {
+  const rawMessages = payload.messages
+  if (!Array.isArray(rawMessages)) return null
+  const messages: AgentTurnMessage[] = []
+  for (const raw of rawMessages) {
+    if (typeof raw !== "object" || raw === null) return null
+    if (!("role" in raw) || !("content" in raw)) return null
+    const { role, content } = raw
+    if (typeof role !== "string" || typeof content !== "string") return null
+    messages.push({ role, content })
+  }
+  const response = payload.response
+  return {
+    messages,
+    response: typeof response === "string" ? response : null,
+    truncated: payload.truncated === true,
+  }
 }
 
 /** Describe one event for the node detail pane. */
@@ -154,6 +191,34 @@ export function describeRunEvent(event: AgentEventItem): RunEventView {
           .filter(Boolean)
           .join(" "),
         tone: severity === "high" || severity === "critical" ? "warning" : "info",
+      }
+    }
+    case "agent.turn": {
+      const model = text(payload, "model_id")
+      const transcript = turnTranscript(payload)
+      const total = count(payload, "total_tokens")
+      const cost = count(payload, "cost_usd")
+      // The digest stays readable even when the transcript could not be read:
+      // it counts the raw array when the shape is unknown, so a newer payload
+      // still says something true about the call.
+      const messageCount =
+        transcript?.messages.length ??
+        (Array.isArray(payload.messages) ? payload.messages.length : null)
+      const detail = [
+        model,
+        messageCount === null
+          ? null
+          : `${messageCount} ${messageCount === 1 ? "message" : "messages"}`,
+        total === null ? null : `${formatTokens(total)} tokens`,
+        cost === null ? null : formatCost(cost),
+      ]
+        .filter(Boolean)
+        .join(" · ")
+      return {
+        label: "Model turn",
+        detail: detail ? `${detail}.` : "Turn recorded.",
+        tone: "info",
+        transcript,
       }
     }
     case "agent.completed": {

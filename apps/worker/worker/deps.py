@@ -23,7 +23,7 @@ from slopolis_core.github.app_installations import AppInstallations
 from slopolis_core.github.auth import TokenCache
 from slopolis_core.github.client import GitHubClient
 from slopolis_core.github.errors import GitHubAuthError
-from slopolis_core.github.models import GitHubPullRequest, InlineComment
+from slopolis_core.github.models import GitHubPullRequest, InlineComment, ReviewComment
 from slopolis_core.github.publisher import GitHubPublisher
 from slopolis_core.llm.client import LiteLlmClient, LlmClient
 from slopolis_core.review.harness import ReviewHarness
@@ -91,11 +91,11 @@ class Publisher(Protocol):
         number: int,
         comments: list[InlineComment],
         commit_id: str,
-    ) -> Awaitable[list[int]]: ...
+    ) -> Awaitable[list[ReviewComment]]: ...
 
     def reconcile_inline_comments(
         self, repo_full_name: str, number: int, comments: list[InlineComment]
-    ) -> Awaitable[list[int | None]]: ...
+    ) -> Awaitable[list[ReviewComment | None]]: ...
 
     def upsert_check_run(
         self,

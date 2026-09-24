@@ -13,10 +13,12 @@ from decimal import Decimal
 from app.retry_actions import RetryAction
 from app.schemas import (
     CreatedSession,
-    DashboardSession,
     RepositoryRef,
     UserRef,
     WorkspaceRef,
+)
+from app.schemas import (
+    Finding as FindingSchema,
 )
 from app.schemas import (
     ReviewSession as ReviewSessionSchema,
@@ -24,14 +26,22 @@ from app.schemas import (
 from app.schemas import (
     SessionTarget as SessionTargetSchema,
 )
-from slopolis_core.domain import SessionStatus, TargetStatus
-from slopolis_db.models import Repository, ReviewSession, SessionTarget, User, Workspace
+from slopolis_core.domain import SessionStatus, Severity, TargetStatus
+from slopolis_db.models import (
+    Finding,
+    Repository,
+    ReviewSession,
+    SessionTarget,
+    User,
+    Workspace,
+)
 
 __all__ = [
     "build_name",
     "repo_ref",
+    "review_comment_url",
     "serialize_created_session",
-    "serialize_dashboard_session",
+    "serialize_finding",
     "serialize_session",
     "serialize_target",
     "user_ref",
@@ -67,12 +77,66 @@ def repo_ref(repository: Repository) -> RepositoryRef:
     )
 
 
+def review_comment_url(
+    repo_full_name: str, number: int, comment_id: int | None
+) -> str | None:
+    """Build the URL of a review comment posted on a pull request.
+
+    GitHub anchors a review comment by its id on the pull request page, which is
+    what the comment's own ``html_url`` carries; only the id is stored, so the
+    link is built here.
+    """
+    if comment_id is None:
+        return None
+    return f"https://github.com/{repo_full_name}/pull/{number}#discussion_r{comment_id}"
+
+
+def serialize_finding(
+    finding: Finding,
+    *,
+    repository: Repository,
+    number: int,
+    app_login: str | None = None,
+) -> FindingSchema:
+    """Map one finding row onto the wire, with the comment it was posted as.
+
+    One rule decides every comment field: the comment id is the finding's
+    ``github_comment_id`` only when the publisher recorded it as ``posted``, and
+    ``comment_url``, ``author``, ``posted_at`` and ``diff_hunk`` all follow that
+    single value — so they can never disagree about whether a comment exists.
+
+    ``repository`` and ``number`` name the pull request the comment lives on:
+    a finding row keeps only the comment id, not the URL it resolves to.
+
+    ``app_login`` is the login the comment is posted as, taken from
+    configuration rather than looked up, so rendering a finding never reaches
+    GitHub. ``posted_at`` is the row's ``updated_at``: the moment the publisher
+    stamped ``posted`` and the comment id, which is why a publish retry dates
+    the comment rather than the review the finding came from.
+    """
+    comment_id = finding.github_comment_id if finding.posted else None
+    has_comment = comment_id is not None
+    return FindingSchema(
+        path=finding.path,
+        line=finding.line,
+        severity=Severity(finding.severity),
+        category=finding.category,
+        message=finding.message,
+        suggestion=finding.suggestion,
+        comment_url=review_comment_url(repository.full_name, number, comment_id),
+        author=app_login if has_comment else None,
+        posted_at=finding.updated_at if has_comment else None,
+        diff_hunk=finding.diff_hunk if has_comment else None,
+    )
+
+
 def serialize_target(
     target: SessionTarget,
     findings_count: int,
     repository: Repository,
     *,
     retry_action: RetryAction | None,
+    findings: list[FindingSchema] | None = None,
 ) -> SessionTargetSchema:
     """Map one target with its per-target aggregates."""
     return SessionTargetSchema(
@@ -85,6 +149,7 @@ def serialize_target(
         status=target_status(target.status),
         retry_action=retry_action,
         findings_count=findings_count,
+        findings=findings,
         tokens=target.tokens,
         cost_usd=_to_float(target.cost_usd),
         duration_ms=target.duration_ms,
@@ -119,29 +184,6 @@ def serialize_session(
         cost_usd=round(total_cost, 6),
         findings_count=total_findings,
         prompt=session.prompt,
-    )
-
-
-def serialize_dashboard_session(
-    session: ReviewSession,
-    *,
-    targets: list[SessionTargetSchema],
-) -> DashboardSession:
-    """Map a session onto the compact dashboard history entry."""
-    return DashboardSession(
-        id=str(session.id),
-        title=session.title,
-        name=session.name,
-        status=session_status(session.status),
-        model=session.model,
-        provider=session.provider,
-        prompt=session.prompt,
-        created_at=session.created_at,
-        finished_at=session.finished_at,
-        targets=targets,
-        target_count=len(targets),
-        findings_count=sum(target.findings_count for target in targets),
-        cost_usd=round(sum(target.cost_usd for target in targets), 6),
     )
 
 

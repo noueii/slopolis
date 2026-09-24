@@ -76,6 +76,10 @@ class SessionTarget(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     title: Mapped[str] = mapped_column(String(512), nullable=False)
     url: Mapped[str] = mapped_column(String(2048), nullable=False)
     head_branch: Mapped[str] = mapped_column(String(255), nullable=False)
+    #: Head SHA the last review attempt covered (spec v3 §2). Null until an
+    #: attempt reviews the pull request; the inbox compares it against the pull
+    #: request's current head to say how far behind a review is.
+    reviewed_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="queued")
     tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, default=Decimal("0"))

@@ -2,7 +2,7 @@
 
 **Spec version:** v2
 **Status:** DRAFT for review (extends v1; supersedes nothing)
-**Last updated:** 2026-09-13
+**Last updated:** 2026-09-23
 **Scope:** the agent harness, in two versions
 
 > v1 remains the approved MVP; v1 decisions carry forward unchanged unless explicitly overridden. This version realizes the v1 roadmap item "Phase 3. Orchestration" — but split into a first version we build now and a second version parked for further investigation.
@@ -97,6 +97,7 @@ SessionTarget
 |---|---|---|---|
 | 11.1 | Harness V1 — hierarchical supervisor with sub-agents | [features/01-supervisor-subagents.md](./features/01-supervisor-subagents.md) | build now |
 | 11.2 | Harness V2 — Magentic orchestration | [features/02-magentic-orchestration.md](./features/02-magentic-orchestration.md) | parked |
+| 11.3 | Turn transcripts — the raw request and response of every model call | [features/03-turn-transcripts.md](./features/03-turn-transcripts.md) | build now |
 
 ---
 
@@ -112,7 +113,9 @@ SessionTarget
 
 ## 8. Open questions
 
-1. Event granularity (summary vs full model turns) — storage vs diagnosability.
+1. **Event granularity (summary vs full model turns) — resolved.** Both, at two grains: summaries on
+   `agent.step`/`agent.message`, the full turn on its own `agent.turn` event
+   ([features/03-turn-transcripts.md](./features/03-turn-transcripts.md)).
 2. Shared repo-context cache vs isolated sub-agents.
 3. Retry semantics for failed sub-agents.
 4. Scope of the main orchestrator beyond aggregation (cross-PR synthesis).

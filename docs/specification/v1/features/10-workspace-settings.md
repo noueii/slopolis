@@ -1,4 +1,4 @@
-# 10.10 Workspace settings: caps, limits, and access policy
+# 10.10 Workspace settings: caps and limits
 
 The whole surface here is **pre-spawn**: every value is either a gate the submit path applies
 before a session (and therefore a job) may exist, or a bound the queue applies to jobs that are
@@ -41,21 +41,21 @@ already queued. Nothing here changes what a review does once it runs.
 - The worker is the only place these two numbers are read for enforcement; the API never refuses a
   submission because of them (that is `maxConcurrentSessions`' job).
 
-## Per-repository access policy (spec 10.2)
+## Trigger access (spec 10.2)
 
-`repositories.required_access` is a per-repository override of the triggering rule:
+Who may trigger a review is a fact about the repository and the viewer, not a setting: pre-flight
+demands the spec rule on every trigger, and there is nothing to configure per repository.
 
-| Value | Effect |
+| Repository | Required |
 |---|---|
-| `default` | The spec rule: private repos need **read**, public repos need **write**. |
-| `read` | Loosens: any read access is enough, private or public. |
-| `write` | Tightens: write access is required, private or public. |
+| private | **read** |
+| public | **write** |
 
-- The rule is evaluated in pre-flight (and therefore at submit), and the refusal names what was
-  **required** and what the viewer has, e.g. "write access is required on `acme/api`".
-- The override is a workspace decision per repository, set on the repository itself (the same
-  surface that parks it), not in a global table: a loosened public repository and a tightened
-  private one are properties of that repository's row.
+- The rule is evaluated in pre-flight (and therefore at submit), and the refusal states it, naming
+  what the viewer needs, e.g. "private repos need read access, public repos need write access".
+- The bar follows the repository's own visibility, so it is applied where access is checked rather
+  than stored on the row. On a public repository read is the baseline every GitHub user holds, so
+  the write bar is what keeps a trigger to people who can push.
 
 ## API surface
 
@@ -63,13 +63,12 @@ already queued. Nothing here changes what a review does once it runs.
 |---|---|---|
 | `GET /api/workspaces/settings` | — | `WorkspaceSettings` |
 | `PATCH /api/workspaces/settings` | partial `WorkspaceSettings` | `WorkspaceSettings` |
-| `PATCH /api/repositories/{id}` | `{enabled?, requiredAccess?}` | `RepositorySummary` |
+| `PATCH /api/repositories/{id}` | `{enabled}` | `RepositorySummary` |
 
 Settings hang off the existing `/api/workspaces` router (the caller's workspace is implied by their
 session), so the surface has one prefix rather than two.
 
 - `WorkspaceSettings` = `{maxConcurrentSessions, maxSessionsPerUserPerDay, maxTargetsPerRepo,
   maxTargetsPerInstallation}`, each `number | null`.
-- `RepositorySummary` gains `requiredAccess`. The existing `enabled` field is unchanged; one
-  endpoint now carries both per-repository switches and audits each change.
-- A `requiredAccess` value outside the three literals is **422**.
+- `RepositorySummary` carries `enabled`, the workspace's own parking switch (spec 10.1). The
+  endpoint carries that switch and audits each change; a body that omits it is **422**.

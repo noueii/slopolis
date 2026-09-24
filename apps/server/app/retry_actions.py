@@ -125,8 +125,9 @@ async def latest_attempts(
     """Return each target's most recent attempt, keyed by target id.
 
     One query for a whole page, and none at all when there is nothing to ask
-    about: a read with no retryable target — a live session, the dashboard —
-    must not grow a round trip because the wire carries a field for failures.
+    about: a read with no retryable target — a live session, the pull-request
+    inbox — must not grow a round trip because the wire carries a field for
+    failures.
     """
     if not target_ids:
         return {}

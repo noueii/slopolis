@@ -4,7 +4,6 @@ import {
   render,
   screen,
   waitFor,
-  within,
 } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
@@ -43,7 +42,6 @@ const repository: RepositorySummary = {
   defaultBranch: "main",
   openPrCount: 3,
   lastActivityAt: "2026-01-01T00:00:00.000Z",
-  requiredAccess: "default",
   connected: true,
   enabled: true,
 }
@@ -88,7 +86,7 @@ describe("RepositoriesScreen", () => {
     })
 
     // The install route redirects on to GitHub; the login route would just
-    // re-authenticate the visitor and drop them back on the dashboard.
+    // re-authenticate the visitor and drop them back on the inbox.
     expect(connect.getAttribute("href")).toBe("/api/github/install")
   })
 
@@ -115,46 +113,6 @@ describe("RepositoriesScreen", () => {
         enabled: true,
       }),
     )
-  })
-
-  it("badges a non-default review access rule and leaves the default unbadged", async () => {
-    vi.mocked(api.listRepositories).mockResolvedValue({
-      items: [
-        { ...repository, requiredAccess: "read" },
-        {
-          ...repository,
-          id: "repo_2",
-          fullName: "acme/worker",
-          requiredAccess: "write",
-        },
-        {
-          ...repository,
-          id: "repo_3",
-          fullName: "acme/docs",
-          requiredAccess: "default",
-        },
-      ],
-    })
-    render(<RepositoriesScreen onOpenRepository={vi.fn()} />)
-
-    const loosened = await screen.findByRole("button", {
-      name: "Open repository acme/api-gateway",
-    })
-    const tightened = screen.getByRole("button", {
-      name: "Open repository acme/worker",
-    })
-    const specRule = screen.getByRole("button", {
-      name: "Open repository acme/docs",
-    })
-
-    expect(
-      within(loosened.parentElement!).getByText("Read access"),
-    ).toBeDefined()
-    expect(
-      within(tightened.parentElement!).getByText("Write access"),
-    ).toBeDefined()
-    // The spec rule is the norm, so it earns no badge and no noise
-    expect(within(specRule.parentElement!).queryByText(/access$/)).toBeNull()
   })
 
   it("explains what parking does before disabling a repository", async () => {

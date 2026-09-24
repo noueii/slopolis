@@ -6,6 +6,8 @@ failure instead of silent drift, and JSON payloads are parsed here at the
 boundary once; interior code receives typed values.
 """
 
+from dataclasses import dataclass
+
 from pydantic import BaseModel, ConfigDict
 
 __all__ = [
@@ -17,6 +19,7 @@ __all__ = [
     "GitHubRepository",
     "InlineComment",
     "InstallationRepository",
+    "ReviewComment",
 ]
 
 _STRICT = ConfigDict(extra="forbid")
@@ -43,6 +46,9 @@ class GitHubPullRequest(BaseModel):
     additions: int
     deletions: int
     updated_at: str
+    #: When the pull request was opened. The inbox's ``created_desc`` sort orders
+    #: on it (spec v3 §3); empty for a caller that never mapped it.
+    created_at: str = ""
 
 
 class GitHubRepository(BaseModel):
@@ -103,6 +109,22 @@ class InlineComment(BaseModel):
     path: str
     line: int
     body: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewComment:
+    """A review comment this App has on a pull request, as GitHub describes it.
+
+    Both inline paths end here — a comment the publisher just created and one
+    reconciliation adopted from the pull request are the same fact — so they share
+    one shape: ``id`` is what a caller stamps a finding with, and ``diff_hunk`` is
+    GitHub's own hunk text for the comment, the ``@@ … @@`` header and its lines,
+    which is what the app needs to render the comment the way GitHub does.
+    ``diff_hunk`` is ``None`` when GitHub returned no hunk for the comment.
+    """
+
+    id: int
+    diff_hunk: str | None
 
 
 class AppInstallation(BaseModel):

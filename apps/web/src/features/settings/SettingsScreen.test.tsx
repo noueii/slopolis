@@ -46,10 +46,10 @@ const CAPS: WorkspaceSettings = {
 afterEach(cleanup)
 
 /** Render from a successful read; every case below starts from the caps above. */
-function renderSettings(props: { onOpenRepositories?: () => void } = {}) {
+function renderSettings() {
   vi.mocked(api.getWorkspaceSettings).mockResolvedValue(CAPS)
   vi.mocked(api.updateWorkspaceSettings).mockResolvedValue(CAPS)
-  render(<SettingsScreen {...props} />)
+  render(<SettingsScreen />)
 }
 
 async function capField(label: string): Promise<HTMLInputElement> {
@@ -72,7 +72,7 @@ describe("SettingsScreen", () => {
 
     expect(screen.getByText("Session limits")).toBeTruthy()
     expect(screen.getByText("Queue concurrency")).toBeTruthy()
-    expect(screen.getByText("Access control")).toBeTruthy()
+    expect(screen.getByText("Membership")).toBeTruthy()
   })
 
   it("sends null when a cap is cleared back to unlimited", async () => {
@@ -172,16 +172,5 @@ describe("SettingsScreen", () => {
     expect((await screen.findByRole("alert")).textContent).toContain(
       "greater than or equal to 1",
     )
-  })
-
-  it("offers the repositories screen when that route is reachable", async () => {
-    const onOpenRepositories = vi.fn()
-    renderSettings({ onOpenRepositories })
-
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Open repositories" }),
-    )
-
-    expect(onOpenRepositories).toHaveBeenCalledTimes(1)
   })
 })

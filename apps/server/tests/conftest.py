@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest_asyncio
 from app.auth import GitHubProfile
+from app.config import AppSettings
 from app.deps import (
     get_arq_pool,
     get_current_user,
@@ -23,6 +24,7 @@ from app.deps import (
     get_optional_user,
     get_preflight_service,
     get_repo_access_checker,
+    get_settings_dep,
 )
 from app.main import create_app
 from app.services.live_check import CredentialClientPool, ManagedLlmClient
@@ -97,7 +99,7 @@ class FakeArqPool:
 
 
 class FakeGitHubClient:
-    """In-memory GitHub read surface used by the repositories router."""
+    """In-memory GitHub read surface used by the repository and inbox routers."""
 
     def __init__(
         self,
@@ -105,16 +107,27 @@ class FakeGitHubClient:
         *,
         details: dict[tuple[str, int], Any] | None = None,
         checks: dict[tuple[str, str], list[Any]] | None = None,
+        compares: dict[tuple[str, str, str], int] | None = None,
+        failing: set[str] | None = None,
     ) -> None:
         self._pulls = pulls or {}
         self._details = details or {}
         self._checks = checks or {}
+        #: Commit counts between two refs, keyed ``(repo, base, head)``. A pair the
+        #: fake does not hold is one GitHub cannot compare.
+        self._compares = compares or {}
+        #: Repositories GitHub refuses to answer for.
+        self.failing: set[str] = failing if failing is not None else set()
 
     async def list_open_pull_requests(self, full_name: str) -> list[Any]:
+        if full_name in self.failing:
+            raise GitHubError(f"{full_name} is unavailable")
         return self._pulls.get(full_name, [])
 
     async def get_pull_request(self, full_name: str, number: int) -> Any:
         """The single-pull-request read the route uses for diff size."""
+        if full_name in self.failing:
+            raise GitHubError(f"{full_name} is unavailable")
         detail = self._details.get((full_name, number))
         if detail is not None:
             return detail
@@ -124,7 +137,16 @@ class FakeGitHubClient:
         raise AssertionError(f"fake has no pull request {full_name}#{number}")
 
     async def list_check_runs(self, full_name: str, ref: str) -> list[Any]:
+        if full_name in self.failing:
+            raise GitHubError(f"{full_name} is unavailable")
         return self._checks.get((full_name, ref), [])
+
+    async def compare_commits(self, full_name: str, base: str, head: str) -> int:
+        """The commits between two refs, refused when the fake holds no comparison."""
+        count = self._compares.get((full_name, base, head))
+        if count is None:
+            raise GitHubNotFoundError(f"cannot compare {base}...{head} in {full_name}")
+        return count
 
 
 class FakeInstallationClients[Client]:
@@ -175,8 +197,8 @@ class FakeGateway:
         self.permissions = (
             permissions if permissions is not None else dict(WRITE_PERMISSIONS)
         )
-        #: The access override pre-flight asked each repo's check for (spec 10.10).
-        self.access_calls: list[tuple[str, str | None]] = []
+        #: The repositories whose access pre-flight checked (spec 10.2).
+        self.access_calls: list[tuple[str, bool, str]] = []
 
     async def resolve_pr(self, url: str) -> PrReference:
         if url not in self.refs:
@@ -192,9 +214,8 @@ class FakeGateway:
         *,
         private: bool,
         user_login: str,
-        required: str | None = None,
     ) -> bool:
-        self.access_calls.append((repo_full_name, required))
+        self.access_calls.append((repo_full_name, private, user_login))
         return self.access
 
     async def read_repo_file(self, repo_full_name: str, path: str) -> str | None:
@@ -213,14 +234,10 @@ class FakeWorkspace:
         model: tuple[str, str] | None = ("claude-sonnet-4", "Anthropic"),
         credential: bool = True,
         assigned: tuple[str, str] | None = None,
-        access: str | None = None,
     ) -> None:
         self.model = model
         self.credential = credential
         self.assigned = assigned
-        #: The repository access override this workspace reports, if any.
-        self.access = access
-        self.access_calls: list[str] = []
 
     async def default_model(self) -> tuple[str, str] | None:
         return self.model
@@ -230,10 +247,6 @@ class FakeWorkspace:
 
     async def model_assigned(self, role: str) -> tuple[str, str] | None:
         return self.assigned if self.assigned is not None else self.model
-
-    async def required_access(self, repo_full_name: str) -> str | None:
-        self.access_calls.append(repo_full_name)
-        return self.access
 
 
 class FakeAppInstallations:
@@ -615,6 +628,7 @@ async def build_harness(
         app_installations: FakeAppInstallations | None = None,
         oauth_client: FakeOAuthClient | None = None,
         repo_access: RepoAccessChecker | None = None,
+        settings: AppSettings | None = None,
     ) -> ApiHarness:
         app = create_app()
 
@@ -656,6 +670,10 @@ async def build_harness(
         if repo_access is not None:
             access = repo_access
             app.dependency_overrides[get_repo_access_checker] = lambda: access
+        # A test that needs a specific deployment configuration installs its own
+        # settings; without it the route reads the process-wide singleton.
+        if settings is not None:
+            app.dependency_overrides[get_settings_dep] = lambda: settings
 
         # Routes resolve a GitHub client per request, per installation. The
         # harness stands in the process-wide registry, or leaves it unset — the

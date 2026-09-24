@@ -19,6 +19,7 @@ from githubkit import GitHub, TokenAuthStrategy
 from githubkit.auth import AppAuthStrategy
 from githubkit_schemas.latest.models import (  # pyright: ignore[reportMissingTypeStubs]
     CheckRun,
+    CommitComparison,
     ContentFile,
     DiffEntry,
     FullRepository,
@@ -82,6 +83,7 @@ def _pull_body(**overrides: Any) -> dict[str, Any]:
         "changed_files": 5,
         "additions": 10,
         "deletions": 2,
+        "created_at": "2026-01-02T03:04:05Z",
     }
     defaults.update(overrides)
     return fixture(PullRequest, **defaults)
@@ -243,21 +245,55 @@ async def test_list_check_runs_returns_the_head_commits_runs(
     ]
 
 
+@respx.mock(base_url=_BASE)
+async def test_compare_commits_counts_and_is_cached(respx_mock: respx.Router) -> None:
+    """Given a comparison with three commits, the count is read once."""
+    route = respx_mock.get(f"/repos/{_OWNER}/{_NAME}/compare/base...head").mock(
+        return_value=httpx.Response(200, json=fixture(CommitComparison, total_commits=3))
+    )
+    client = _client()
+
+    first = await client.compare_commits(_REPO, "base", "head")
+    second = await client.compare_commits(_REPO, "base", "head")
+
+    assert (first, second) == (3, 3)
+    assert len(route.calls) == 1
+
+
+@respx.mock(base_url=_BASE)
+async def test_compare_commits_404_raises_not_found(respx_mock: respx.Router) -> None:
+    """Given SHAs GitHub cannot compare, the failure is the typed not-found."""
+    respx_mock.get(f"/repos/{_OWNER}/{_NAME}/compare/gone...head").mock(
+        return_value=httpx.Response(404, json={"message": "Not Found"})
+    )
+
+    with pytest.raises(GitHubNotFoundError):
+        await _client().compare_commits(_REPO, "gone", "head")
+
+
+@respx.mock(base_url=_BASE)
+async def test_list_open_pull_requests_carries_the_creation_time(
+    respx_mock: respx.Router,
+) -> None:
+    """Given a listing, each row carries when the pull request was opened."""
+    _mock_repo(respx_mock)
+    respx_mock.get(f"/repos/{_OWNER}/{_NAME}/pulls").mock(
+        return_value=httpx.Response(200, json=[_pull_body()])
+    )
+
+    pulls = await _client().list_open_pull_requests(_REPO)
+
+    assert pulls[0].created_at == "2026-01-02T03:04:05+00:00"
+
+
 @pytest.mark.parametrize(
-    ("private", "permission", "required", "expected"),
+    ("private", "permission", "expected"),
     [
-        (False, "read", None, False),
-        (False, "write", None, True),
-        (True, "read", None, True),
-        (True, "none", None, False),
-        (False, None, None, False),
-        # An override loosens a public repo from write to read.
-        (False, "read", "read", True),
-        (False, "none", "read", False),
-        # An override tightens a private repo from read to write.
-        (True, "read", "write", False),
-        (True, "write", "write", True),
-        (True, "admin", "write", True),
+        (False, "read", False),
+        (False, "write", True),
+        (True, "read", True),
+        (True, "none", False),
+        (False, None, False),
     ],
 )
 @respx.mock(base_url=_BASE)
@@ -265,30 +301,16 @@ async def test_user_can_trigger_policy(
     respx_mock: respx.Router,
     private: bool,
     permission: str | None,
-    required: str | None,
     expected: bool,
 ) -> None:
     """Given a privacy/permission pair, the trigger policy matches spec §4."""
     _mock_permission(respx_mock, permission)
 
     allowed = await _client().user_can_trigger(
-        _REPO, private=private, user_login="alice", required=required
+        _REPO, private=private, user_login="alice"
     )
 
     assert allowed is expected
-
-
-@respx.mock(base_url=_BASE)
-async def test_user_can_trigger_rejects_an_unknown_level(
-    respx_mock: respx.Router,
-) -> None:
-    """Given a required level outside the literals, it fails before any call."""
-    with pytest.raises(ValueError, match="required must be"):
-        await _client().user_can_trigger(
-            _REPO, private=False, user_login="alice", required="admin"
-        )
-
-    assert len(respx_mock.calls) == 0
 
 
 @respx.mock(base_url=_BASE)

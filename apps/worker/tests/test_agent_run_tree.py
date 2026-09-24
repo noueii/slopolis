@@ -16,7 +16,7 @@ from arq import Retry
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from worker.deps import SessionFactory
-from worker.jobs.agent_runs import DatabaseRunStore
+from worker.jobs.agent_runs import DatabaseRunStore, RunRecorder, TurnEventSink
 from worker.jobs.review_target import review_target
 from worker_fakes import (
     CATALOG_MODEL,
@@ -32,6 +32,8 @@ from slopolis_core.context import PrContext
 from slopolis_core.domain import SessionStatus, TargetStatus
 from slopolis_core.github.errors import GitHubAuthError, GitHubError
 from slopolis_core.harness import HarnessLevel
+from slopolis_core.llm.models import ChatMessage, CompletionResult
+from slopolis_core.llm.recording import TurnRecord
 from slopolis_db.models import AgentEventRow, AgentRun, ReviewSession, SessionTarget
 
 _FINDINGS_JSON = (
@@ -62,6 +64,33 @@ class _FailFirstContextReader(FakeReader):
         if self.calls == 1:
             raise GitHubError("context read failed")
         return await super().get_pr_context(repo_full_name, number)
+
+
+class _PromptRecordingLlm(FakeLlm):
+    """FakeLlm that keeps the messages it was sent, so a turn can be checked.
+
+    A review's prompt is composed inside the harness, below the run that owns the
+    turn, so what the client saw is the only evidence that the event carries that
+    prompt rather than the transcript the runtime hands its turn and the harness
+    ignores.
+    """
+
+    def __init__(self, responses: list[str]) -> None:
+        super().__init__(responses)
+        self.prompts: list[list[ChatMessage]] = []
+
+    async def complete(
+        self,
+        messages: list[ChatMessage],
+        *,
+        model: str,
+        max_tokens: int | None = None,
+        temperature: float = 0.0,
+    ) -> CompletionResult:
+        self.prompts.append(list(messages))
+        return await super().complete(
+            messages, model=model, max_tokens=max_tokens, temperature=temperature
+        )
 
 
 def _harness_for(
@@ -208,11 +237,13 @@ async def test_a_target_review_writes_the_whole_run_tree(
     assert pr_events[2].payload["tool_call_count"] == 1
 
     # ... the sub node is the reviewer's own run, ending in exactly one terminal
-    #     event whose payload matches its row
+    #     event whose payload matches its row. Its turn is recorded where the
+    #     call is made — inside the harness, before the loop's own step event
     sub_events = await _events(h, sub.id)
     assert _types(sub_events) == [
         "agent.spawned",
         "agent.started",
+        "agent.turn",
         "agent.step",
         "agent.message",
         "agent.finding",
@@ -220,6 +251,7 @@ async def test_a_target_review_writes_the_whole_run_tree(
         "agent.completed",
     ]
     assert sub_events[2].payload["model_id"] == CATALOG_MODEL
+    assert sub_events[3].payload["model_id"] == CATALOG_MODEL
     assert sub_events[-1].payload["status"] == sub.status == "done"
     assert sub_events[-1].payload["tokens_used"] == 15
     assert sub_events[-1].payload["finding_count"] == 2
@@ -518,3 +550,95 @@ async def test_a_retried_attempt_reopens_the_nodes_it_reuses(
     assert pr_runs[0].status == "done" and pr_runs[0].error is None
     # The root was reopened and announced starting again, exactly once per attempt
     assert _types(await _events(h, main.id)).count("agent.started") == 2
+
+
+async def test_a_review_records_the_call_it_made_as_a_turn(
+    session_factory: SessionFactory,
+) -> None:
+    # Given a target whose review will make exactly one model call
+    llm = _PromptRecordingLlm([_FINDINGS_JSON])
+    h = await seed_and_build(session_factory, llm=llm)
+
+    # When the job runs
+    await _run(h, h.seed.target_id)
+
+    # Then the reviewer run carries one turn, holding the prompt that was sent
+    runs = await _runs(h)
+    sub = next(run for run in runs if run.level == "sub")
+    turns = [e for e in await _events(h, sub.id) if e.type == "agent.turn"]
+    assert len(turns) == 1
+    payload = turns[0].payload
+    assert payload["messages"] == [
+        {"role": message.role, "content": message.content} for message in llm.prompts[0]
+    ]
+    assert payload["model_id"] == CATALOG_MODEL
+    assert payload["response"] == _FINDINGS_JSON
+    assert payload["prompt_tokens"] == 10
+    assert payload["completion_tokens"] == 5
+    assert payload["total_tokens"] == 15
+    assert payload["cost_usd"] == pytest.approx(0.002)
+    assert payload["truncated"] is False
+    assert payload["chars"] == sum(
+        len(message.content) for message in llm.prompts[0]
+    ) + len(_FINDINGS_JSON)
+
+    # ... and the PR node, which delegates rather than calls, records none
+    pr = next(run for run in runs if run.level == "pr")
+    assert "agent.turn" not in _types(await _events(h, pr.id))
+
+
+async def test_a_repair_retry_is_a_second_turn(session_factory: SessionFactory) -> None:
+    # Given a model that answers in prose first and in findings JSON second
+    llm = _PromptRecordingLlm(["I could not analyse this diff.", _FINDINGS_JSON])
+    h = await seed_and_build(session_factory, llm=llm)
+
+    # When the job runs
+    await _run(h, h.seed.target_id)
+
+    # Then both calls are recorded, in order, with the repair note between them
+    runs = await _runs(h)
+    sub = next(run for run in runs if run.level == "sub")
+    turns = [e for e in await _events(h, sub.id) if e.type == "agent.turn"]
+    assert [turn.payload["response"] for turn in turns] == [
+        "I could not analyse this diff.",
+        _FINDINGS_JSON,
+    ]
+    assert len(llm.prompts) == 2
+    assert llm.prompts[1][:1] == llm.prompts[0]
+    assert len(llm.prompts[1]) == len(llm.prompts[0]) + 1
+
+
+async def test_a_turn_outside_a_run_is_not_recorded(
+    session_factory: SessionFactory,
+) -> None:
+    """A call with no run to belong to — the pre-flight live check — writes nothing."""
+    # Given a seeded session and a sink called with nothing in context
+    h = await seed_and_build(session_factory)
+
+    async with h.session_factory() as db:
+        sink = TurnEventSink(RunRecorder(db))
+        await sink(
+            TurnRecord(
+                model_id=CATALOG_MODEL,
+                provider="litellm",
+                messages=[ChatMessage(role="user", content="ping")],
+                response="pong",
+                prompt_tokens=1,
+                completion_tokens=1,
+                total_tokens=2,
+                cost_usd=0.0,
+            )
+        )
+        await db.commit()
+
+    # Then no turn event exists anywhere in the session
+    async with h.session_factory() as db:
+        rows = await db.execute(
+            select(AgentEventRow)
+            .join(AgentRun, AgentRun.id == AgentEventRow.run_id)
+            .where(
+                AgentRun.session_id == h.seed.session_id,
+                AgentEventRow.type == "agent.turn",
+            )
+        )
+        assert list(rows.scalars().all()) == []

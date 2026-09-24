@@ -2,14 +2,14 @@
 
 Sessions are loaded with their targets, repositories, findings, and triggering
 user in one round trip. This module owns the eager-loading strategy and the
-per-target aggregate computation so the sessions and dashboard routers stay
+per-target aggregate computation so the sessions and inbox routers stay
 focused on shaping responses.
 
 It also owns the per-viewer read filter (spec 10.8 §Access): workspace membership
 does not imply repository access, so every session read narrows its targets to the
 repositories the *viewer* can read. The rule lives here, once, so the session
-list, the dashboard, the session detail, and the run-tree endpoints cannot drift
-apart on who may see what.
+list, the pull-request inbox, the session detail, and the run-tree endpoints
+cannot drift apart on who may see what.
 """
 
 from __future__ import annotations
@@ -25,8 +25,9 @@ from sqlalchemy.orm import selectinload
 from app.errors import ApiError
 from app.retry_actions import retry_actions
 from app.schemas import SessionTarget as SessionTargetSchema
-from app.serializers import serialize_target
+from app.serializers import serialize_finding, serialize_target
 from app.services.repo_access import RepoAccessChecker
+from slopolis_core.domain import SEVERITY_ORDER
 from slopolis_db.models import (
     Finding,
     Repository,
@@ -39,6 +40,7 @@ __all__ = [
     "TargetAccess",
     "accessible_views",
     "finding_counts_for",
+    "findings_for_targets",
     "load_session",
     "load_sessions",
     "repositories_for_targets",
@@ -47,6 +49,11 @@ __all__ = [
 ]
 
 _LIVE_STATUSES = ("queued", "running")
+
+#: Severity rank by the value a row stores. Read with ``.get(..., 0)`` rather
+#: than indexed, so a severity this build does not know still sorts instead of
+#: failing the whole read.
+_SEVERITY_RANK = {severity.value: rank for severity, rank in SEVERITY_ORDER.items()}
 
 
 def session_query() -> Select[tuple[ReviewSession]]:
@@ -202,6 +209,37 @@ async def finding_counts_for(
     return {target_id: count for target_id, count in rows}
 
 
+async def findings_for_targets(
+    db: AsyncSession, target_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, list[Finding]]:
+    """Return each target's findings, most severe first.
+
+    Most severe first, because that is the order a reader scans a review in, and
+    the rows carry no order of their own: one attempt writes them in a single
+    transaction, so ``created_at`` cannot tell them apart.
+    """
+    if not target_ids:
+        return {}
+    rows = list(
+        (
+            await db.scalars(select(Finding).where(Finding.target_id.in_(target_ids)))
+        ).all()
+    )
+    grouped: dict[uuid.UUID, list[Finding]] = {}
+    for row in rows:
+        grouped.setdefault(row.target_id, []).append(row)
+    for findings in grouped.values():
+        findings.sort(
+            key=lambda finding: (
+                -_SEVERITY_RANK.get(finding.severity, 0),
+                finding.path,
+                finding.line or 0,
+                finding.message,
+            )
+        )
+    return grouped
+
+
 async def repositories_for_targets(
     db: AsyncSession, targets: list[SessionTarget]
 ) -> dict[uuid.UUID, Repository]:
@@ -218,7 +256,11 @@ async def repositories_for_targets(
 
 
 async def serialize_targets(
-    db: AsyncSession, targets: list[SessionTarget]
+    db: AsyncSession,
+    targets: list[SessionTarget],
+    *,
+    with_findings: bool = False,
+    app_login: str | None = None,
 ) -> list[SessionTargetSchema]:
     """Serialize a session's targets with findings counts and repo refs.
 
@@ -226,8 +268,24 @@ async def serialize_targets(
     the retry button can say so before the user presses it; a live session never
     reaches GitHub for it, because a target that is not retryable needs no
     attempt read.
+
+    ``with_findings`` is for the session detail read alone: it embeds the findings
+    themselves, which is more than a page of sessions should ever carry, so the
+    list leaves it off. When it is on the count comes from the rows already in
+    hand, and the count query is skipped.
+
+    ``app_login`` names the author the detail read's findings carry; it is only
+    consulted when ``with_findings`` embeds them.
     """
-    counts = await finding_counts_for(db, [target.id for target in targets])
+    target_ids = [target.id for target in targets]
+    by_target = (
+        await findings_for_targets(db, target_ids) if with_findings else {}
+    )
+    counts = (
+        {target_id: len(rows) for target_id, rows in by_target.items()}
+        if with_findings
+        else await finding_counts_for(db, target_ids)
+    )
     repos = await repositories_for_targets(db, targets)
     actions = await retry_actions(db, targets)
     result: list[SessionTargetSchema] = []
@@ -235,12 +293,26 @@ async def serialize_targets(
         repository = repos.get(target.repository_id)
         if repository is None:
             continue
+        findings = (
+            [
+                serialize_finding(
+                    row,
+                    repository=repository,
+                    number=target.number,
+                    app_login=app_login,
+                )
+                for row in by_target.get(target.id, [])
+            ]
+            if with_findings
+            else None
+        )
         result.append(
             serialize_target(
                 target,
                 counts.get(target.id, 0),
                 repository,
                 retry_action=actions.get(target.id),
+                findings=findings,
             )
         )
     return result

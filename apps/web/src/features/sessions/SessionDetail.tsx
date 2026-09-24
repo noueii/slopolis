@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import {
   ArrowLeft,
   Clock,
-  ExternalLink,
   Loader2,
   RotateCcw,
   ShieldCheck,
@@ -22,6 +21,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { cn } from "@/lib/utils"
 import { RunTreePanel } from "./components/RunTreePanel"
 import { SessionStatusBadge } from "./components/SessionStatusBadge"
+import { SessionTargetRow } from "./components/SessionTargetRow"
 import {
   formatAbsoluteTime,
   formatCost,
@@ -202,45 +202,7 @@ function DetailBody({
         ) : (
           <div className="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
             {targets.map((target) => (
-              <div
-                key={target.id}
-                className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:gap-4"
-              >
-                <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <a
-                    href={target.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="flex items-center gap-1.5 font-mono text-xs text-foreground hover:text-accent"
-                  >
-                    {target.repository.fullName}#{target.number}
-                    {target.repository.private ? (
-                      <span className="rounded border border-border px-1 text-[9px] uppercase tracking-wider text-muted-foreground">
-                        private
-                      </span>
-                    ) : null}
-                    <ExternalLink className="size-3 text-muted-foreground/60" />
-                  </a>
-                  <span className="truncate text-[13px] text-muted-foreground">
-                    {target.title}
-                  </span>
-                </span>
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-2 sm:justify-end">
-                  <span className="text-2xs text-muted-foreground">
-                    {target.findingsCount} findings
-                  </span>
-                  <span className="tabular font-mono text-xs text-foreground/90">
-                    {formatTokens(target.tokens)}
-                  </span>
-                  <span className="tabular font-mono text-xs text-foreground/90">
-                    {formatCost(target.costUsd)}
-                  </span>
-                  <span className="tabular font-mono text-xs text-muted-foreground/80">
-                    {formatDuration(target.durationMs)}
-                  </span>
-                  <SessionStatusBadge status={target.status} />
-                </div>
-              </div>
+              <SessionTargetRow key={target.id} target={target} />
             ))}
           </div>
         )}

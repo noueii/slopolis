@@ -1,7 +1,12 @@
 import { RotateCw } from "lucide-react"
-import { useMemo } from "react"
+import { useMemo, useState } from "react"
 
-import type { AgentEventItem, AgentRunNode, SessionStatus } from "@/api/contract"
+import type {
+  AgentEventItem,
+  AgentRunNode,
+  AgentTurnTranscript,
+  SessionStatus,
+} from "@/api/contract"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -244,6 +249,77 @@ function RunEventRow({ event }: { event: AgentEventItem }) {
       <p className="text-[13px] leading-relaxed text-foreground/90">
         {view.detail}
       </p>
+      {view.transcript ? <RunTurnBody transcript={view.transcript} /> : null}
     </li>
+  )
+}
+
+/**
+ * Role chips for a turn's messages, reusing the pane's tone palette. An unknown
+ * role falls back to the neutral `system` chip rather than a bare label.
+ */
+const TURN_ROLE_STYLES: Record<string, string> = {
+  system: "border-border/80 bg-muted/70 text-muted-foreground",
+  user: "border-info/30 bg-info/10 text-info",
+  assistant: "border-success/30 bg-success/10 text-success",
+  tool: "border-warning/30 bg-warning/10 text-warning",
+}
+
+/**
+ * The prompt and raw response an `agent.turn` event captured (spec v2 11.3),
+ * folded under the row's digest line. Collapsed by default: a turn is a wall of
+ * text and the digest is what the reader scans, so the body opens only when the
+ * prompt itself is the thing being read. The block scrolls on its own so a long
+ * turn can never blow up the pane.
+ */
+function RunTurnBody({ transcript }: { transcript: AgentTurnTranscript }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="flex flex-col items-start gap-2">
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={() => setOpen((value) => !value)}
+      >
+        {open ? "Hide prompt" : "Show prompt"}
+      </Button>
+      {open ? (
+        <div className="flex max-h-80 w-full flex-col gap-3 overflow-auto rounded-lg border border-border/60 bg-muted/30 px-3 py-2">
+          {transcript.messages.map((message, index) => (
+            <div
+              key={`${message.role}-${index}`}
+              className="flex flex-col gap-1"
+            >
+              <Badge
+                variant="outline"
+                className={cn(
+                  "w-fit rounded px-1.5 py-px text-[9px] font-semibold uppercase tracking-wider",
+                  TURN_ROLE_STYLES[message.role] ?? TURN_ROLE_STYLES.system,
+                )}
+              >
+                {message.role}
+              </Badge>
+              <p className="whitespace-pre-wrap break-words font-mono text-2xs leading-relaxed text-foreground/90">
+                {message.content}
+              </p>
+            </div>
+          ))}
+          <div className="flex flex-col gap-1">
+            <span className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
+              Response
+            </span>
+            <p className="whitespace-pre-wrap break-words font-mono text-2xs leading-relaxed text-foreground/90">
+              {transcript.response ?? "No response text recorded."}
+            </p>
+          </div>
+          {transcript.truncated ? (
+            <p className="text-2xs leading-relaxed text-muted-foreground">
+              The stored copy was clipped at the 200,000-character cap, so this
+              prompt is not the whole request.
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
   )
 }

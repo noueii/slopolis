@@ -24,7 +24,7 @@ import asyncio
 import re
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
-from typing import Final, Protocol, runtime_checkable
+from typing import Final, Protocol, cast, runtime_checkable
 from uuid import UUID, uuid4
 
 from slopolis_core.harness.types import AgentEvent, EventType
@@ -46,6 +46,15 @@ _MAX_STRING_LEN: Final = 2000
 
 #: Suffix that marks a value as truncated, so truncation is visible downstream.
 _TRUNCATION_MARKER: Final = "...[truncated]"
+
+#: Cap on a turn's message and response strings (spec v2 11.3). A turn carries the
+#: prompt the model was sent, and a review prompt holds the PR context, so it is
+#: the one event that legitimately holds more than a digest — bounded all the
+#: same, because the cap is what keeps an event row from growing without limit.
+MAX_TURN_CHARS: Final = 200_000
+
+#: The turn keys allowed to carry more than a scalar: its transcript.
+_TURN_TEXT_KEYS: Final[frozenset[str]] = frozenset({"messages", "response"})
 
 #: Credential shapes common enough to be worth masking by value, not just by key.
 _SECRET_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
@@ -73,6 +82,19 @@ _ALLOWED_KEYS: Final[dict[EventType, frozenset[str]]] = {
         {"tool", "ok", "summary", "step", "call_id", "result_count"}
     ),
     EventType.MESSAGE: frozenset({"role", "summary", "chars"}),
+    EventType.TURN: frozenset(
+        {
+            "model_id",
+            "messages",
+            "response",
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "cost_usd",
+            "chars",
+            "truncated",
+        }
+    ),
     EventType.FINDING: frozenset(
         {"path", "line", "severity", "category", "message", "suggestion", "confidence"}
     ),
@@ -106,23 +128,51 @@ def _mask_secrets(value: str) -> str:
     return masked
 
 
-def _truncate(value: str) -> str:
-    """Clamp a string to the hard cap and mark it; idempotent on replay."""
-    if len(value) <= _MAX_STRING_LEN or value.endswith(_TRUNCATION_MARKER):
+def _truncate(value: str, cap: int = _MAX_STRING_LEN) -> str:
+    """Clamp a string to ``cap`` and mark it; idempotent on replay."""
+    if len(value) <= cap or value.endswith(_TRUNCATION_MARKER):
         return value
-    return value[:_MAX_STRING_LEN] + _TRUNCATION_MARKER
+    return value[:cap] + _TRUNCATION_MARKER
 
 
-def _redact_value(value: object) -> object:
+def _redact_messages(value: object) -> object:
+    """Mask and clamp a turn's message list, or drop it whole when malformed.
+
+    Half a transcript is worse than none: one unusable entry drops the whole
+    list, so a reader can never mistake a partial prompt for the one that was
+    sent.
+    """
+    if not isinstance(value, list):
+        return _DROP
+    safe: list[dict[str, str]] = []
+    for item in cast("list[object]", value):
+        if not isinstance(item, dict):
+            return _DROP
+        entry = cast("dict[str, object]", item)
+        role = entry.get("role")
+        content = entry.get("content")
+        if not isinstance(role, str) or not isinstance(content, str):
+            return _DROP
+        safe.append(
+            {"role": role, "content": _truncate(_mask_secrets(content), MAX_TURN_CHARS)}
+        )
+    return safe
+
+
+def _redact_value(value: object, *, key: str, turn: bool) -> object:
     """Return a safe scalar for an allow-listed key, or :data:`_DROP`.
 
-    Non-scalars (dicts, lists, model turns, transcripts) are dropped outright:
-    only strings, bools, ints, floats, and ``None`` can be typed fields here.
+    Non-scalars (dicts, lists, model turns, transcripts) are dropped outright
+    unless they are a turn's ``messages``: only strings, bools, ints, floats, and
+    ``None`` can be typed fields here.
     """
     if value is None or isinstance(value, (bool, int, float)):
         return value
     if isinstance(value, str):
-        return _truncate(_mask_secrets(value))
+        cap = MAX_TURN_CHARS if turn and key in _TURN_TEXT_KEYS else _MAX_STRING_LEN
+        return _truncate(_mask_secrets(value), cap)
+    if turn and key == "messages":
+        return _redact_messages(value)
     return _DROP
 
 
@@ -134,15 +184,17 @@ def redact(
     ``event_type`` selects the per-type allow-list; when omitted, the union of
     all allow-listed keys is used. Keys outside the allow-list, and values that
     are not scalars, are dropped. Strings are masked for credential shapes and
-    truncated to a hard cap. Raw model output, transcripts, and unknown fields
-    can therefore never reach an event.
+    truncated to a hard cap. A transcript therefore reaches an event only as an
+    ``agent.turn`` (spec v2 11.3), whose message and response strings are capped
+    at :data:`MAX_TURN_CHARS`; every other type still cannot carry one.
     """
     allowed = _UNION_KEYS if event_type is None else _ALLOWED_KEYS[event_type]
+    turn = event_type is EventType.TURN
     safe: dict[str, object] = {}
     for key, value in payload.items():
         if key not in allowed:
             continue
-        cleaned = _redact_value(value)
+        cleaned = _redact_value(value, key=key, turn=turn)
         if cleaned is _DROP:
             continue
         safe[key] = cleaned

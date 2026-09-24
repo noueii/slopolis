@@ -8,6 +8,7 @@ schema-complete payload from the githubkit model so nothing is hand-maintained.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any, TypeGuard
 
 import httpx
@@ -25,7 +26,7 @@ from githubkit_schemas.latest.models import (  # pyright: ignore[reportMissingTy
 from test_github_helpers import fixture
 
 from slopolis_core.github.errors import GitHubError
-from slopolis_core.github.models import InlineComment
+from slopolis_core.github.models import InlineComment, ReviewComment
 from slopolis_core.github.publisher import CHECK_RUN_NAME, SUMMARY_MARKER, GitHubPublisher
 
 _BASE = "https://api.github.com"
@@ -37,6 +38,13 @@ _NUMBER = 7
 _APP_ID = 987
 _OTHER_APP_ID = 654
 _COMMENTS_URL = f"/repos/{_OWNER}/{_NAME}/issues/{_NUMBER}/comments"
+
+#: A hunk shaped like GitHub's own: the ``@@`` header plus the lines the comment
+#: is anchored to, which is the text GitHub returns with a review comment.
+_HUNK = "@@ -1,3 +1,4 @@\n def main():\n+    boom()\n     return 1"
+
+#: A second hunk, so an assertion can tell which comment a hunk was read from.
+_OTHER_HUNK = "@@ -7,2 +7,3 @@\n-    return 1\n+    return 2"
 
 
 def _publisher(*, app_id: int | None = _APP_ID) -> GitHubPublisher:
@@ -64,6 +72,11 @@ def _request_body(request: httpx.Request) -> dict[str, Any]:
     payload: Any = json.loads(request.content)
     assert _is_str_dict(payload)
     return payload
+
+
+def _links(comments: Sequence[ReviewComment | None]) -> list[tuple[int, str | None] | None]:
+    """Each comment as the pair a caller stamps — its id and its hunk — or ``None``."""
+    return [None if comment is None else (comment.id, comment.diff_hunk) for comment in comments]
 
 
 @respx.mock(base_url=_BASE)
@@ -101,9 +114,9 @@ async def test_upsert_summary_comment_edits_when_id_supplied(respx_mock: respx.R
 
 
 @respx.mock(base_url=_BASE)
-async def test_post_inline_comments_payload_and_ids(respx_mock: respx.Router) -> None:
-    """Given two findings, the publisher posts each with the PR anchor and returns ids."""
-    bodies = [fixture(PullRequestReviewComment, id=i) for i in (201, 202)]
+async def test_post_inline_comments_payload_and_created_comments(respx_mock: respx.Router) -> None:
+    """Given two findings, the publisher posts each with the PR anchor and returns it."""
+    bodies = [fixture(PullRequestReviewComment, id=i, diff_hunk=_HUNK) for i in (201, 202)]
     sent: list[dict[str, Any]] = []
 
     def route(request: httpx.Request) -> httpx.Response:
@@ -118,9 +131,11 @@ async def test_post_inline_comments_payload_and_ids(respx_mock: respx.Router) ->
         InlineComment(path="b.py", line=9, body="second"),
     ]
 
-    ids = await _publisher().post_inline_comments(_REPO, _NUMBER, comments, _COMMIT)
+    posted = await _publisher().post_inline_comments(_REPO, _NUMBER, comments, _COMMIT)
 
-    assert ids == [201, 202]
+    # The id is what the caller stamps the finding with and the hunk is what it
+    # renders above the comment: both come from the comment GitHub created.
+    assert _links(posted) == [(201, _HUNK), (202, _HUNK)]
     assert mocked.call_count == 2
     assert sent[0] == {
         "body": "first",
@@ -285,7 +300,13 @@ _BOT_LOGIN = "slopolis-dev[bot]"
 
 
 def _review_comment(
-    comment_id: int, *, path: str, line: int | None, body: str, author: str = _BOT_LOGIN
+    comment_id: int,
+    *,
+    path: str,
+    line: int | None,
+    body: str,
+    author: str = _BOT_LOGIN,
+    hunk: str = _HUNK,
 ) -> dict[str, Any]:
     """One review comment as GitHub serves it: located, authored, and bodied."""
     return fixture(
@@ -294,6 +315,7 @@ def _review_comment(
         path=path,
         line=line,
         body=body,
+        diff_hunk=hunk,
         user=fixture(SimpleUser, login=author),
     )
 
@@ -323,7 +345,13 @@ async def test_reconcile_adopts_this_apps_comment_and_repairs_its_body(
                     author="github-actions[bot]",
                 ),
                 _review_comment(303, path="a.py", line=9, body="ours, but another line"),
-                _review_comment(304, path="a.py", line=3, body="ours, in an older build's words"),
+                _review_comment(
+                    304,
+                    path="a.py",
+                    line=3,
+                    body="ours, in an older build's words",
+                    hunk=_OTHER_HUNK,
+                ),
             ],
         )
     )
@@ -337,7 +365,9 @@ async def test_reconcile_adopts_this_apps_comment_and_repairs_its_body(
 
     adopted = await _identity_publisher().reconcile_inline_comments(_REPO, _NUMBER, comments)
 
-    assert adopted == [304, None]
+    # The adopted comment carries the hunk GitHub holds for it — the one from the
+    # listing, not any default — and the finding with no comment has none.
+    assert _links(adopted) == [(304, _OTHER_HUNK), None]
     assert _request_body(repaired.calls.last.request) == {"body": "ours, as it is rendered now"}
 
 
@@ -359,7 +389,7 @@ async def test_reconcile_leaves_a_matching_body_alone(respx_mock: respx.Router) 
         _REPO, _NUMBER, [InlineComment(path="a.py", line=3, body=body)]
     )
 
-    assert adopted == [401]
+    assert _links(adopted) == [(401, _HUNK)]
     assert not patched.called
 
 
@@ -388,7 +418,7 @@ async def test_reconcile_pairs_findings_and_comments_on_one_line_in_order(
 
     # The third finding has no comment of its own yet: it must be posted, not
     # stamped with a comment that belongs to a different finding.
-    assert adopted == [501, 502, None]
+    assert _links(adopted) == [(501, _HUNK), (502, _HUNK), None]
 
 
 @respx.mock(base_url=_BASE)
@@ -410,7 +440,7 @@ async def test_reconcile_keeps_the_adoption_when_the_repair_is_refused(
             _REPO, _NUMBER, [InlineComment(path="a.py", line=3, body="current")]
         )
 
-    assert adopted == [601]
+    assert _links(adopted) == [(601, _HUNK)]
     assert any("could not repair" in record.getMessage() for record in caplog.records)
 
 
@@ -429,7 +459,7 @@ async def test_reconcile_ignores_a_comment_that_no_longer_has_a_line(
         _REPO, _NUMBER, [InlineComment(path="a.py", line=3, body="outdated")]
     )
 
-    assert adopted == [None]
+    assert _links(adopted) == [None]
 
 
 @respx.mock(base_url=_BASE)
@@ -460,7 +490,7 @@ async def test_reconcile_adopts_nothing_without_the_apps_login(respx_mock: respx
         _REPO, _NUMBER, [InlineComment(path="a.py", line=3, body="boom")]
     )
 
-    assert adopted == [None]
+    assert _links(adopted) == [None]
     assert not route.called
 
 

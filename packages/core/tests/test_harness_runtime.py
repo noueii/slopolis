@@ -32,12 +32,14 @@ from slopolis_core.harness import (
     ModelChoice,
     ModelResolver,
     Policy,
+    RunRef,
     RunStore,
     StaticResolver,
     Tool,
     ToolCall,
     ToolSpec,
     agent_spec,
+    current_run,
     model_roles,
 )
 
@@ -894,3 +896,48 @@ async def test_orchestrators_offer_spawn_and_read_tools(role: str) -> None:
     offered = [tool_spec.name for tool_spec in llm.calls_for("do the work")[0].tools]
     assert offered == spec.tools
     assert SPAWN_TOOL in offered
+
+
+class _RunProbe(ScriptedLlm):
+    """A scripted model that also reports the run it was called inside."""
+
+    def __init__(self, script: Mapping[str, list[AssistantTurn]]) -> None:
+        super().__init__(script)
+        self.seen: list[RunRef | None] = []
+
+    async def complete(
+        self, *, model_id: str, messages: list[Message], tools: list[ToolSpec]
+    ) -> AssistantTurn:
+        self.seen.append(current_run())
+        return await super().complete(model_id=model_id, messages=messages, tools=tools)
+
+
+async def test_a_run_publishes_itself_to_the_calls_made_inside_it() -> None:
+    # Given an agent whose model call happens deep inside the run
+    llm = _RunProbe({"review the diff": [AssistantTurn(text=_PLAIN_FINDINGS)]})
+    harness = _build(llm)
+    session_id, target_id = uuid4(), uuid4()
+
+    # When it runs
+    await harness.runtime.run(
+        agent_spec("reviewer"),
+        task="review the diff",
+        session_id=session_id,
+        target_id=target_id,
+        depth=2,
+    )
+
+    # Then the call could name the run that made it (spec v2 11.3)
+    row = harness.store.row("reviewer")
+    assert len(llm.seen) == 1
+    ref = llm.seen[0]
+    assert ref is not None
+    assert ref.run_id == row.run_id
+    assert ref.session_id == session_id
+    assert ref.target_id == target_id
+    assert ref.level is HarnessLevel.SUB
+    assert ref.role == "reviewer"
+    assert ref.model_id == "model-review"
+
+    # And nothing stays bound once the run returns
+    assert current_run() is None

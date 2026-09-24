@@ -24,6 +24,7 @@ from worker.jobs.review_target import review_target
 from worker.jobs.slots import SLOT_WAIT_FOREVER, SlotGate
 from worker_fakes import (
     CATALOG_MODEL,
+    DIFF_HUNK,
     FINDING_PATH,
     HEAD_BRANCH,
     HEAD_SHA,
@@ -310,8 +311,12 @@ async def test_happy_path_persists_and_publishes(session_factory: SessionFactory
     assert findings[3].severity == "error"
     assert findings[3].posted is True
     assert findings[3].github_comment_id == 201
+    # ... with the hunk GitHub returned for that comment, which is what the app
+    # renders above it; the finding with no comment has none
+    assert findings[3].diff_hunk == DIFF_HUNK
     assert findings[None].posted is False
     assert findings[None].github_comment_id is None
+    assert findings[None].diff_hunk is None
 
     # ... the summary carries the session link, status, and usage line
     assert len(h.seed.publisher.summaries) == 1
@@ -1152,12 +1157,15 @@ async def test_publish_adopts_the_comment_that_is_already_there(
     assert posted[0].line == 5
 
     # ... and both findings are stamped: the adopted one with the comment that was
-    # already on the pull request, the posted one with its own new id
+    # already on the pull request, the posted one with its own new id — each with
+    # the hunk GitHub holds for that comment
     findings = {row.line: row for row in await _findings(h)}
     assert findings[3].posted is True
     assert findings[3].github_comment_id == 777
+    assert findings[3].diff_hunk == DIFF_HUNK
     assert findings[5].posted is True
     assert findings[5].github_comment_id == 201
+    assert findings[5].diff_hunk == DIFF_HUNK
     assert (await _target(h)).status == "done"
 
 

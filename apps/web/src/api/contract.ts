@@ -89,6 +89,55 @@ export interface WorkspaceSettings {
  */
 export type WorkspaceSettingsUpdate = Partial<WorkspaceSettings>
 
+/**
+ * One review finding on a pull request (spec 10.6). `suggestion` is a literal
+ * replacement for the cited line(s), so it renders as code, not as advice.
+ * `commentUrl`, `author` and `postedAt` are all non-null exactly when the
+ * finding posted an inline comment — one `posted` flag on the row decides the
+ * three together, so they can never disagree.
+ */
+export interface Finding {
+  /** Repository-relative path of the cited file, e.g. `src/queue/worker.py`. */
+  path: string
+  /** Line in the PR's head revision, or `null` when the finding cites none. */
+  line: number | null
+  severity: Severity
+  /** What the finding is about, e.g. `security`, `performance`. */
+  category: string
+  message: string
+  /** Literal replacement code for the cited line(s), or `null` for none. */
+  suggestion: string | null
+  /**
+   * Permalink to the inline comment this finding posted on the pull request,
+   * or `null` when it posted none: a finding with no diff line, one below the
+   * repository's severity threshold, and a refused or failed publish all go
+   * into the rolling summary comment instead.
+   */
+  commentUrl: string | null
+  /**
+   * The login the comment is posted as, e.g. `slopolis-dev[bot]`, read from
+   * the configured `GITHUB_APP_SLUG` rather than looked up: rendering a
+   * session costs no GitHub call (spec 10.7). `null` when the finding posted
+   * nothing, and also when no slug is configured — the UI then does not name
+   * an author.
+   */
+  author: string | null
+  /**
+   * When the app wrote the comment, not when the review ran: the finding row's
+   * `updated_at`, which the publisher stamps in the same write that records
+   * `posted` and `github_comment_id` — so a retry that posts the comment later
+   * moves it. `null` when the finding posted nothing.
+   */
+  postedAt: string | null
+  /**
+   * GitHub's own hunk text for the comment: the `@@ -a,b +c,d @@` header
+   * followed by lines each prefixed `+`, `-` or a space — exactly what GitHub
+   * prints above a review comment, so the card shows the code the comment is
+   * about. `null` when the finding posted nothing.
+   */
+  diffHunk: string | null
+}
+
 /** One pull request within a session. */
 export interface SessionTarget {
   id: string
@@ -107,6 +156,12 @@ export interface SessionTarget {
    */
   retryAction?: "review" | "publish" | null
   findingsCount: number
+  /**
+   * The target's findings, most severe first. Only `GET /api/sessions/{id}`
+   * fills them — the list leaves this null, since a page of sessions would
+   * otherwise carry every finding of every session.
+   */
+  findings?: Finding[] | null
   tokens: number
   costUsd: number
   durationMs?: number
@@ -699,4 +754,27 @@ export interface AgentEventItem {
 export interface AgentEventPage {
   items: AgentEventItem[]
   nextSeq: number | null
+}
+
+/**
+ * One request message inside an `agent.turn` event. `role` is the gateway's
+ * role for the message: `system`, `user`, `assistant`, or `tool`.
+ */
+export interface AgentTurnMessage {
+  role: string
+  content: string
+}
+
+/**
+ * The prompt/response pair an `agent.turn` event carries (spec v2 11.3): the
+ * exact messages the run sent to the gateway and the raw completion it got
+ * back, so a prompt can be improved from what was really sent rather than from
+ * a redacted digest. Both sides are clipped at the server's 200,000-character
+ * cap; `truncated` says the stored copy lost text. `response` is `null` when
+ * the call recorded no completion text.
+ */
+export interface AgentTurnTranscript {
+  messages: AgentTurnMessage[]
+  response: string | null
+  truncated: boolean
 }

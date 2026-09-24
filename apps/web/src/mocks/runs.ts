@@ -57,6 +57,77 @@ const FINDING_PATHS = [
   "src/http/retry.ts",
 ]
 
+/** The system message every mocked review call opens with. */
+const TURN_SYSTEM_PROMPT =
+  "You review one pull request for correctness, security, and missing tests. Report only findings you can point at a line for."
+
+/** A small JSON-shaped completion, the way a reviewer role returns one. */
+const TURN_RESPONSE = [
+  "{",
+  '  "findings": [',
+  "    {",
+  '      "path": "src/auth/token.ts",',
+  '      "line": 43,',
+  '      "severity": "medium",',
+  '      "message": "The refreshed token is used before it is checked for null."',
+  "    }",
+  "  ]",
+  "}",
+].join("\n")
+
+/** The request a sub-agent's call carries; a diff hunk when it reviews a PR. */
+function turnUserText(target: SessionTarget | null): string {
+  if (!target) {
+    return [
+      "Synthesise every target's findings into one report.",
+      "",
+      "Return only findings the individual reviews did not already cover.",
+    ].join("\n")
+  }
+  return [
+    `Review ${target.repository.fullName}#${target.number}: ${target.title}`,
+    "",
+    "```diff",
+    "@@ -41,6 +41,9 @@ export async function refresh(token: string) {",
+    "-  const next = await fetchToken(token)",
+    "+  const next = await fetchToken(token, { skewSeconds: 30 })",
+    '+  if (!next) throw new TokenError("refresh returned nothing")',
+    "   return next",
+    " }",
+    "```",
+  ].join("\n")
+}
+
+/**
+ * One `agent.turn` payload: the exact messages a call sent to the gateway and
+ * the raw completion it got back. Deliberately small — the mock only has to
+ * prove the pane can render a real prompt, not replay a whole diff. The token
+ * and char counts stay internally consistent and priced at the session's rate.
+ */
+function turnPayload(
+  session: ReviewSession,
+  target: SessionTarget | null,
+): Record<string, unknown> {
+  const userText = turnUserText(target)
+  const promptTokens = 1_600 + (userText.length % 900)
+  const completionTokens = 120 + (userText.length % 60)
+  const totalTokens = promptTokens + completionTokens
+  return {
+    model_id: session.model,
+    messages: [
+      { role: "system", content: TURN_SYSTEM_PROMPT },
+      { role: "user", content: userText },
+    ],
+    response: TURN_RESPONSE,
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: totalTokens,
+    cost_usd: costOf(session, totalTokens),
+    chars: 2_600 + userText.length,
+    truncated: false,
+  }
+}
+
 const SUB_OBJECTIVES: Record<string, (target: SessionTarget) => string> = {
   "context-gatherer": (target) =>
     `Gather the diff and surrounding context for #${target.number}`,
@@ -582,6 +653,11 @@ function buildSubRun({
     iso(startedMs + 1_000),
   )
   log.add(
+    "agent.turn",
+    turnPayload(session, target),
+    iso(startedMs + 1_200),
+  )
+  log.add(
     "agent.tool_call",
     {
       tool: "read_diff",
@@ -942,6 +1018,7 @@ function buildLiveFrames(
       },
       at(),
     )
+    push(id, parent.id, "agent.turn", turnPayload(session, target), at())
     push(id, parent.id, "agent.finding", liveFinding(seed, role), at())
     push(
       id,

@@ -7,7 +7,7 @@ Versioned, feature-per-file specification for slopolis. Each version lives in it
 | Version | Status | Overview | Features |
 |---|---|---|---|
 | v1 | MVP approved; later phases scoped | [v1/overview.md](./v1/overview.md) | [01 account + GitHub App](./v1/features/01-account-github-app.md) · [02 provider & model config](./v1/features/02-provider-model-config.md) · [03 pre-flight](./v1/features/03-preflight-validation.md) · [04 session form](./v1/features/04-session-creation.md) · [05 queue + worker](./v1/features/05-queue-worker.md) · [06 review harness](./v1/features/06-review-harness.md) · [07 publish](./v1/features/07-publish-github.md) · [08 history + live status](./v1/features/08-session-history.md) · [09 usage + cost](./v1/features/09-usage.md) · [10 settings + caps](./v1/features/10-workspace-settings.md) |
-| v2 | V1.1 built; V1.2–V1.4 deferred | [v2/overview.md](./v2/overview.md) | [01 supervisor + sub-agents](./v2/features/01-supervisor-subagents.md) · [02 Magentic orchestration](./v2/features/02-magentic-orchestration.md) (parked) |
+| v2 | V1.1 built; V1.2–V1.4 deferred | [v2/overview.md](./v2/overview.md) | [01 supervisor + sub-agents](./v2/features/01-supervisor-subagents.md) · [02 Magentic orchestration](./v2/features/02-magentic-orchestration.md) (parked) · [03 turn transcripts](./v2/features/03-turn-transcripts.md) |
 | v3 | Implemented; wiring caveats tracked in §7 | [v3/overview.md](./v3/overview.md) | [01 pull-request inbox](./v3/features/01-pull-request-inbox.md) |
 
 ## v1 features
@@ -23,8 +23,8 @@ from an implementation. Update the column when a feature lands.
 | 10.4 | Session creation form | [04-session-creation.md](./v1/features/04-session-creation.md) | yes — submit, auto-naming, per-target enqueue, the session's `main` agent run created at submit · **entry surface replaced by v3's inbox** (selecting rows, not pasting links) |
 | 10.5 | Queue + worker execution | [05-queue-worker.md](./v1/features/05-queue-worker.md) | yes — ARQ worker consumes `review_target`, one job per PR target, cancellation via the API; each job owns that target's PR orchestrator run |
 | 10.6 | Review harness (single agent) | [06-review-harness.md](./v1/features/06-review-harness.md) | yes — API-only context with hard caps (files, diff lines) and a per-run tool budget; it is the `reviewer` sub-agent of the v2 run tree |
-| 10.7 | Publish to GitHub + app results | [07-publish-github.md](./v1/features/07-publish-github.md) | yes — rolling summary comment, inline comments, check run |
-| 10.8 | Session history, permalink, live status | [08-session-history.md](./v1/features/08-session-history.md) | yes — `/sessions/{id}` is a real SPA route, SSE carries session + `agent` events, the run tree and its event replay have endpoints, and every session read is filtered by the viewer's own repository access · **the dashboard surface is replaced by v3's inbox**, which shows live progress on the PR row itself |
+| 10.7 | Publish to GitHub + app results | [07-publish-github.md](./v1/features/07-publish-github.md) | yes — rolling summary comment, inline comments, check run; the session page renders each target's findings as the comments they are, linking every posted one to its GitHub comment |
+| 10.8 | Session history, permalink, live status | [08-session-history.md](./v1/features/08-session-history.md) | yes — `/sessions/{id}` is a real SPA route, SSE carries session + `agent` events, the run tree and its event replay have endpoints, the detail read carries each target's findings with their comment links, and every session read is filtered by the viewer's own repository access · **the dashboard surface is replaced by v3's inbox**, which shows live progress on the PR row itself |
 | 10.9 | Usage and cost tracking | [09-usage.md](./v1/features/09-usage.md) | yes — API totals, breakdowns by model / repository / user, a daily series, and the Usage screen |
 | 10.10 | Workspace settings: caps and limits | [10-workspace-settings.md](./v1/features/10-workspace-settings.md) | yes — admin-only session caps enforced at submit (before pre-flight), per-repo / per-installation run limits leased through Redis by the worker, and the Settings screen |
 
@@ -34,6 +34,7 @@ from an implementation. Update the column when a feature lands.
 |---|---|---|---|
 | 11.1 | Harness V1 — hierarchical supervisor with sub-agents | [v2/features/01-supervisor-subagents.md](./v2/features/01-supervisor-subagents.md) | **V1.1 built** — run rows and the event log are persisted and streamed, the tree and its replay are served, the UI renders the live tree; V1.2–V1.4 open (see gaps) |
 | 11.2 | Harness V2 — Magentic orchestration | [v2/features/02-magentic-orchestration.md](./v2/features/02-magentic-orchestration.md) | parked |
+| 11.3 | Turn transcripts — the raw request and response of every model call | [v2/features/03-turn-transcripts.md](./v2/features/03-turn-transcripts.md) | build now — the `agent.turn` event (request messages, raw response, usage) rides the existing event log and its emitter lands at the `LlmClient.complete` seam |
 
 ## v3 features
 

@@ -334,7 +334,16 @@ export const sessionsHandlers = [
         `No session with id "${String(params.id)}".`,
       )
     }
-    return HttpResponse.json(withLiveTargets(found))
+    // The detail read is the only one that carries findings: a list page would
+    // otherwise ship every finding of every session it returns.
+    const live = withLiveTargets(found)
+    return HttpResponse.json({
+      ...live,
+      targets: live.targets.map((target) => ({
+        ...target,
+        findings: dataset.findings[target.id] ?? [],
+      })),
+    })
   }),
 
   /**

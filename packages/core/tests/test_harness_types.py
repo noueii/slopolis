@@ -77,8 +77,8 @@ def test_enum_wire_values() -> None:
     assert {aspect.value for aspect in Aspect} == {"context", "logic", "security", "tests"}
     assert {event.value for event in EventType} == {
         "agent.spawned", "agent.started", "agent.step", "agent.tool_call",
-        "agent.tool_result", "agent.message", "agent.finding", "agent.completed",
-        "agent.failed", "agent.cancelled",
+        "agent.tool_result", "agent.message", "agent.turn", "agent.finding",
+        "agent.completed", "agent.failed", "agent.cancelled",
     }
 
 

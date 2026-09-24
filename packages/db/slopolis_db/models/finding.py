@@ -43,6 +43,14 @@ class Finding(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     suggestion: Mapped[str | None] = mapped_column(Text, nullable=True)
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
     github_comment_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    #: GitHub's own hunk for the finding's review comment — the ``@@ … @@`` header
+    #: and its ``+``/``-``/context lines, exactly the text GitHub renders above the
+    #: comment. Kept as GitHub wrote it rather than recomputed from the diff the
+    #: review read, because showing the comment "the way GitHub does" is only true
+    #: of GitHub's own text. Null when the finding has no comment, which includes
+    #: every comment posted before this column existed: nothing the app stored
+    #: could reconstruct a hunk for those.
+    diff_hunk: Mapped[str | None] = mapped_column(Text, nullable=True)
     posted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     target: Mapped[SessionTarget] = relationship(back_populates="findings")

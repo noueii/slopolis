@@ -7,11 +7,14 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from app.config import get_app_settings
 from app.routers.sessions import QUEUE_STALE_AFTER_S
 from app.services.repo_access import RepoAccessChecker, RepoAccessUnavailable
 from sqlalchemy import select
 
+from slopolis_core.settings import get_settings as get_core_settings
 from slopolis_db.models import (
+    Finding,
     Repository,
     ReviewSession,
     SessionTarget,
@@ -44,6 +47,160 @@ async def test_get_session_returns_targets(
     assert body["status"] == "queued"
     assert body["prompt"] == "Focus on security"
     assert body["targets"][0]["headBranch"] == "fix/branch"
+
+
+async def test_get_session_carries_its_targets_findings(
+    seeded: Any, session_factory: Any, build_harness: Any
+) -> None:
+    # Given a session whose target carries three findings: two the publisher
+    # posted as inline comments, each with the hunk GitHub shows above it, and
+    # one it never got to post — no diff line, so nowhere to anchor a comment
+    hunk_a = "@@ -8,7 +8,9 @@ def load()\n context\n-old = read()\n+index = items[0]\n context"
+    hunk_b = "@@ -1,4 +1,5 @@\n import os\n+MAX = 10\n context"
+    async with session_factory() as session:
+        target = await session.scalar(
+            select(SessionTarget).where(SessionTarget.session_id == seeded.session_id)
+        )
+        repository = await session.get(Repository, seeded.repository_id)
+        assert target is not None and repository is not None
+        session.add_all(
+            [
+                Finding(
+                    target_id=target.id,
+                    path="src/a.py",
+                    line=10,
+                    severity="error",
+                    category="correctness",
+                    message="unguarded index",
+                    confidence=0.9,
+                    github_comment_id=501,
+                    posted=True,
+                    diff_hunk=hunk_a,
+                ),
+                Finding(
+                    target_id=target.id,
+                    path="src/b.py",
+                    line=4,
+                    severity="info",
+                    category="style",
+                    message="name the constant",
+                    confidence=0.9,
+                    github_comment_id=502,
+                    posted=True,
+                    diff_hunk=hunk_b,
+                ),
+                Finding(
+                    target_id=target.id,
+                    path="src/c.py",
+                    line=None,
+                    severity="warning",
+                    category="performance",
+                    message="repeated scan",
+                    confidence=0.9,
+                    posted=False,
+                ),
+            ]
+        )
+        await session.commit()
+        posted = {
+            "src/a.py": (
+                f"https://github.com/{repository.full_name}/pull/{target.number}"
+                "#discussion_r501"
+            ),
+            "src/b.py": (
+                f"https://github.com/{repository.full_name}/pull/{target.number}"
+                "#discussion_r502"
+            ),
+        }
+    harness: ApiHarness = await build_harness(user_id=seeded.user_id)
+
+    # When the session detail is fetched
+    response = await harness.client.get(f"/api/sessions/{seeded.session_id}")
+
+    # Then the target carries its findings most severe first, each linking the
+    # comment it was posted as — and nothing when it was never posted
+    assert response.status_code == 200
+    findings = response.json()["targets"][0]["findings"]
+    assert [finding["severity"] for finding in findings] == [
+        "error",
+        "warning",
+        "info",
+    ]
+    assert [finding["path"] for finding in findings] == [
+        "src/a.py",
+        "src/c.py",
+        "src/b.py",
+    ]
+    assert [finding["commentUrl"] for finding in findings] == [
+        posted["src/a.py"],
+        None,
+        posted["src/b.py"],
+    ]
+    # ... each posted finding names no author — this deployment configures no
+    # App slug — but dates the comment the publisher wrote and carries the hunk
+    # GitHub renders above it; the unposted one carries none of the four
+    by_path = {finding["path"]: finding for finding in findings}
+    for path in ("src/a.py", "src/b.py"):
+        assert by_path[path]["author"] is None
+        assert by_path[path]["postedAt"] is not None
+    assert by_path["src/a.py"]["diffHunk"] == hunk_a
+    assert by_path["src/b.py"]["diffHunk"] == hunk_b
+    assert by_path["src/c.py"]["author"] is None
+    assert by_path["src/c.py"]["postedAt"] is None
+    assert by_path["src/c.py"]["diffHunk"] is None
+
+    # ... while a page of sessions carries no findings at all: the list read
+    # must not ship every finding of every session
+    listed = await harness.client.get("/api/sessions")
+    assert listed.status_code == 200
+    targets = [
+        target for item in listed.json()["items"] for target in item["targets"]
+    ]
+    assert targets
+    assert all(target["findings"] is None for target in targets)
+
+
+async def test_get_session_names_the_configured_app_as_comment_author(
+    seeded: Any, session_factory: Any, build_harness: Any, monkeypatch: Any
+) -> None:
+    # Given a session whose target carries one posted finding, and a deployment
+    # that knows the App's slug
+    async with session_factory() as session:
+        target = await session.scalar(
+            select(SessionTarget).where(SessionTarget.session_id == seeded.session_id)
+        )
+        assert target is not None
+        session.add(
+            Finding(
+                target_id=target.id,
+                path="src/a.py",
+                line=10,
+                severity="error",
+                category="correctness",
+                message="unguarded index",
+                confidence=0.9,
+                github_comment_id=501,
+                posted=True,
+            )
+        )
+        await session.commit()
+
+    core = get_core_settings().model_copy(
+        update={"github_app_slug": "slopolis-test"}
+    )
+    monkeypatch.setattr("app.config.get_core_settings", lambda: core)
+    harness: ApiHarness = await build_harness(
+        user_id=seeded.user_id, settings=get_app_settings()
+    )
+
+    # When the session detail is fetched
+    response = await harness.client.get(f"/api/sessions/{seeded.session_id}")
+
+    # Then the finding names the configured App as the comment's author — read
+    # from configuration, never a GitHub lookup
+    assert response.status_code == 200
+    findings = response.json()["targets"][0]["findings"]
+    assert [finding["author"] for finding in findings] == ["slopolis-test[bot]"]
 
 
 async def test_get_unknown_session_is_404(

@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest_asyncio
 from app.auth import GitHubProfile
+from app.config import AppSettings
 from app.deps import (
     get_arq_pool,
     get_current_user,
@@ -23,6 +24,7 @@ from app.deps import (
     get_optional_user,
     get_preflight_service,
     get_repo_access_checker,
+    get_settings_dep,
 )
 from app.main import create_app
 from app.services.live_check import CredentialClientPool, ManagedLlmClient
@@ -626,6 +628,7 @@ async def build_harness(
         app_installations: FakeAppInstallations | None = None,
         oauth_client: FakeOAuthClient | None = None,
         repo_access: RepoAccessChecker | None = None,
+        settings: AppSettings | None = None,
     ) -> ApiHarness:
         app = create_app()
 
@@ -667,6 +670,10 @@ async def build_harness(
         if repo_access is not None:
             access = repo_access
             app.dependency_overrides[get_repo_access_checker] = lambda: access
+        # A test that needs a specific deployment configuration installs its own
+        # settings; without it the route reads the process-wide singleton.
+        if settings is not None:
+            app.dependency_overrides[get_settings_dep] = lambda: settings
 
         # Routes resolve a GitHub client per request, per installation. The
         # harness stands in the process-wide registry, or leaves it unset — the

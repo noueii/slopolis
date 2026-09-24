@@ -15,7 +15,7 @@ from worker.credentials import ResolvedCredential
 
 from slopolis_core.context import PrContext
 from slopolis_core.github.errors import GitHubNotFoundError
-from slopolis_core.github.models import GitHubPullRequest, InlineComment
+from slopolis_core.github.models import GitHubPullRequest, InlineComment, ReviewComment
 from slopolis_core.llm.models import ChatMessage, CompletionResult
 
 FINDING_PATH = "src/a.py"
@@ -28,12 +28,16 @@ CATALOG_PROVIDER = "openai"
 #: The workspace credential a test links to the catalog model when it wants one.
 CREDENTIAL_BASE_URL = "https://byok.example"
 CREDENTIAL_KEY = "sk-workspace-credential"
+#: A hunk shaped like GitHub's own: the ``@@`` header plus the lines the comment
+#: is anchored to, which is what the publisher carries back for a comment.
+DIFF_HUNK = "@@ -1,4 +1,5 @@\n def main():\n-    return 1\n+    boom()\n+    return 1"
 
 __all__ = [
     "CATALOG_MODEL",
     "CATALOG_PROVIDER",
     "CREDENTIAL_BASE_URL",
     "CREDENTIAL_KEY",
+    "DIFF_HUNK",
     "FINDING_PATH",
     "HEAD_BRANCH",
     "HEAD_SHA",
@@ -248,6 +252,9 @@ class FakePublisher:
     #: The next id a posted comment is given, so one publish that posts several
     #: comments stamps each finding with its own id, the way GitHub would.
     next_inline_id: int = 201
+    #: The hunk GitHub returns with every comment this fake posts or lists. Set it
+    #: to ``None`` to model a comment GitHub gave no hunk for.
+    inline_diff_hunk: str | None = DIFF_HUNK
 
     def _refuse(self) -> None:
         if self.fail_with is not None:
@@ -268,7 +275,7 @@ class FakePublisher:
 
     async def post_inline_comments(
         self, repo_full_name: str, number: int, comments: list[InlineComment], commit_id: str
-    ) -> list[int]:
+    ) -> list[ReviewComment]:
         self._refuse()
         if self.fail_inline_after is not None:
             threshold, error = self.fail_inline_after
@@ -276,23 +283,31 @@ class FakePublisher:
             if already_posted >= threshold:
                 raise error
         self.inlines.append((repo_full_name, number, comments, commit_id))
-        created = [self.next_inline_id + index for index in range(len(comments))]
+        created = [
+            ReviewComment(id=self.next_inline_id + index, diff_hunk=self.inline_diff_hunk)
+            for index in range(len(comments))
+        ]
         self.next_inline_id += len(comments)
         return created
 
     async def reconcile_inline_comments(
         self, repo_full_name: str, number: int, comments: list[InlineComment]
-    ) -> list[int | None]:
+    ) -> list[ReviewComment | None]:
         """Adopt a seeded comment per path and line, in the order each was posted."""
         self.reconciliations.append((repo_full_name, number, comments))
         if self.reconcile_fail_with is not None:
             raise self.reconcile_fail_with
         self._refuse()
         available = {key: list(ids) for key, ids in self.existing_inline.items()}
-        adopted: list[int | None] = []
+        adopted: list[ReviewComment | None] = []
         for comment in comments:
             listed = available.setdefault((comment.path, comment.line), [])
-            adopted.append(listed.pop(0) if listed else None)
+            comment_id = listed.pop(0) if listed else None
+            adopted.append(
+                None
+                if comment_id is None
+                else ReviewComment(id=comment_id, diff_hunk=self.inline_diff_hunk)
+            )
         return adopted
 
     async def upsert_check_run(

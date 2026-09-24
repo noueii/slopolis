@@ -499,6 +499,55 @@ describe("SessionDetail run tree", () => {
     expect(within(row).getByText("$0.02")).toBeDefined()
   })
 
+  it("reads a streamed turn's prompt in the node detail, without a reload", async () => {
+    mockApi(LIVE_TREE)
+
+    render(<SessionDetail sessionId={SESSION_ID} onBack={vi.fn()} />)
+
+    const tree = await screen.findByRole("region", { name: "Agent run tree" })
+    fireEvent.click(
+      within(tree).getByRole("button", {
+        name: /logic-reviewer — Review control flow/,
+      }),
+    )
+
+    act(() => {
+      MockEventSource.instances[0].emit("agent", {
+        id: "live_turn",
+        runId: "run_sub_running",
+        parentRunId: "run_pr",
+        seq: 9,
+        type: "agent.turn",
+        payload: {
+          model_id: "claude-sonnet-4",
+          messages: [
+            { role: "system", content: "You review one pull request." },
+            { role: "user", content: "Review the diff: +guard the input" },
+          ],
+          response: '{"findings": []}',
+          prompt_tokens: 900,
+          completion_tokens: 40,
+          total_tokens: 940,
+          cost_usd: 0.004,
+          chars: 78,
+          truncated: false,
+        },
+        createdAt: "2026-09-20T09:05:00.000Z",
+      })
+    })
+
+    const detail = screen.getByRole("region", { name: "Run details" })
+    expect(await within(detail).findByText(/Model turn/)).toBeDefined()
+
+    fireEvent.click(within(detail).getByRole("button", { name: "Show prompt" }))
+
+    expect(within(detail).getByText("You review one pull request.")).toBeDefined()
+    expect(
+      within(detail).getByText("Review the diff: +guard the input"),
+    ).toBeDefined()
+    expect(within(detail).getByText('{"findings": []}')).toBeDefined()
+  })
+
   it("reads a requeued session's finished runs as the previous attempt", async () => {
     const createdAt = new Date(Date.now() - 4 * 60_000).toISOString()
     mockApi(REQUEUED_TREE, {

@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import CAMEL
 from app.retry_actions import RetryAction
-from slopolis_core.domain import SessionStatus, TargetStatus
+from slopolis_core.domain import SessionStatus, Severity, TargetStatus
 
 __all__ = [
     "AgentEventItem",
@@ -32,6 +32,7 @@ __all__ = [
     "CreateReviewRequest",
     "CreatedSession",
     "FilterOption",
+    "Finding",
     "ModelCatalog",
     "ModelImportRequest",
     "ModelImportResponse",
@@ -177,6 +178,35 @@ class MeResponse(UserRef):
 # --- sessions ---------------------------------------------------------------
 
 
+class Finding(WireModel):
+    """One review finding the harness produced for a target (spec 10.6).
+
+    ``comment_url`` is the GitHub comment this finding was posted as, and is
+    ``null`` when it never got one: no diff line to anchor a comment to, a
+    severity below the repository's threshold (those are summarized instead), or
+    a publish that was refused or failed. The UI reads it to link a finding back
+    to where it landed on the pull request.
+    """
+
+    path: str
+    line: int | None = None
+    severity: Severity
+    category: str
+    message: str
+    suggestion: str | None = None
+    comment_url: str | None = None
+    #: The login the comment is posted as (``"<slug>[bot]"``), non-null exactly
+    #: when the finding has a comment — the same condition as ``comment_url``.
+    author: str | None = None
+    #: When the app wrote that comment, non-null under the same condition.
+    posted_at: dt.datetime | None = None
+    #: GitHub's own hunk for that comment — the ``@@ … @@`` header and its lines,
+    #: exactly the text GitHub renders above the comment — so the app can show the
+    #: code a finding is about. Non-null under the same condition as the rest of
+    #: the comment fields; null for a comment posted before the app recorded hunks.
+    diff_hunk: str | None = None
+
+
 class SessionTarget(WireModel):
     """One pull request within a session, with per-target aggregates."""
 
@@ -193,6 +223,10 @@ class SessionTarget(WireModel):
     #: not retryable, so there is nothing for the button to promise.
     retry_action: RetryAction | None = None
     findings_count: int = 0
+    #: The findings themselves, most severe first. Only the session detail read
+    #: fills this; the list leaves it ``null``, because a page of sessions must
+    #: not carry every finding of every session.
+    findings: list[Finding] | None = None
     tokens: int = 0
     cost_usd: float = 0.0
     duration_ms: int | None = None
